@@ -53,7 +53,10 @@ jobs:
           git add version.properties
           git commit -m "bump version to $NEWNAME (asset change) [skip ci]"
           git tag "v$NEWNAME"
-          git push origin "v$NEWNAME"
+          # push BOTH the commit (so main carries the new version for the
+          # next bump) and the tag (which triggers the build + release).
+          # The commit message carries [skip ci] to avoid re-triggering.
+          git push origin main "v$NEWNAME"
           echo "did=1" >> "$GITHUB_OUTPUT"
           echo "new version: $NEWNAME"
 
