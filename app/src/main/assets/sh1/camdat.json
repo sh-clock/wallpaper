@@ -40,7 +40,7 @@
     "flashlightOn": true,
     "psxWobble": true,
     "dither": true,
-    "particles": true,
+    "particles": false,
     "engine": true
    },
    "tracks": [
