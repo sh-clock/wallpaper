@@ -11,8 +11,15 @@ android {
         applicationId 'com.sh1.poc_SH1_dkk2p'
         minSdk 24
         targetSdk 34
-        versionCode 4
-        versionName '4.0'
+        // v7 (task 7): the version rides version.properties at the repo
+        // root; CI bumps the minor digit on every asset change (see
+        // .github/workflows/android.yml) - 1.7.30 -> 1.7.31. versionCode is
+        // the monotonic integer form (1.7.30 -> 10730).
+        def vprops = new Properties()
+        def vfile = rootProject.file('version.properties')
+        if (vfile.exists()) vfile.withInputStream { vprops.load(it) }
+        versionCode (vprops.getProperty('versionCode', '10730') as Integer)
+        versionName vprops.getProperty('versionName', '1.7.30')
         ndk { abiFilters 'arm64-v8a' }
         externalNativeBuild {
             cmake {

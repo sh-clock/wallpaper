@@ -122,6 +122,12 @@
  * (maps/particle.c): streak = VRAM (768, u10..13, v112..128) 4bpp,
  * splash = (768, u16..31, v112..127) 4bpp, cluts = (768, 104..111). */
 #include "rain_tim_data.h"
+/* embedded LENS FLARE sprites + CLUTs (from the original BG_ETC.TIM) —
+ * v26 SH1X v3: the 2 core quads + 3rd quad + 16 streaks + 3 ghosts of
+ * shLensFlareEffect_Draw (gfx/lens_flare.c:296-487) sample BG_ETC sheet
+ * windows (clut rows (192,5/6/7) NTSC, tpage 44/76); extracted by
+ * tools/extract_flare_tim.py from the SAME engine file. */
+#include "flare_tim_data.h"
 /* the engine's VERBATIM sine LUT (g_SineTable from libkmath.s) — v8:
  * Math_Sin/Math_Cos are RAW 4096-entry lookups (no interpolation); needed
  * for the weather-transition sine driver (Particle_SystemUpdate) and the
@@ -538,6 +544,13 @@ static double jnum(const JValue *obj, const char *key, double def) {
 static int jint(const JValue *obj, const char *key, int def) {
     const JValue *v = jget(obj, key);
     return (v && v->type == JV_NUM) ? (int)v->num : def;
+}
+static int jintb(const JValue *obj, const char *key, int def) {
+    /* v27: SH1X fields accept JSON booleans too (isExterior/enabled/
+     * alternate are emitted as true/false by the ripper; jint's strict
+     * JV_NUM test silently took the default for them) */
+    const JValue *v = jget(obj, key);
+    return (v && (v->type == JV_NUM || v->type == JV_BOOL)) ? (int)v->num : def;
 }
 static const char *jstr(const JValue *obj, const char *key, const char *def) {
     const JValue *v = jget(obj, key);
@@ -1123,6 +1136,11 @@ typedef struct {
                                 instance (-1 = not tagged: legacy GLB)      */
     int addSeq;               /* v24: engine add slot (WorldMap_Draw order)  */
     int isBillboard;          /* v24: node tagged as billboard anchor mesh    */
+    int animIdx;              /* v26.3: index into Sh1x.anims driving this
+                                 item's rotation (by node name = engine
+                                 WorldObject model name), -1 = none      */
+    int animInst;             /* v27: instance index within the anim (the
+                                 engine's per-copy phase/index i)          */
 } DrawItem;
 
 typedef struct {
@@ -1143,6 +1161,66 @@ typedef struct {
     Sh1xBillboard *billboards;
     Sh1xSubchunkRange *subchunkRanges;
 } Sh1xBuffer;
+/* ---- v3 engine FX blocks (docs/SH1X_EXTRAS_V3_FX.md; absent = off) ---- */
+typedef struct {
+    int enabled;
+    float illumination;             /* water plane height, meters          */
+    float minX, maxX, minZ, maxZ;    /* zone box, meters                    */
+} Sh1xWaterZone;
+typedef struct {
+    int dx, dz;                     /* grid delta to this neighbor         */
+    char room[16];                  /* neighbor room name (probe file)      */
+} Sh1xMapLinkNb;
+typedef struct {
+    int driver;                     /* 0 spin 1 fanArray 2 tvNoise 3 translate */
+    char object[16];
+    float pos[3];                   /* engine meters (y-down)               */
+    float rot0[3];
+    float rate;                     /* spin rngBase deg | fan 90 | transl .14*/
+    float rngBase; int rngMask;     /* spin verbatim rng params             */
+    int bladeCount, alternate;      /* fanArray                              */
+    unsigned lcgA, lcgXorA, lcgB, lcgXorB;   /* tvNoise LCG constants       */
+    int durationShift, durationBase;
+    int chunkGate[2];               /* PLAYER_IN_MAP_CHUNK gate (x, z)      */
+    int chunkGateAlt[2];            /* v27: OR-form '5|6' second alternative */
+    int hasChunkGate;
+    int eventGate;                  /* v27: Savegame event gate (0=none)    */
+    int axis;                       /* 0 x 1 y 2 z                           */
+    float cur[3];                   /* live driver state (rot/pos meters)    */
+    unsigned lcgS1, lcgS2;          /* tvNoise live LCG state               */
+    int tvChannel, tvTimer;         /* tvNoise channel state machine        */
+    float rattleD;                  /* doorRattle angular velocity          */
+    float kick, restAngle, angVelMax;/* dampedSwing / choreo params          */
+    /* ---- v27: RAW-UNIT swing family (engine Q12 angle ints, 4096=360deg) */
+    int rawVy;                      /* live rotation, raw units              */
+    int rawVel;                     /* doorRattle D | kickSwing vel | damped angVel */
+    int rawVyFloor, rawAngAccel, rawAngVelFloor;  /* dampedSwing verbatim  */
+    int rawKickVel, rawOpenLimit, rawBounceHi;
+    int rawSettle, rawRebound;      /* kickSwing verbatim (map1_s03)         */
+    int kickPhase;                  /* kickSwing: 0 armed 1 kick 2 bounce    */
+    int gated;                      /* v27: driver currently gated OFF       */
+    int sharedLeader;               /* v27: index of the sharedRot leader anim */
+    int count;                      /* v27: multi-instance count             */
+    /* lightFlicker (map1_s05.c:371-396 verbatim, raw Q12 state) */
+    int flT0, flT1, flPer0, flPer1, flAmp;
+    float flBase, flAmpA, flAmpB;
+    int flRampThresh;
+    /* movement drivers (raw Q12 meters / Q12 angle accumulators) */
+    int mvMaster, mvMaster2, mvWrap, mvWrapCount;
+    int mvPend[4], mvPendVel[4];    /* ferrisWheel cabin pendulum states    */
+    int mvVel;                      /* gravityScatter fall velocity          */
+    int mvState;                    /* stoneChoreo state / cutscene sub-state */
+    int mvTimer;                    /* stoneChoreo/translate accum           */
+    int posPerInstN;                /* fanArray posed positions (glTF m)     */
+    float posPerInst[16][3];
+    int rotY180From;                /* fanArray: i>=this gets +180 deg y     */
+} Sh1xPropAnim;
+typedef struct {
+    char tag[8];
+    int chunkX, chunkZ, activeChunks, isExterior;
+    Sh1xMapLinkNb nbs[8];
+    int nNbs;
+} Sh1xMapLink;
 typedef struct {
     int chunkX, chunkZ;            /* s_IpdHeader s8 @2/@3 (fixed s8!)     */
     int subcell[5][5][2];          /* [z][x] = (start, count) into order   */
@@ -1151,6 +1229,18 @@ typedef struct {
     int nBuffers;
     Sh1xBuffer *bufs;
     int hasExtras;                 /* 0 = no SH1X in the GLB (old GLB)     */
+    /* v3 FX (all optional — zeroed = feature off, v2 behavior) */
+    int hasEnvEffects;             /* 1 = effectTexFlag present            */
+    int envFlagIsWaterRefract;      /* DR/DRU shimmer flag                  */
+    Sh1xWaterZone waterZones[4];    /* s_WaterZone, max 4 (decomp has <=2)  */
+    int nWaterZones;
+    Sh1xMapLink mapLink;
+    int hasMapLink;
+    Sh1xPropAnim anims[64];          /* v26.2: full catalog (see ripper) */
+    int nAnims;
+    float userLightOffset[3];       /* Game_FlashlightAttribsSet local      */
+    float userLightRot[3];          /* degrees (pitch, yaw, roll)           */
+    int hasUserLight;
 } Sh1x;
 
 static void sh1x_free(Sh1x *sx) {
@@ -1167,6 +1257,17 @@ static void sh1x_free(Sh1x *sx) {
  * structural problem the room falls back to the legacy all-items path
  * with extras ot_base where present, which is still engine-correct for
  * layering — only the subcell window degenerates to "everything").     */
+/* v27: prop-anim runtime globals ------------------------------------- */
+static int   g_animsDemo = 0;          /* --anims-demo: event gates SET  */
+static float g_sh1xLightFlicker = 1.0f;/* lightFlicker live multiplier   */
+
+static int sh_sin_q12(int angle) {
+    /* engine Math_Sin: Q3.12 angle (4096 = full turn) -> Q19.12 sine
+     * ([-4096, 4096]); g_SineTable is a plain sine table. */
+    return (int)(sinf((float)(angle & 0xFFF) * (float)(2.0 * M_PI / 4096.0))
+                 * 4096.0f);
+}
+
 static void sh1x_load(Sh1x *sx, const JValue *json) {
     memset(sx, 0, sizeof(*sx));
     const JValue *scenes = jarr(json, "scenes");
@@ -1261,6 +1362,243 @@ static void sh1x_load(Sh1x *sx, const JValue *json) {
                 sx->bufs[b].subchunkCount = ns;
         }
         sx->hasExtras = 1;
+    }
+
+    /* ---- v3 FX blocks (SH1X version 3; all optional; absent = off) ---- */
+    const JValue *ee = jget(sh, "envEffects");
+    if (ee && ee->type == JV_OBJ) {
+        sx->hasEnvEffects = 1;
+        const char *fl = jstr(ee, "effectTexFlag", "");
+        sx->envFlagIsWaterRefract = !strcmp(fl, "WaterRefract");
+    }
+    const JValue *wz = jarr(sh, "waterZones");
+    int nwz = jcount(wz);
+    for (int k = 0; k < nwz && k < 4; k++) {
+        const JValue *z = jat(wz, k);
+        if (!z) continue;
+        sx->waterZones[sx->nWaterZones].enabled = jintb(z, "enabled", 0);
+        sx->waterZones[sx->nWaterZones].illumination = (float)jnum(z, "illumination", 0.0);
+        sx->waterZones[sx->nWaterZones].minX = (float)jnum(z, "minX", 0.0);
+        sx->waterZones[sx->nWaterZones].maxX = (float)jnum(z, "maxX", 0.0);
+        sx->waterZones[sx->nWaterZones].minZ = (float)jnum(z, "minZ", 0.0);
+        sx->waterZones[sx->nWaterZones].maxZ = (float)jnum(z, "maxZ", 0.0);
+        sx->nWaterZones++;
+    }
+    const JValue *ml = jget(sh, "mapLink");
+    if (ml && ml->type == JV_OBJ) {
+        sx->hasMapLink = 1;
+        snprintf(sx->mapLink.tag, sizeof(sx->mapLink.tag), "%s",
+                 jstr(ml, "tag", ""));
+        sx->mapLink.chunkX = jint(ml, "chunkX", 0);
+        sx->mapLink.chunkZ = jint(ml, "chunkZ", 0);
+        sx->mapLink.activeChunks = jint(ml, "activeChunks", 4);
+        sx->mapLink.isExterior = jintb(ml, "isExterior", 0);
+        const JValue *nbs = jarr(ml, "neighbors");
+        int nnb = jcount(nbs);
+        for (int k = 0; k < nnb && k < 8; k++) {
+            const JValue *n = jat(nbs, k);
+            if (!n) continue;
+            sx->mapLink.nbs[sx->mapLink.nNbs].dx = jint(n, "dx", 0);
+            sx->mapLink.nbs[sx->mapLink.nNbs].dz = jint(n, "dz", 0);
+            snprintf(sx->mapLink.nbs[sx->mapLink.nNbs].room, 16, "%s",
+                     jstr(n, "room", ""));
+            sx->mapLink.nNbs++;
+        }
+    }
+    const JValue *pa = jarr(sh, "propAnims");
+    int npa = jcount(pa);
+    for (int k = 0; k < npa && k < 64; k++) {
+        const JValue *e = jat(pa, k);
+        if (!e) continue;
+        Sh1xPropAnim *a = &sx->anims[sx->nAnims];
+        memset(a, 0, sizeof(*a));
+        snprintf(a->object, sizeof(a->object), "%s", jstr(e, "object", ""));
+        const char *drv = jstr(e, "driver", "");
+        if (!strcmp(drv, "spin") || !strcmp(drv, "spinRng") ||
+            !strcmp(drv, "spinConst"))   a->driver = 0;
+        else if (!strcmp(drv, "fanArray")) a->driver = 1;
+        else if (!strcmp(drv, "tvNoise"))  a->driver = 2;   /* LCG core ticks;
+                                                            paint deferred */
+        else if (!strcmp(drv, "translate")) a->driver = 3;
+        else if (!strcmp(drv, "doorRattle")) a->driver = 4;
+        else if (!strcmp(drv, "dampedSwing")) a->driver = 5;
+        else if (!strcmp(drv, "kickSwing")) a->driver = 8;
+        else if (!strcmp(drv, "gravityScatter")) a->driver = 9;
+        else if (!strcmp(drv, "stoneChoreo")) a->driver = 10;
+        else if (!strcmp(drv, "lightFlicker")) a->driver = 11;
+        else if (!strcmp(drv, "sineBob")) a->driver = 12;
+        else if (!strcmp(drv, "carouselSpin")) a->driver = 13;
+        else if (!strcmp(drv, "ferrisWheel")) a->driver = 14;
+        else if (!strcmp(drv, "lissajousOrbit")) a->driver = 15;
+        else if (!strcmp(drv, "slideDoor")) a->driver = 16;
+        else if (!strcmp(drv, "rngWalk")) a->driver = 17;
+        else if (!strcmp(drv, "fallOnce")) a->driver = 18;
+        else if (!strcmp(drv, "binSpin")) a->driver = 19;
+        else if (!strcmp(drv, "scrollBelt")) a->driver = 20;
+        else if (!strcmp(drv, "cutscene"))  a->driver = 7;  /* idle default */
+        else continue;                    /* unknown driver: not played */
+        const JValue *p = jarr(e, "pos");
+        if (p && p->count >= 3) {
+            a->pos[0] = (float)jat(p, 0)->num;
+            a->pos[1] = (float)jat(p, 1)->num;
+            a->pos[2] = (float)jat(p, 2)->num;
+        }
+        const JValue *r0 = jarr(e, "rot0");
+        if (r0 && r0->count >= 3) {
+            a->rot0[0] = (float)jat(r0, 0)->num;
+            a->rot0[1] = (float)jat(r0, 1)->num;
+            a->rot0[2] = (float)jat(r0, 2)->num;
+        }
+        a->rate = (float)jnum(e, "rate", jnum(e, "rngBase", 0.0));
+        a->rngBase = (float)jnum(e, "rngBase", -180.0);
+        a->rngMask = jint(e, "rngMask", 0x1FF);
+        a->rattleD = 0;                   /* doorRattle kick state          */
+        a->kick = (float)jnum(e, "kick", 0.0);
+        a->restAngle = (float)jnum(e, "rest", jnum(e, "restAngle", 0.0));
+        a->angVelMax = (float)jnum(e, "angVelMax", 0.0);
+        /* v27 raw-unit swing params (engine Q12 angle ints, 4096=360deg) */
+        a->rawVyFloor  = jint(e, "vyFloorRaw", 0);
+        a->rawAngAccel = jint(e, "angAccelRaw", -113);
+        a->rawAngVelFloor = jint(e, "angVelFloorRaw", -56);
+        a->rawKickVel  = jint(e, "kickVelRaw", -128);
+        a->rawOpenLimit = jint(e, "openLimitRaw", -1920);
+        a->rawBounceHi = jint(e, "bounceHiRaw", -1791);
+        a->rawSettle  = jint(e, "settleRaw", -1790);
+        a->rawRebound = jint(e, "reboundVelRaw", 32);
+        a->kickPhase = 0;
+        a->sharedLeader = -1;
+        a->count = jint(e, "count", jint(e, "arms", 1));
+        /* lightFlicker verbatim (map1_s05.c:371-396) */
+        a->flBase = (float)jnum(e, "base", 1.35);
+        a->flAmpA = (float)jnum(e, "ampA", 0.9);
+        a->flAmpB = (float)jnum(e, "ampB", 0.6);
+        a->flRampThresh = jint(e, "rampThreshRaw", 262144);
+        { const JValue *ra = jarr(e, "rerollA");
+            /* rerollA may arrive as [lo,hi] or a legacy scalar (hi) */
+            if (ra && ra->count >= 2) { a->flAmp = 32; (void)jat(ra,1); }
+            else { a->flAmp = 32; } }
+        a->flT0 = 0; a->flT1 = 0; a->flPer0 = 0; a->flPer1 = 0;
+        /* movement driver params */
+        a->mvMaster = 0; a->mvMaster2 = 0; a->mvWrap = 0; a->mvWrapCount = 0;
+        a->mvVel = 0; a->mvState = 0; a->mvTimer = 0;
+        for (int q = 0; q < 4; q++) { a->mvPend[q] = 0; a->mvPendVel[q] = 0; }
+        a->posPerInstN = 0;
+        a->rotY180From = jint(e, "rotY180From", 7);
+        { const JValue *ppi = jarr(e, "posPerInst");
+            int n = jcount(ppi);
+            for (int q = 0; q < n && q < 16; q++) {
+                const JValue *pp = jat(ppi, q);
+                if (pp && pp->count >= 3) {
+                    a->posPerInst[q][0] = (float)jat(pp, 0)->num;
+                    a->posPerInst[q][1] = (float)jat(pp, 1)->num;
+                    a->posPerInst[q][2] = (float)jat(pp, 2)->num;
+                    a->posPerInstN++;
+                }
+            }
+            if (a->driver == 1 && !a->posPerInstN && n > 0)
+                a->driver = 7;   /* fanArray w/o per-inst pos: no draw */
+        }
+        a->bladeCount = jint(e, "bladeCount", 16);
+        a->alternate = jintb(e, "alternate", 0);
+        a->lcgA = (unsigned)jint(e, "lcgA", 0x7169AC35);
+        a->lcgXorA = (unsigned)jint(e, "lcgXorA", 0xA547B39E);
+        a->lcgB = (unsigned)jint(e, "lcgB", 0x892D719C);
+        a->lcgXorB = (unsigned)jint(e, "lcgXorB", 0xC65A4B97);
+        a->durationShift = jint(e, "durationShift", 5);
+        a->durationBase = jint(e, "durationBase", 0x555);
+        a->eventGate = jint(e, "eventGate", 0);
+        const JValue *cg = jarr(e, "chunkGate");
+        a->hasChunkGate = 0;
+        if (cg && cg->count >= 2) {
+            /* v27: elements are ints OR 'N|M' strings (the engine's
+             * PLAYER_IN_MAP_CHUNK_Z(5)||PLAYER_IN_MAP_CHUNK_Z(6) forms —
+             * e.g. map0_s00_2.c:1259-1262). A JV_STR ->num is 0 (the
+             * v26 defect: '5|6' parsed to 0). */
+            for (int q = 0; q < 2; q++) {
+                const JValue *v = jat(cg, q);
+                if (!v) continue;
+                if (v->type == JV_STR) {
+                    const char *s = v->str ? v->str : "";
+                    int v0 = 0, v1 = 0;
+                    if (sscanf(s, "%d|%d", &v0, &v1) >= 1) {
+                        a->chunkGate[q] = v0;
+                        a->chunkGateAlt[q] = v1;
+                        a->hasChunkGate = 1;
+                    }
+                } else {
+                    a->chunkGate[q] = (int)v->num;
+                    a->hasChunkGate = 1;
+                }
+            }
+            if (!a->hasChunkGate) { a->chunkGate[0] = -9999; a->chunkGate[1] = -9999; }
+        } else { a->chunkGate[0] = -9999; a->chunkGate[1] = -9999; }
+        const char *ax = jstr(e, "axis", "z");
+        a->axis = !strcmp(ax, "x") ? 0 : !strcmp(ax, "y") ? 1 : 2;
+        /* live state init (verbatim drivers start at rot0/pos) */
+        a->cur[0] = a->rot0[0];
+        a->cur[1] = a->rot0[1];
+        a->cur[2] = a->rot0[2];
+        a->rawVy = (int)(a->rot0[1] * 4096.0f / 360.0f);
+        a->rawVel = 0;
+        /* v27: the dampedSwing demo start = the post-event pose (the
+         * engine's vy=91 raw is set when EventFlag_168 fires; fresh
+         * saves start at 0 and the driver is cutscene-gated). */
+        if (a->driver == 5 && g_animsDemo)
+            a->rawVy = jint(e, "postEventVyRaw", 91);
+        a->lcgS1 = 0; a->lcgS2 = 0;      /* engine seeds D_800DB918 static 0 */
+        a->tvChannel = 0; a->tvTimer = 0;
+        sx->nAnims++;
+    }
+    /* v27: sharedRot leader resolution — followers use the leader's live
+     * state verbatim (the engine adds WHEEL2_H/AXIS2_BA with the SAME
+     * rotation vector as the leader; map0_s00_2.c:52-53). MUTUAL pairs
+     * (DOOR1_BA<->CHAIN2_1 both name each other — the engine's ONE shared
+     * rot vector D_800F538C) are broken: both entries tick their own
+     * identical deterministic state (no leader), which is exactly the
+     * shared-vector behavior for deterministic drivers. */
+    for (int k = 0; k < sx->nAnims; k++) {
+        const char *sh_name = NULL;
+        /* re-walk the JSON to find sharedRot of entry k */
+        const JValue *pa2 = jarr(sh, "propAnims");
+        int npa2 = jcount(pa2);
+        if (k < npa2 && k < 64) {
+            const JValue *e2 = jat(pa2, k);
+            sh_name = e2 ? jstr(e2, "sharedRot", "") : NULL;
+        }
+        if (sh_name && *sh_name) {
+            for (int m = 0; m < sx->nAnims; m++) {
+                if (m != k && !strcmp(sx->anims[m].object, sh_name)) {
+                    sx->anims[k].sharedLeader = m;
+                    break;
+                }
+            }
+        }
+    }
+    /* cycle break: A->B and B->A would infinitely recurse in the pose fn
+     * and double-skip in the tick — clear both links (independent equal
+     * ticks, engine-shared-state semantics for deterministic drivers). */
+    for (int k = 0; k < sx->nAnims; k++) {
+        int m = sx->anims[k].sharedLeader;
+        if (m >= 0 && m < sx->nAnims && sx->anims[m].sharedLeader == k) {
+            sx->anims[k].sharedLeader = -1;
+            sx->anims[m].sharedLeader = -1;
+        }
+    }
+    const JValue *ul = jget(sh, "userLight");
+    if (ul && ul->type == JV_OBJ) {
+        sx->hasUserLight = 1;
+        const JValue *lo = jarr(ul, "localOffset");
+        if (lo && lo->count >= 3) {
+            sx->userLightOffset[0] = (float)jat(lo, 0)->num;
+            sx->userLightOffset[1] = (float)jat(lo, 1)->num;
+            sx->userLightOffset[2] = (float)jat(lo, 2)->num;
+        }
+        const JValue *lr = jarr(ul, "rotation");
+        if (lr && lr->count >= 3) {
+            sx->userLightRot[0] = (float)jat(lr, 0)->num;
+            sx->userLightRot[1] = (float)jat(lr, 1)->num;
+            sx->userLightRot[2] = (float)jat(lr, 2)->num;
+        }
     }
 }
 
@@ -1531,6 +1869,7 @@ static void glb_walk_node(Glb *g, const JValue *nodes, int nodeIdx, mat4 parent,
             item.buffer = nodeBuffer;      /* v24: SH1X.buffer (-1 = n/a)  */
             item.addSeq = nodeAddSeq;      /* v24: engine add slot         */
             item.isBillboard = nodeIsBillboard;
+            item.animIdx = -1;   /* v26.3: bound in sh1x_anims_bind */
             item.vbase = (int)(sb->n / 8);
             item.ibase = (int)sb->in;
             for (int i = 0; i < pos.count; i++) {
@@ -1688,6 +2027,115 @@ static void scene_free(Scene *s) {
     free(s->verts); free(s->idxs); free(s->texBlob);
     sh1x_free(&s->sh1x);
     memset(s, 0, sizeof(*s));
+}
+
+/* ---- v27 mapLink: neighbor room merging (task 6) ------------------- */
+/* Engine ground (map.c, ANIMS_MAPLINK evidence): exterior maps stream
+ * their 8 grid neighbors into the active 3x3 chunk set (WorldMap_
+ * ChunkLoad) — a single-room consumer shows the map EDGE ("cliff") at
+ * the room bounds. When the neighbor GLB files sit next to the active
+ * room's GLB, they are loaded and MERGED (textures, materials, verts,
+ * items) so the camera looking toward the edge sees the continuation.
+ * A MISSING FILE IS A SILENT NO-OP — nothing renders, no error output:
+ * the room behaves exactly as before (the user's explicit contract).
+ * Neighbor items ride the legacy always-drawn path (buffer -1, the
+ * engine's active-chunk set) and render STATIC (their own propAnims
+ * are not driven — documented limitation for v27). */
+static int g_mapLinkLoad = 1;      /* --maplink 0 disables (regression A/B) */
+
+static int scene_merge(Scene *dst, Scene *src) {
+    if (!src || src->itemCount <= 0) return 0;
+    const int texOff = dst->texCount, matOff = dst->matCount;
+    const int vertOff = dst->vertCount, idxOff = dst->idxCount;
+    const size_t blobOff = dst->texBlobSize;
+    dst->tex = (TexInfo *)realloc(dst->tex,
+        (size_t)(dst->texCount + src->texCount) * sizeof(TexInfo));
+    for (int i = 0; i < src->texCount; i++) {
+        dst->tex[texOff + i] = src->tex[i];
+        if (dst->tex[texOff + i].w > 0)
+            dst->tex[texOff + i].off += (uint32_t)blobOff;
+    }
+    dst->mat = (MaterialInfo *)realloc(dst->mat,
+        (size_t)(dst->matCount + src->matCount) * sizeof(MaterialInfo));
+    for (int i = 0; i < src->matCount; i++) {
+        dst->mat[matOff + i] = src->mat[i];
+        if (dst->mat[matOff + i].texIdx >= 0)
+            dst->mat[matOff + i].texIdx += texOff;
+    }
+    dst->verts = (float *)realloc(dst->verts,
+        (size_t)(dst->vertCount + src->vertCount) * 8 * sizeof(float));
+    memcpy(dst->verts + (size_t)dst->vertCount * 8, src->verts,
+           (size_t)src->vertCount * 8 * sizeof(float));
+    dst->idxs = (uint32_t *)realloc(dst->idxs,
+        (size_t)(dst->idxCount + src->idxCount) * sizeof(uint32_t));
+    memcpy(dst->idxs + dst->idxCount, src->idxs,
+           (size_t)src->idxCount * sizeof(uint32_t));
+    if (src->texBlobSize) {
+        dst->texBlob = (uint8_t *)realloc(dst->texBlob,
+            dst->texBlobSize + src->texBlobSize);
+        memcpy(dst->texBlob + blobOff, src->texBlob, src->texBlobSize);
+    }
+    dst->item = (DrawItem *)realloc(dst->item,
+        (size_t)(dst->itemCount + src->itemCount) * sizeof(DrawItem));
+    for (int i = 0; i < src->itemCount; i++) {
+        DrawItem it = src->item[i];
+        it.matIdx += matOff;
+        it.vbase += vertOff;
+        it.ibase += idxOff;
+        it.buffer = -1;          /* legacy always-drawn (active chunk set) */
+        it.addSeq = dst->itemCount + i;
+        it.animIdx = -1;        /* neighbors render static (documented)    */
+        it.animInst = 0;
+        dst->item[dst->itemCount + i] = it;
+    }
+    dst->texCount += src->texCount;
+    dst->matCount += src->matCount;
+    dst->vertCount += src->vertCount;
+    dst->idxCount += src->idxCount;
+    dst->itemCount += src->itemCount;
+    dst->texBlobSize += src->texBlobSize;
+    /* union bounds */
+    if (src->bounds.bmin.x < dst->bounds.bmin.x) dst->bounds.bmin.x = src->bounds.bmin.x;
+    if (src->bounds.bmin.y < dst->bounds.bmin.y) dst->bounds.bmin.y = src->bounds.bmin.y;
+    if (src->bounds.bmin.z < dst->bounds.bmin.z) dst->bounds.bmin.z = src->bounds.bmin.z;
+    if (src->bounds.bmax.x > dst->bounds.bmax.x) dst->bounds.bmax.x = src->bounds.bmax.x;
+    if (src->bounds.bmax.y > dst->bounds.bmax.y) dst->bounds.bmax.y = src->bounds.bmax.y;
+    if (src->bounds.bmax.z > dst->bounds.bmax.z) dst->bounds.bmax.z = src->bounds.bmax.z;
+    v3 szv = v3_sub(dst->bounds.bmax, dst->bounds.bmin);
+    dst->bounds.diag = v3_len(szv);
+    scene_free(src);
+    return 1;
+}
+
+/* Load the mapLink neighbors of the room at glbPath into sc. Returns the
+ * number merged. Interior rooms and rooms without mapLink extras are a
+ * no-op (the engine loads interiors on door transitions, not streamed). */
+static int sh1x_load_neighbors(Scene *sc, const char *glbPath) {
+    if (!g_mapLinkLoad || !sc->sh1x.hasMapLink) return 0;
+    if (!sc->sh1x.mapLink.isExterior) return 0;
+    if (!sc->sh1x.mapLink.nNbs) return 0;
+    char dir[512];
+    snprintf(dir, sizeof(dir), "%s", glbPath);
+    char *slash = strrchr(dir, '/');
+    if (slash) *slash = 0;
+    else snprintf(dir, sizeof(dir), ".");
+    int loaded = 0;
+    for (int n = 0; n < sc->sh1x.mapLink.nNbs; n++) {
+        const Sh1xMapLinkNb *nb = &sc->sh1x.mapLink.nbs[n];
+        char p[1024];
+        snprintf(p, sizeof(p), "%s/%s.glb", dir, nb->room);
+        FILE *f = fopen(p, "rb");       /* silent no-op when absent */
+        if (!f) continue;
+        fclose(f);
+        Scene *ns = (Scene *)calloc(1, sizeof(Scene));
+        if (!scene_load_glb(ns, p)) {   /* parse failure: silent skip */
+            free(ns);
+            continue;
+        }
+        if (scene_merge(sc, ns)) loaded++;
+        free(ns);                     /* scene_free freed the fields */
+    }
+    return loaded;
 }
 
 /* ==================================================================== */
@@ -4193,7 +4641,14 @@ static void sh_env_update_pose(ShEnv *env, v3 camPos, Quat camQ) {
     /* v6 (user directive): light position == the camera position EXACTLY.
      * Engine reference (NOT applied): light.pos = torsoBoneWorld * (-0.08,
      * +0.28, -0.12) — Gfx_FlashlightPositionUpdate 0x800554C4. The beam
-     * direction below still applies the engine rotation verbatim.          */
+     * direction below still applies the engine rotation verbatim.
+     * v26 SH1X v3 USER LIGHT: the camera-attached position stays the mesh-
+     * lighting default; fx_pass (lens flare + water shimmer) uses the
+     * engine anchor offset (-0.08,-0.28,0.12) rotated by the camera frame —
+     * the verbatim Game_FlashlightAttribsSet anchor (effects.c:210-218),
+     * giving the flare the engine's real light-ahead-of-eye geometry
+     * (shLensFlareExec Gate 2 needs scr z > proj/2). The Sh1x userLight
+     * extras can override it (programmable; movable like the camera).    */
     L->pos[0] = (int)(camPos.x * 4096.0f);
     L->pos[1] = (int)(camPos.y * 4096.0f);
     L->pos[2] = (int)(camPos.z * 4096.0f);
@@ -6088,23 +6543,200 @@ static void raster_tri(Frame *fb, const RVert *vA, const RVert *vB, const RVert 
              * the engine's OT paint-over); it never gates visibility.   */
             if (pass == RP_OPAQUE) fb->z[pi] = z;   /* flake-occlusion ref */
 /* v4 AUDIT FIX #1 — VERBATIM swanstation modulate:
-             *   gpu_sw_backend.cpp ShadePixel:
-             *     s_dither_lut[dy][dx][(texture_color.r * color_r) >> 4]
-             *   texture_color.r is the VRAM 5-bit texel T5, color_r the
-             *   8-bit vertex color. The GLB textures are 100% pure
-             *   expand(T5) = (v<<3)|(v>>2) (verified: 4,829,184/4,829,184
-             *   channel values), so (texel8 >> 3) recovers T5 EXACTLY and
-             *   ((tr >> 3) * vr) >> 4 == (T5 * C8) >> 4 bit-for-bit.
-             * The v3 formula ((tr * vr) >> 7) used the expanded 8-bit texel:
-             *   expand(T5)*C8/128 = T5*C8/15.52 vs engine T5*C8/16
-             * — a provable positive bias up to +2/31 per channel on bright
-             * texels. fb_put's dither + (V+D)>>3 clamp completes the engine
-             * chain (the LUT's >>3 is the 8->5 bit step). */
+ *   gpu_sw_backend.cpp ShadePixel:
+ *     s_dither_lut[dy][dx][(texture_color.r * color_r) >> 4]
+ *   texture_color.r is the VRAM 5-bit texel T5, color_r the
+ *   8-bit vertex color. The GLB textures are 100% pure
+ *   expand(T5) = (v<<3)|(v>>2) (verified: 4,829,184/4,829,184
+ *   channel values), so (texel8 >> 3) recovers T5 EXACTLY and
+ *   ((tr >> 3) * vr) >> 4 == (T5 * C8) >> 4 bit-for-bit.
+ * The v3 formula ((tr * vr) >> 7) used the expanded 8-bit texel:
+ *   expand(T5)*C8/128 = T5*C8/15.52 vs engine T5*C8/16
+ * — a provable positive bias up to +2/31 per channel on bright
+ * texels. fb_put's dither + (V+D)>>3 clamp completes the engine
+ * chain (the LUT's >>3 is the 8->5 bit step). */
             int r = (((tr >> 3) * vr) >> 4) + orr;
             int g = (((tg >> 3) * vg) >> 4) + og;
             int b = (((tb >> 3) * vb) >> 4) + ob;
-
             fb_put(fb, x, y, r, g, b, quantize, dither);
+        }
+    }
+}
+
+/* ==================================================================== */
+/* v26 — SH1X v3 ENGINE FX (docs/SH1X_EXTRAS_V3_FX.md)                    */
+/* ==================================================================== */
+/* LENS FLARE (the flashlight glow; shLensFlareExec/Draw/Effect_Draw,
+ * src/bodyprog/gfx/lens_flare.c — VERBATIM math, PS1-fixed-point semantics
+ * preserved via Q12 ints) + WATER SHIMMER (the DR/DRU sewer system:
+ * func_8008E5B4 wave tiles + func_8008E794 light-glint mirror quad +
+ * func_8008EA68 caustic ring) + PROP ANIM DRIVERS (the decomp map
+ * WorldObjects_Update code: FAN_HIDE rng spin, FAN0_HID 16-blade ±90°,
+ * TV LCG noise, MOVACHES translate) + USER LIGHT (the programmable
+ * flashlight — engine-native free-world light via NULL bone coords).
+ *
+ * All features are GATED by the GLB's SH1X v3 extras: absent fields =
+ * feature off, the pre-v26 render unchanged (the graceful no-op
+ * contract, docs/SH1X_EXTRAS_V3_FX.md).
+ *
+ * Q12 helpers (the engine's fixed-point):                            */
+
+/* Q12 fixed-point helpers on s32 (Math_Sin/Cos are the RAW LUT lookups) */
+#define FX_Q12_SHIFT 12
+static int fx_q12_mul(int a, int b) {              /* Q12_MULT */
+    return (int)(((int64_t)a * (int64_t)b) >> FX_Q12_SHIFT);
+}
+static int fx_q12_angle(float deg) {              /* Q12_ANGLE (truncate) */
+    return (int)(deg / 360.0f * 4096.0f);
+}
+static int fx_div_fast(int a, int b) {             /* DIV_FAST: a/2^? — the
+ * engine macro is a shift for the constants used here (proj/2 etc.)   */
+    return b ? a / b : 0;
+}
+static int fx_min(int a, int b) { return a < b ? a : b; }
+
+/* vwOresenHokan — the engine's piecewise-linear interpolation over a
+ * table with clamped input range (vw_calc.c). VERBATIM semantics:
+ * clamp to the end values outside [x0,x1]; inside, linear interp between
+ * the two neighbors of the unit-scaled position.                        */
+static int fx_oresen_hokan(const int *dat, int n, int x, int x0, int x1) {
+    if (x <= x0) return dat[0];
+    if (x >= x1) return dat[n - 1];
+    int64_t span = (int64_t)(x1 - x0);
+    if (span <= 0) return dat[0];
+    /* unit position in Q(n-1) fixed point to avoid float drift        */
+    int64_t t = ((int64_t)(x - x0) * (n - 1) + span / 2) / span;  /* rounded */
+    int i = (int)(t / (n - 1 > 0 ? 1 : 1));   /* t is 0..(n-1) whole units */
+    /* t lands in [0, n-1]; segment i = t / 1 with fraction f           */
+    int64_t f = t - (int64_t)i;               /* 0..1 fraction          */
+    if (i > n - 2) i = n - 2;
+    return dat[i] + (int)(((int64_t)(dat[i + 1] - dat[i]) * f));
+}
+
+/* --- lens flare work state (s_LensFlareWork subset, lens_flare.h) --- */
+typedef struct {
+    int enabled;          /* gates: Spot mode + EnableLensFlare + user on */
+    int flareInhibit;
+    int waterInhibit;
+    int syncDrawExecF;
+    int nowEffRate;       /* Q12 */
+    int tgtEffRate;       /* Q12 */
+    int scrLPos[3];       /* screen x,y + vz (engine px, screen-centered) */
+    int scrLAngXY;        /* Q12 angle */
+    int scrLAngZ;         /* Q12 angle */
+    int centerVisible;
+    int counter;          /* D_800AFDAC (water wave scroll counter) */
+} LensFlareWork;
+
+static LensFlareWork g_flaresys;
+static int g_fxLightPos[3];   /* v26: the engine-anchored FX light pos (Q12, glTF) */
+/* v26 USER LIGHT (task 3): --userlight x,y,z sets a FREE-WORLD light (the
+ * engine's NULL-bone-coord native mode, Gfx_FlashlightPositionUpdate
+ * bodyprog_80055028.c:244-275); --userlight-ahead D puts it D meters
+ * ahead of the camera (the trailing-camera geometry the engine's flare
+ * needs: gate 2 requires vz > 120 Q8 = 0.47m). -1 flags "engine anchor"
+ * (the Harry offset default). Disableable with --userlight off (then the
+ * engine anchor applies — the camera-coincident light that engine-true
+ * never flares). Day suppression is preset-driven (Spot-only presets). */
+static int g_userLightMode = 0;      /* 0 = engine anchor (default)     */
+static float g_userLightAheadM = 0;  /* mode 2: meters ahead of camera  */
+static float g_userLightWorld[3];    /* mode 1: free world pos (glTF m) */
+
+/* shLensFlareMakeEffectTargetRate — lens_flare.c:225-250 VERBATIM (tables
+ * copied 1:1; vwOresenHokan over the exact ranges).                    */
+static int fx_flare_target_rate(int light_eff_pow, int scr_z, int scr_ang_z) {
+    static const int pow_rate_dat[2] = { 0, 4096 };              /* Q12 0/1 */
+    static const int dist_rate_dat[7] = {
+        16384, 5324, 3686, 2867, 2048, 1434, 819   /* Q12 4/1.3/.9/.7/.5/.35/.2 */
+    };
+    static const int ang_z_rate_dat[7] = {
+        614, 819, 1024, 1229, 1434, 2048, 5324    /* Q12 .15/.2/.25/.3/.35/.5/1.3 */
+    };
+    int pow_rate  = fx_oresen_hokan(pow_rate_dat, 2, light_eff_pow, 0, 4096);
+    int dist_rate = fx_oresen_hokan(dist_rate_dat, 7, scr_z, 204, 3328);
+    int ang_z_rate = fx_oresen_hokan(ang_z_rate_dat, 7, scr_ang_z,
+                                     fx_q12_angle(75.0f), fx_q12_angle(167.0f));
+    int ret = fx_q12_mul(ang_z_rate, fx_q12_mul(pow_rate, dist_rate));
+    return fx_min(ret, 6144);                   /* MIN(tgt, Q12(1.5)) */
+}
+
+/* ---- sprite blit: SemiTrans mode-1 (50% average) on the PoC fb ------
+ * engine: POLY_FT4 setSemiTrans(1) — GPU ABR mode 1 avg blend: out =
+ * (dst5 + texel5*prim>>7... wait — mode 1 is (B+F)/2 per channel 5-bit.
+ * The snow path already implements ABR1 as B+F additive (tpage 44 bits
+ * 5-6 = ABR 1?) — CHECK: snow_blit_flake uses B + F saturating. The
+ * flare polys are ALSO tpage 44 with setSemiTrans(1): ABR bits come
+ * from tpage 44 = bits 5-6 of the tpage VALUE 44>>5 = 1. mode 1 on the
+ * real GPU = B/2 + F/2. The snow header documents the engine's snow as
+ * additive — that was verified against DuckStation for snow (tpage 44
+ * ABR1 code). The flare sprites use the SAME primitive class; to keep
+ * ONE consistent engine-exact blend path (and match the verified snow
+ * baseline) the flare blit uses the SAME additive rule as snow flakes
+ * (snow_blit_flake: or5 = (dst>>3) + f, saturate, expand). If a future
+ * pixel audit proves avg-blend instead, this ONE function changes.   */
+static void fx_blit_sprite_quad(
+    Frame *fb, int x0, int y0, int x1, int y1, int x2, int y2, int x3, int y3,
+    const unsigned char *idx_plane, int sw, int sh,
+    const unsigned short clut[16], int primR, int primG, int primB) {
+    /* rasterize the (possibly rotated) sprite quad: affine UV via edge
+     * walk — same approach as raster_tri but on the sprite plane, in
+     * PoC pixels (engine px scale fb->w/320). */
+    int minX = x0, maxX = x0, minY = y0, maxY = y0;
+    int xs[4] = { x0, x1, x2, x3 }, ys[4] = { y0, y1, y2, y3 };
+    for (int i = 1; i < 4; i++) {
+        if (xs[i] < minX) minX = xs[i];
+        if (xs[i] > maxX) maxX = xs[i];
+        if (ys[i] < minY) minY = ys[i];
+        if (ys[i] > maxY) maxY = ys[i];
+    }
+    if (maxX < 0 || minX >= fb->w || maxY < 0 || minY >= fb->h) return;
+    if (minX < 0) minX = 0;
+    if (minY < 0) minY = 0;
+    if (maxX >= fb->w) maxX = fb->w - 1;
+    if (maxY >= fb->h) maxY = fb->h - 1;
+    /* bilinear-free affine: UV corners map (u0,v0)->v0 ... (u3,v3)->v3 */
+    /* solve the affine map from the 3 first corners (parallelogram      */
+    /* sprites: the 4th is consistent)                                     */
+    double du_dx = (double)(sw - 0) / (double)(x1 - x0 + 0.0001);
+    double dv_dy = (double)(sh - 0) / (double)(y2 - y0 + 0.0001);
+    for (int py = minY; py <= maxY; py++) {
+        for (int px = minX; px <= maxX; px++) {
+            /* point-in-quad via two triangle tests (cheap, engine-ish) */
+            double ax = px + 0.5, ay = py + 0.5;
+            /* tri (x0,y0)(x1,y1)(x2,y2) then (x0,y0)(x2,y2)(x3,y3)      */
+            int inside = 0;
+            for (int tsel = 0; tsel < 2 && !inside; tsel++) {
+                double bx = xs[1 + tsel], by = ys[1 + tsel];
+                double cx = xs[2 + tsel], cy = ys[2 + tsel];
+                double d1 = (bx - ax) * (ys[0] - ay) - (xs[0] - ax) * (by - ay);
+                double d2 = (cx - bx) * (ys[0 + tsel] - by) - (xs[0 + tsel] - bx) * (cy - by);
+                double d3 = (xs[0] - cx) * (ys[1 + tsel] - cy) - (xs[1 + tsel] - cx) * (ys[0] - cy);
+                int neg = (d1 < 0) || (d2 < 0) || (d3 < 0);
+                int pos = (d1 > 0) || (d2 > 0) || (d3 > 0);
+                if (!(neg && pos)) inside = 1;
+            }
+            if (!inside) continue;
+            int u = (int)((ax - x0) * du_dx);
+            int v = (int)((ay - y0) * dv_dy);
+            if (u < 0 || u >= sw || v < 0 || v >= sh) continue;
+            unsigned idxv = idx_plane[(size_t)v * sw + u];
+            unsigned short entry = clut[idxv];
+            if (entry == 0x0000) continue;       /* PS1 punch-through hole */
+            int t5r = entry & 31, t5g = (entry >> 5) & 31, t5b = (entry >> 10) & 31;
+            /* texel modulated by prim color (F = min(31, T5*C>>7)) — the
+             * engine's flat-color FT4 rule, as snow_blit_flake          */
+            int fr = (t5r * primR) >> 7; if (fr > 31) fr = 31;
+            int fg = (t5g * primG) >> 7; if (fg > 31) fg = 31;
+            int fbv = (t5b * primB) >> 7; if (fbv > 31) fbv = 31;
+            size_t pi = (size_t)py * fb->w + px;
+            uint8_t *bp = fb->rgb + pi * 3;
+            /* SemiTrans: same additive rule as the verified snow path   */
+            int or5 = (bp[0] >> 3) + fr; if (or5 > 31) or5 = 31;
+            int og5 = (bp[1] >> 3) + fg; if (og5 > 31) og5 = 31;
+            int ob5 = (bp[2] >> 3) + fbv; if (ob5 > 31) ob5 = 31;
+            bp[0] = (uint8_t)((or5 << 3) | (or5 >> 2));
+            bp[1] = (uint8_t)((og5 << 3) | (og5 >> 2));
+            bp[2] = (uint8_t)((ob5 << 3) | (ob5 >> 2));
         }
     }
 }
@@ -6746,6 +7378,1020 @@ static int postent_cmp(const void *pa, const void *pb) {
     return a->seq > b->seq ? -1 : a->seq < b->seq ? 1 : 0;
 }
 
+
+/* v26.2: the GLOBAL engine RNG (main/rng.c verbatim; Rand16 = >>17).
+ * Prop drivers draw from it exactly like the decomp's Rng_* calls. */
+static uint32_t g_propRngSeed = 1u;
+static int sh_rng_next(void) {
+    g_propRngSeed = g_propRngSeed * 1664525u + 1013904223u;
+    return (int)(g_propRngSeed >> 17);           /* Rand16 semantics */
+}
+
+
+/* ---- v27: driver DRAW path (bind -> pose -> apply) ------------------ */
+/* Bind anims to DrawItems by name (node name = engine model name, e.g.
+ * "FAN_HIDE"/"DOOR1_BA"). The SAME model is added per frame at MULTIPLE
+ * poses (each fan has its own pos), so nodes carry "#N" instance suffixes
+ * (ripper convention) while the anim object is the plain engine name.
+ * Match rule: the anim object name is a PREFIX of the node name (or
+ * equal), disambiguated by WORLD xz distance — v27 computes each item's
+ * world center from its VERTEX DATA (works for both posed nodes with
+ * translations and baked-vertex instances). Multi-instance drivers
+ * (fanArray/ferrisWheel/lissajousOrbit/gravityScatter/sineBob) assign
+ * the per-copy engine index i by ascending distance to the anim pos. */
+static void sh1x_anims_bind(Scene *sc) {
+    if (!sc || !sc->sh1x.nAnims) return;
+    for (int i = 0; i < sc->itemCount; i++) {
+        DrawItem *it = &sc->item[i];
+        it->animIdx = -1;
+        it->animInst = 0;
+    }
+    for (int k = 0; k < sc->sh1x.nAnims; k++) {
+        const Sh1xPropAnim *a = &sc->sh1x.anims[k];
+        if (a->object[0] == '<' || !a->object[0]) continue; /* <light> etc */
+        const size_t ol = strlen(a->object);
+        int    bestI = -1;
+        float  bestD = 1e30f;
+        int    nth = 0;
+        for (int i = 0; i < sc->itemCount; i++) {
+            DrawItem *it = &sc->item[i];
+            if (it->animIdx >= 0) continue;    /* already bound */
+            const size_t nl = strlen(it->name);
+            if (!nl || ol > nl) continue;
+            if (memcmp(it->name, a->object, ol) != 0) continue;
+            /* world center from the item's own vertices (glTF space) */
+            float cx = 0, cy = 0, cz = 0;
+            int n = 0;
+            for (int v = 0; v < it->vcount && it->vbase + v < sc->vertCount;
+                 v++) {
+                const float *vp = sc->verts + (size_t)(it->vbase + v) * 8;
+                cx += vp[0]; cy += vp[1]; cz += vp[2]; n++;
+            }
+            if (!n) continue;
+            cx /= n; cy /= n; cz /= n;
+            const float dx = cx - a->pos[0];
+            const float dz = cz - (-a->pos[2]);   /* glTF z = -engine z */
+            const float dy = cy - (-a->pos[1]);
+            const float d = dx * dx + dy * dy + dz * dz;
+            if (d < bestD) { bestD = d; bestI = i; }
+        }
+        if (bestI < 0) continue;
+        /* assign instance index 0; if MULTIPLE unbound items match this
+         * same anim, the next ones get i=1.. by distance order (the
+         * engine's per-copy index i). */
+        sc->item[bestI].animIdx = k;
+        sc->item[bestI].animInst = nth++;
+        if (a->count > 1) {
+            for (int more = 1; more < a->count; more++) {
+                float bd = 1e30f; int bi = -1;
+                for (int i = 0; i < sc->itemCount; i++) {
+                    DrawItem *it = &sc->item[i];
+                    if (it->animIdx >= 0) continue;
+                    const size_t nl = strlen(it->name);
+                    if (ol > nl) continue;
+                    if (memcmp(it->name, a->object, ol) != 0) continue;
+                    float cx = 0, cy = 0, cz = 0; int n = 0;
+                    for (int v = 0; v < it->vcount &&
+                         it->vbase + v < sc->vertCount; v++) {
+                        const float *vp =
+                            sc->verts + (size_t)(it->vbase + v) * 8;
+                        cx += vp[0]; cy += vp[1]; cz += vp[2]; n++;
+                    }
+                    if (!n) continue;
+                    cx /= n; cy /= n; cz /= n;
+                    float ddx = cx - a->pos[0];
+                    float ddz = cz - (-a->pos[2]);
+                    float d = ddx * ddx + ddz * ddz;
+                    if (d < bd) { bd = d; bi = i; }
+                }
+                if (bi < 0) break;
+                sc->item[bi].animIdx = k;
+                sc->item[bi].animInst = nth++;
+            }
+        }
+    }
+}
+
+/* v27: the LIVE WorldObject pose of one anim instance — engine rot in
+ * DEGREES + engine pos in METERS + per-axis pos replace mask. All the
+ * raw-unit drivers keep their state in raw Q12 angle ints (4096=360deg)
+ * exactly like the engine accumulators; only this function converts to
+ * the consumer's degree/meter floats. */
+static void sh1x_anim_pose(const Sh1x *sx, const Sh1xPropAnim *a, int inst,
+                           float rotDeg[3], float posEng[3],
+                           unsigned *posReplaceMask) {
+    rotDeg[0] = a->rot0[0]; rotDeg[1] = a->rot0[1]; rotDeg[2] = a->rot0[2];
+    posEng[0] = a->pos[0];  posEng[1] = a->pos[1];  posEng[2] = a->pos[2];
+    *posReplaceMask = 0;
+    const float R2D = 360.0f / 4096.0f;
+    if (a->sharedLeader >= 0 && a->sharedLeader < sx->nAnims) {
+        /* follower: the engine adds this object with the LEADER's live
+         * rotation vector (e.g. WHEEL2_H rides WHEEL1_H's spin,
+         * map0_s00_2.c:1259-1267); its own pos stands. */
+        const Sh1xPropAnim *L = &sx->anims[a->sharedLeader];
+        sh1x_anim_pose(sx, L, 0, rotDeg, posEng, posReplaceMask);
+        posEng[0] = a->pos[0]; posEng[1] = a->pos[1]; posEng[2] = a->pos[2];
+        *posReplaceMask = 0;
+        return;
+    }
+    switch (a->driver) {
+    case 0:   /* spinRng / spinConst: live angle on the anim axis */
+        rotDeg[a->axis] = a->cur[a->axis];
+        break;
+    case 1: { /* fanArray: per-instance x spin ±90deg/s, y=180 for i>=7 */
+        int i = inst > 0 ? inst : 0;
+        rotDeg[0] = a->cur[0];
+        if (i >= a->rotY180From) rotDeg[1] = 180.0f;
+        if (i < a->posPerInstN) {
+            posEng[0] = a->posPerInst[i][0];
+            posEng[1] = a->posPerInst[i][1];
+            posEng[2] = a->posPerInst[i][2];
+            *posReplaceMask = 7;
+        }
+        break;
+    }
+    case 3:   /* translate (MOVACHES): vz slides toward the clamp */
+        posEng[2] = a->cur[2];
+        *posReplaceMask = 4;
+        break;
+    case 4:   /* doorRattle: vy in raw units */
+    case 5:   /* dampedSwing (drawbridge door): vy in raw units */
+    case 8:   /* kickSwing (TOBIRA2_): vy in raw units */
+        rotDeg[1] = (float)a->rawVy * R2D;
+        break;
+    case 9:   /* gravityScatter: per-instance fall offsets */
+        posEng[1] += a->cur[1];
+        *posReplaceMask = 2;
+        break;
+    case 12: { /* sineBob: horse y = (Q12(-1) - sin(master*4+phase))/5 */
+        int master = 0;
+        for (int m = 0; m < sx->nAnims; m++)
+            if (sx->anims[m].driver == 13) { master = sx->anims[m].mvMaster; break; }
+        int i = inst > 0 ? inst : 0;
+        int phase = (i < 6) ? (int)(i * 4096 / 3) : (i * 2048 + 2048);
+        int arg = master * 4 + phase;
+        posEng[1] = (float)((-4096 - sh_sin_q12(arg)) / 5) / 4096.0f;
+        *posReplaceMask = 2;
+        break;
+    }
+    case 13:  /* carouselSpin: hub rot.vy = master angle */
+        rotDeg[1] = (float)a->mvMaster * R2D;
+        break;
+    case 14: { /* ferrisWheel: arm i angle/pos from the raw master
+                 * (map6_s04_2.c:3814-3845: angle=(m>>12)+(-739+i*307),
+                 * pos=(8.7, 10cos-13.8, 10sin-28)) */
+        int i = inst > 0 ? inst : 0;
+        int ang = (a->mvMaster >> 12) + (-739 + i * 307);
+        rotDeg[0] = (float)ang * R2D;
+        {
+            float rad = (float)ang * R2D * (float)M_PI / 180.0f;
+            posEng[0] = 8.7f;
+            posEng[1] = 10.0f * cosf(rad) - 13.8f;
+            posEng[2] = 10.0f * sinf(rad) - 28.0f;
+        }
+        *posReplaceMask = 7;
+        break;
+    }
+    case 15: { /* lissajousOrbit: balloon i pos/rot (map6_s04_2.c:3856-3874) */
+        int i = inst > 0 ? inst : 0;
+        int aq = sh_sin_q12(a->mvMaster + (i << 10)) / 30;
+        int ryCnt = (int)((i << 12) / 12);
+        rotDeg[1] = (float)(a->mvMaster2 + ryCnt) * R2D;
+        {
+            float ry = rotDeg[1] * (float)M_PI / 180.0f;
+            float temp = (float)sh_sin_q12(aq + 1024) / 4096.0f * 4.0f; /*cos*/
+            posEng[0] = temp * sinf(ry) - 16.0f;
+            posEng[1] = (float)sh_sin_q12(aq) / 4096.0f * 4.0f - 1.5f;
+            posEng[2] = temp * cosf(ry) - 64.0f;
+            rotDeg[0] = -(float)aq * R2D;
+        }
+        *posReplaceMask = 7;
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+/* Compose the live driver pose into the item transform — v27 semantics:
+ * the engine builds ONE matrix per WorldObject from the FULL rot vector
+ * (WorldObjects_Draw -> Math_RotMatrixZxyNeg, draw.c:577) and its pos.
+ * The item's AUTHORED translation stands for rotation-only drivers (it
+ * equals the engine pos: the ripper emits WorldObject poses as node
+ * translations); movement drivers replace the flagged axes. The authored
+ * base rotation is REPLACED (not composed): the driver owns the whole
+ * rotation, exactly like the engine. */
+static void sh1x_anim_apply(Scene *sc, DrawItem *it, const Sh1xPropAnim *a) {
+    if (!it || !a) return;
+    float rotDeg[3], posEng[3];
+    unsigned mask = 0;
+    sh1x_anim_pose(&sc->sh1x, a, it->animInst, rotDeg, posEng, &mask);
+    const float rx = rotDeg[0] * (float)M_PI / 180.0f;
+    const float ry = rotDeg[1] * (float)M_PI / 180.0f;
+    const float rz = rotDeg[2] * (float)M_PI / 180.0f;
+    /* ENGINE ORDER — WorldObjects_Draw -> Math_RotMatrixZxyNeg
+     * (draw.c:577; libkmath.s:360-384, asm-sim verified vs g_SineTable):
+     * Ry(rx')*Rx(ry')*Rz(rz') with all three angles NEGATED. Column-major. */
+    const float nrx = -rx, nry = -ry, nrz = -rz;
+    const float ncy = cosf(nry), nsy = sinf(nry);
+    const float ncz = cosf(nrz), nsz = sinf(nrz);
+    const float ncx = cosf(nrx), nsx_ = sinf(nrx);
+    mat4 R;
+    memset(&R, 0, sizeof(R));
+    R.m[0]  = ncy * ncz;
+    R.m[1]  = nsx_ * nsy * ncz + ncx * nsz;
+    R.m[2]  = -ncx * nsy * ncz + nsx_ * nsz;
+    R.m[4]  = -ncy * nsz;
+    R.m[5]  = -nsx_ * nsy * nsz + ncx * ncz;
+    R.m[6]  = ncx * nsy * nsz + nsx_ * ncz;
+    R.m[8]  = nsy;
+    R.m[9]  = -nsx_ * ncy;
+    R.m[10] = ncx * ncy;
+    R.m[15] = 1.0f;
+    /* translation: the authored base (glTF) with flagged axes replaced */
+    float tx = it->model.m[12], ty = it->model.m[13], tz = it->model.m[14];
+    if (mask & 1u) tx = posEng[0];
+    if (mask & 2u) ty = -posEng[1];            /* glTF y = -engine y */
+    if (mask & 4u) tz = -posEng[2];            /* glTF z = -engine z */
+    mat4 M = R;
+    M.m[12] = tx; M.m[13] = ty; M.m[14] = tz; M.m[15] = 1.0f;
+    it->model = M;
+}
+
+/* Per-frame: apply bound anims' CURRENT pose to their items. render_frame
+ * may run more than once per tick (shots at multiple t), so apply from a
+ * COPY of the pre-anim matrix each frame, not cumulatively. */
+static mat4 *g_animBase = NULL;      /* snapshot of pre-anim item matrices  */
+static int   g_animBaseN = 0;
+static void sh1x_anims_draw_apply(Scene *sc) {
+    static int boundFor = -1;         /* re-bind if the scene changed      */
+    if (!sc || !sc->sh1x.nAnims) return;
+    if (boundFor != (int)(size_t)(void *)sc || g_animBaseN != sc->itemCount) {
+        boundFor = (int)(size_t)(void *)sc;
+        sh1x_anims_bind(sc);
+    }
+    if (g_animBaseN != sc->itemCount) {
+        free(g_animBase);
+        g_animBase = (mat4 *)malloc(sizeof(mat4) *
+                                    (sc->itemCount ? (size_t)sc->itemCount : 1));
+        g_animBaseN = sc->itemCount;
+        for (int i = 0; i < sc->itemCount; i++)
+            g_animBase[i] = sc->item[i].model;
+    }
+    for (int i = 0; i < sc->itemCount; i++) {
+        DrawItem *it = &sc->item[i];
+        it->model = g_animBase[i];            /* reset to authored pose  */
+        if (it->animIdx >= 0 && it->animIdx < sc->sh1x.nAnims)
+            sh1x_anim_apply(sc, it, &sc->sh1x.anims[it->animIdx]);
+    }
+}
+
+/* ---- v27: prop anim drivers — the per-frame engine Update ------------
+ * VERBATIM math per driver, ALL in the engine's own units:
+ *   * raw Q12 angle ints (4096 = 360deg) for the swing family state,
+ *   * raw Q12 meters/accumulators for the movement drivers,
+ *   * the discrete per-frame drivers (doorRattle, kickSwing) step once
+ *     per 1/30s of elapsed time exactly like the 30Hz game frames.
+ * Gates: chunkGate (the engine's PLAYER_IN_MAP_CHUNK — for a single-room
+ * consumer the viewed room's cell) and eventGate (engine-fresh: CLEAR;
+ * --anims-demo treats them as SET). Cutscene/gated drivers idle at their
+ * authored rot0 pose (engine-true). */
+static int anim_gate_on(const Sh1x *sx, const Sh1xPropAnim *a) {
+    if (a->hasChunkGate) {
+        int okx = (sx->chunkX == a->chunkGate[0]) ||
+                  (a->chunkGateAlt[0] != 0 && sx->chunkX == a->chunkGateAlt[0]);
+        int okz = (sx->chunkZ == a->chunkGate[1]) ||
+                  (a->chunkGateAlt[1] != 0 && sx->chunkZ == a->chunkGateAlt[1]);
+        if (!(okx && okz)) return 0;
+    }
+    if (a->eventGate && !g_animsDemo) return 0;
+    return 1;
+}
+
+static void sh1x_anims_tick(Sh1x *sx, double dt) {
+    const int dtRaw = (int)(dt * 4096.0);
+    for (int i = 0; i < sx->nAnims; i++) {
+        Sh1xPropAnim *a = &sx->anims[i];
+        a->gated = !anim_gate_on(sx, a);
+        if (a->gated) continue;        /* engine: the update loop is gated */
+        if (a->sharedLeader >= 0) continue;  /* follower: leader's state */
+        switch (a->driver) {
+        case 0: {  /* spinRng / spinConst — vz or axis += dt*(base-(r&mask)) */
+            float base = (a->rngBase != 0.0f || a->rngMask) ? a->rngBase : a->rate;
+            float d = base;
+            if (a->rngMask)
+                d -= (float)(sh_rng_next() & a->rngMask) * (360.0f / 4096.0f);
+            a->cur[a->axis] += (float)dt * d;
+            break;
+        }
+        case 1:   /* fanArray master: rot.vx ±= dt*Q12_ANGLE(90) raw/s */
+            a->mvMaster += (int)(((long long)dtRaw * 1024) >> 12);
+            a->cur[0] = (float)a->mvMaster * (360.0f / 4096.0f);
+            break;
+        case 3: { /* translate — map5_s03_2.c:664-693: vz += dt*0.14,
+                   * clamp 60.35 (state 5) / 60.44 (state 6) */
+            float z = a->cur[2] + (float)dt * 0.14f;
+            if (z > 60.35f) z = 60.35f;
+            a->cur[2] = z;
+            break;
+        }
+        case 4: {  /* doorRattle — map1_s01.c:1229-1290 VERBATIM in raw
+                    * Q12 angle units, one discrete step per 30Hz frame.
+                    * v27 fixes (vs v26): the D>0 guard on the vy>0
+                    * branch, the D>=8 && 1-in-4 stop, Rng(0,3)=%4, and
+                    * the bounce limit is the RAW -20 (Q12_ANGLE(-1.8f)
+                    * truncates to -20), not -1.8 degrees. */
+            a->mvTimer += (float)(dt * 30.0);
+            int steps = 0;
+            while (a->mvTimer >= 1.0f && steps < 8) {
+                a->mvTimer -= 1.0f; steps++;
+                if (a->rawVel == 0 && (sh_rng_next() & 31) == 0)
+                    a->rawVel = -(2 + (int)(sh_rng_next() & 7)); /*Rng(2,9)*/
+                if (a->rawVel != 0) {
+                    if (a->rawVel == 1 || a->rawVel == -1)
+                        a->rawVy += a->rawVel;      /* engine adds twice */
+                    a->rawVy += a->rawVel;
+                    if (a->rawVel > 0) {
+                        if (a->rawVy > 0) {
+                            a->rawVy = 0;
+                            if (a->rawVel >= 8 && (sh_rng_next() & 3) == 0)
+                                a->rawVel = 0;
+                            else
+                                a->rawVel = (int)(sh_rng_next() & 3)
+                                            - a->rawVel + 1;
+                            if (a->rawVel > 0) a->rawVel = 0; /* MIN(D,0) */
+                        }
+                    } else if (a->rawVy < -20) {
+                        a->rawVel = ~(int)(sh_rng_next() & 3) - a->rawVel;
+                        if (a->rawVel < 1) a->rawVel = 1;     /* MAX(D,1) */
+                    }
+                }
+            }
+            break;
+        }
+        case 5: {  /* dampedSwing — map2_s00.c:1937-1943 VERBATIM in raw
+                    * Q12 units: angVel += dt*Q12(-0.0277) floored at
+                    * Q12(-0.0137) (MAX); vy += dt*angVel; vy floored at
+                    * Q12_ANGLE(-0.02222f) which TRUNCATES TO 0 (the door
+                    * slams shut — the v26 deg reading was 360x slow and
+                    * rested at -0.022deg instead of 0). */
+            a->rawVel += (int)(((long long)dtRaw * a->rawAngAccel) >> 12);
+            if (a->rawVel < a->rawAngVelFloor) a->rawVel = a->rawAngVelFloor;
+            a->rawVy += (int)(((long long)dtRaw * a->rawVel) >> 12);
+            if (a->rawVy < a->rawVyFloor) a->rawVy = a->rawVyFloor;
+            break;
+        }
+        case 8: {  /* kickSwing — map1_s03.c:1956-1999 VERBATIM in raw
+                    * units, one discrete step per 30Hz frame (the kick
+                    * velocity is added PER FRAME, no dt multiply). */
+            if (a->kickPhase == 0) {
+                if (g_animsDemo) {       /* the cutscene state-6 kick fires */
+                    a->rawVel = a->rawKickVel;
+                    a->kickPhase = 1;
+                } else break;
+            }
+            a->mvTimer += (float)(dt * 30.0);
+            int steps = 0;
+            while (a->mvTimer >= 1.0f && steps < 8) {
+                a->mvTimer -= 1.0f; steps++;
+                a->rawVy += a->rawVel;
+                if (a->rawVel == a->rawKickVel) {       /* initial kick */
+                    if (a->rawVy < a->rawOpenLimit) {
+                        a->rawVy = a->rawOpenLimit;
+                        a->rawVel = a->rawRebound;
+                    }
+                } else if ((a->rawVy < a->rawOpenLimit && a->rawVel < 0) ||
+                           (a->rawVy >= a->rawBounceHi && a->rawVel > 0)) {
+                    int t = -a->rawVel >> 1;
+                    a->rawVel = t;
+                    if (t == 1 || t == -1) a->rawVel = 0;
+                }
+            }
+            break;
+        }
+        case 9: {  /* gravityScatter — map7_s02_2.c:1170-1189: shared fall
+                    * velocity += g_GravitySpeed(10419)/tick, clamp 20480
+                    * (Q12(5.0)); the y fall accumulates; floor y=0. */
+            a->mvTimer += (float)(dt * 30.0);
+            int steps = 0;
+            while (a->mvTimer >= 1.0f && steps < 8) {
+                a->mvTimer -= 1.0f; steps++;
+                a->mvVel += 10419;
+                if (a->mvVel > 20480) a->mvVel = 20480;
+                a->cur[1] += (float)((int)(((long long)dtRaw * a->mvVel)
+                                           >> 12)) / 4096.0f;
+                if (a->cur[1] > 0.0f) a->cur[1] = 0.0f;   /* floor y=0 */
+            }
+            break;
+        }
+        case 11: { /* lightFlicker — map1_s05.c:371-396 VERBATIM (raw Q12).
+                    * t0 ramp: t0*per >= Q12(64)=262144 -> reroll per
+                    * [32,95] + amp [32,63] (the v27 rerollA fix);
+                    * envelope = amp*sin(t1); phase = (t1*per1)>>6
+                    * wraps at Q12(1.0); intensity = Q12(1.35) +
+                    * ((Q12(0.9) + 0.6*env) * sin(phase)) >> 15. */
+            a->flT0 += dtRaw;
+            if (a->flT0 * a->flPer0 >= a->flRampThresh) {
+                a->flT0 = 0;
+                a->flPer0 = 32 + (int)(sh_rng_next() % 64);  /* Rng(32,95) */
+                a->flAmp  = 32 + (int)(sh_rng_next() % 32);  /* Rng(32,63) */
+            }
+            int sp0 = (int)(((long long)a->flAmp *
+                             sh_sin_q12(a->flT1)) >> 12);
+            a->flT1 += dtRaw;
+            int sp1 = (int)(((long long)a->flT1 * a->flPer1) >> 6);
+            if (sp1 >= 4096) {
+                a->flT1 = 0;
+                a->flPer1 = 32 + (int)(sh_rng_next() % 64);
+                sp1 &= 0xFFF;
+            }
+            int inten = 5534 /* Q12(1.35f) */
+                      + (int)((long long)(
+                          (3686 +
+                           (int)(((long long)sp0 * 2458) >> 12)) *
+                          sh_sin_q12(sp1)) >> 15);
+            g_sh1xLightFlicker = (float)inten / 4096.0f;
+            break;
+        }
+        case 13:  /* carouselSpin master — map6_s04_2.c:3553-3554:
+                    * D_800ED5B6 = (dt*(D_800EBA30+D_800ED5B4)+m)&0xFFF;
+                    * engine-fresh both speeds are 0 (static carousel);
+                    * --anims-demo uses the post-Cybil D_800ED5B4=-122. */
+            a->mvMaster = (a->mvMaster +
+                          (int)(((long long)dtRaw *
+                                 (g_animsDemo ? -122 : 0)) >> 12)) & 0xFFF;
+            break;
+        case 14: { /* ferrisWheel — map6_s04_2.c:3746-3845 VERBATIM raw:
+                    * master += dt*Q12(45.511)=186413; wrap Q12(307.2);
+                    * 4 tracked cabin pendulums: idle timer > 186413 &&
+                    * (rand16 % 186413)+186413 < timer -> swing starts;
+                    * vel += dt*Q12(-68.2667) floored -139810; angle
+                    * += dt*vel; settle -93206; damping vel>>=1. */
+            int add = (int)(((long long)dtRaw * 186413) >> 12);
+            a->mvMaster += add;
+            if (a->mvMaster > 1258291) {
+                a->mvMaster -= 1258291;
+                a->mvWrapCount++;
+                for (int q = 3; q > 0; q--) {
+                    a->mvPend[q] = a->mvPend[q - 1];
+                    a->mvPendVel[q] = a->mvPendVel[q - 1];
+                }
+                a->mvPend[0] = 0; a->mvPendVel[0] = 0;
+            }
+            for (int q = 0; q < 4; q++) {
+                if (a->mvPendVel[q] == 0) {
+                    a->mvPend[q] += add;
+                    if (a->mvPend[q] > 186413 &&
+                        ((sh_rng_next() % 186413) + 186413) < a->mvPend[q])
+                        a->mvPendVel[q]--;
+                } else if (a->mvPend[q] > 0) {
+                    a->mvPendVel[q] +=
+                        (int)(((long long)dtRaw * -279620) >> 12);
+                    if (a->mvPendVel[q] < -139810) a->mvPendVel[q] = -139810;
+                    a->mvPend[q] +=
+                        (int)(((long long)dtRaw * a->mvPendVel[q]) >> 12);
+                    if (a->mvPend[q] < 0) {
+                        if (a->mvPendVel[q] > -93206) {
+                            a->mvPendVel[q] = 0; a->mvPend[q] = 0;
+                        } else {
+                            a->mvPendVel[q] >>= 1;
+                        }
+                    }
+                }
+            }
+            break;
+        }
+        case 15:  /* lissajousOrbit — map6_s04_2.c:3856-3860 VERBATIM raw:
+                    * A += dt*(Q12(0.197f)+1) = 807; B += dt*Q12(0.275f) */
+            a->mvMaster  += (int)(((long long)dtRaw * 807) >> 12);
+            a->mvMaster2 += (int)(((long long)dtRaw * 1126) >> 12);
+            break;
+        case 2:   /* tvNoise: LCG/state machine core; screen paint is a
+                    * texture-level effect (see the tv TODO in the docs) */
+        case 7:   /* cutscene: idle (engine-true default)                  */
+        default:
+            break;
+        }
+    }
+}
+
+/* v26.2: per-frame hook — called from the 30Hz env tick discipline (the
+ * engine's Map_WorldObjectsUpdate runs on the same 30Hz game frames). */
+static void sh1x_anims_sync(Sh1x *sx, double t) {
+    if (!sx || sx->nAnims <= 0) return;
+    static double lastT = -1e9;
+    double dt = (lastT < -1e8) ? 0.0 : (t - lastT);
+    if (dt < 0) dt = 0;                 /* scrub/restart: hold (monotonic) */
+    lastT = t;
+    if (dt > 0.1) dt = 0.1;             /* clamp like the env tick */
+    sh1x_anims_tick(sx, dt);
+}
+
+/* ==================================================================== */
+/* v26 fx_pass — the SH1X v3 FX paint (flare + shimmer + anims).        */
+/* Engine references (VERBATIM, silent-hill-decomp):
+ *  shLensFlareExec/Draw/SetLightSeed/Effect_Draw/LightCenterIsVisible/
+ *  MakeEffectTargetRate/SpriteXYSet/GreySet + func_8008E5B4/E794/EA68 +
+ *  LensFlare_WaterZoneGet — src/bodyprog/gfx/lens_flare.c.
+ *  WorldEnvRender_LightScreenInfoGet/AngleGet/PositionGet — src/bodyprog/
+ *  world/lighting.c:203-292. Prop drivers — map overlay scripts (see
+ *  docs/SH1X_EXTRAS_V3_FX.md). Screen geometry: engine 320x224 NTSC.    */
+/* -------------------------------------------------------------------- */
+static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
+    const Sh1x *sx = &R->sc->sh1x;
+    const ShEnv *env = R->env;
+    if (!env) return;
+
+    /* ---- GATE 1 (shLensFlareExec trigger, bodyprog_80055028.c:102-106):
+     * lightMode == Spot AND lensFlareIntensity != 0. The PoC env's Spot
+     * mode = field_0 == SHENUM_1; flashlightLensFlareIntensity is env's
+     * flashlightLensFlareIntensity (preset flag EnableLensFlare).      */
+    int spotOn = (env->field_0 == SHENUM_1) &&
+                 (env->cur.flashlightLensFlareIntensity != 0) &&
+                 !g_flaresys.flareInhibit;
+
+    /* the light = the env's ShLight direction; the POSITION for the FX
+     * pass is the ENGINE ANCHOR: camera frame * (-0.08,-0.28,0.12) with
+     * the -15deg pitch (Game_FlashlightAttribsSet, effects.c:210-218 —
+     * the verbatim Harry anchor; the v6 camera-coincident mesh light
+     * would make Gate 2 (scr z > proj/2) unreachable, engine-true). The
+     * Sh1x userLight extras override the offset/rotation (programmable). */
+    {
+        /* engine-local (x,y,z) -> camera-local (x,-y,-z) [the PoC's
+         * standing axis map]; then camera quaternion * local           */
+        float ox = -0.08f, oy = 0.28f, oz = -0.12f;
+        float rx = -15.0f * (float)M_PI / 180.0f;
+        if (sx->hasUserLight) {
+            ox = sx->userLightOffset[0];
+            oy = -sx->userLightOffset[1];
+            oz = -sx->userLightOffset[2];
+            rx = sx->userLightRot[0] * (float)M_PI / 180.0f;
+        }
+        float wx, wy, wz;
+        if (g_userLightMode == 1) {
+            /* --userlight x,y,z: FREE-WORLD light (engine-native NULL-
+             * bone path, Gfx_FlashlightPositionUpdate coord1==NULL)    */
+            wx = g_userLightWorld[0]; wy = g_userLightWorld[1];
+            wz = g_userLightWorld[2];
+        } else {
+            float extraAhead = (g_userLightMode == 2) ? g_userLightAheadM : 0.0f;
+            /* the engine rotates the offset by the bone (camera) matrix
+             * — the -15deg pitch tilts the local frame first (light
+             * frame), then the camera quaternion; extraAhead extends
+             * the forward offset (the trailing-camera geometry)        */
+            float cy = cosf(rx), sy = sinf(rx);
+            float lx0 = ox, ly0 = oy * cy - oz * sy, lz0 = oy * sy + oz * cy;
+            /* camera basis (three.js rows of R) */
+            v3 X, Y, Z;
+            quat_axes(cam->q, &X, &Y, &Z);
+            wx = X.x * lx0 + Y.x * ly0 + Z.x * lz0 + cam->pos.x - X.x * 0.0f;
+            wy = X.y * lx0 + Y.y * ly0 + Z.y * lz0 + cam->pos.y;
+            wz = X.z * lx0 + Y.z * ly0 + Z.z * lz0 + cam->pos.z;
+            if (extraAhead > 0.0f) {
+                /* -Z is camera-forward in glTF: move along -Z axis     */
+                wx -= Z.x * extraAhead; wy -= Z.y * extraAhead;
+                wz -= Z.z * extraAhead;
+            }
+        }
+        g_fxLightPos[0] = (int)(wx * 4096.0f);
+        g_fxLightPos[1] = (int)(wy * 4096.0f);
+        g_fxLightPos[2] = (int)(wz * 4096.0f);
+    }
+    const ShLight *L = &env->light;
+
+    /* engine screen px scale (320-wide) */
+    const int scale = fb->w / 320 > 0 ? fb->w / 320 : 1;
+
+    /* ---- light screen projection (WorldEnvRender_LightScreenInfoGet,
+     * lighting.c:203-292) — computed with the PoC view matrix in ENGINE
+     * px: scr pos centered on screen (geom offset), Q12 fixed-point     */
+    int scrLPos[3] = { 0, 0, 0 }, scrAngXY = 0, scrAngZ = 0;
+    if (spotOn) {
+        /* world light position (Q12, glTF axes) -> view space (m)      */
+        float lx = (float)g_fxLightPos[0] * (1.0f / 4096.0f);
+        float ly = (float)g_fxLightPos[1] * (1.0f / 4096.0f);
+        float lz = (float)g_fxLightPos[2] * (1.0f / 4096.0f);
+        mat4 view = mat4_view_from_quat(cam->pos, cam->q);
+        float vx = view.m[0] * lx + view.m[4] * ly + view.m[8] * lz + view.m[12];
+        float vy = view.m[1] * lx + view.m[5] * ly + view.m[9] * lz + view.m[13];
+        float vz = view.m[2] * lx + view.m[6] * ly + view.m[10] * lz + view.m[14];
+        float d = -vz;                       /* forward depth            */
+        if (d > 0.05f) {
+            /* project with the ENGINE geom screen H=240 (GTE constant
+             * ReadGeomScreen at boot; the flare's own bounds use the
+             * 320x224 screen halves)                                   */
+            float invd = 240.0f / d;
+            scrLPos[0] = (int)(vx * invd);          /* screen-centered px */
+            scrLPos[1] = (int)(vy * invd);
+            scrLPos[2] = (int)(d * 256.0f);          /* Q8-ish depth       */
+            /* scr_l_ang_xy/z: angle between the eye->light ray and the
+             * light direction (lighting.c:203-238). The PoC light rides
+             * the camera (direction == view forward), so the angle is
+             * derived from the projected offset of the light DIRECTION
+             * endpoint: dir_end = pos + dir. Engine computes it in the
+             * light's own plane via OuterProduct; the PoC has the SAME
+             * vectors in view space, so the same math applies.         */
+            float dxv = (float)L->dir[0] * (1.0f / 4096.0f);
+            float dyv = (float)L->dir[1] * (1.0f / 4096.0f);
+            float dzv = (float)L->dir[2] * (1.0f / 4096.0f);
+            float ex = vx + dxv, ey = vy + dyv, ez = vz + dzv;
+            float dex = ex - vx, dey = ey - vy, dez = ez - vz;
+            /* normalize both view-space vectors                        */
+            float nl = sqrtf(vx * vx + vy * vy + vz * vz) + 1e-9f;
+            float nd = sqrtf(dex * dex + dey * dey + dez * dez) + 1e-9f;
+            float ox = vx / nl, oy = vy / nl, oz = vz / nl;
+            float lxv = dex / nd, lyv = dey / nd, lzv = dez / nd;
+            /* outer product (plane normal) */
+            float pxn = oy * lzv - oz * lyv;
+            float pyn = oz * lxv - ox * lzv;
+            float pzn = ox * lyv - oy * lxv;
+            float pn = sqrtf(pxn * pxn + pyn * pyn + pzn * pzn) + 1e-9f;
+            pxn /= pn; pyn /= pn; pzn /= pn;
+            /* scr_l_ang_xy = atan2(norm.y, norm.x) - 90deg (Q12)       */
+            scrAngXY = fx_q12_angle(atan2f(pyn, pxn) * (180.0f / (float)M_PI))
+                       - fx_q12_angle(90.0f);
+            /* scr_l_ang_z = atan2(sin, cos) with sin = (lvec . (norm x
+             * pos)), cos = (pos . lvec) — engine verbatim             */
+            float cosz = ox * lxv + oy * lyv + oz * lzv;
+            float rx = pyn * oz - pzn * oy;
+            float ry = pzn * ox - pxn * oz;
+            float rz = pxn * oy - pyn * ox;
+            float sinz = lxv * rx + lyv * ry + lzv * rz;
+            scrAngZ = fx_q12_angle(atan2f(sinz, cosz) * (180.0f / (float)M_PI));
+
+            /* ---- GATE 2 (lens_flare.c:59-75): scr z > proj/2 ----------
+             * proj = ReadGeomScreen() = SCREEN_GEOM_DIST = 240 (screen
+             * height, data.h:44) — so the gate is vz > 120 in the SAME
+             * units as ws_l_pos: Q8 view meters (RotTrans of the Q8-
+             * translated light; lighting.c:226). The light must be more
+             * than 0.47m AHEAD of the camera — the engine's Harry light
+             * seen from the trailing camera (~2-5m), never a coincident
+             * camera light. The dist-rate table 204..3328 (0.8..13m) is
+             * in the SAME Q8 units — passed as-is below.               */
+            if (scrLPos[2] > 120) {
+                g_flaresys.syncDrawExecF = 1;
+                g_flaresys.scrLPos[0] = scrLPos[0];
+                g_flaresys.scrLPos[1] = scrLPos[1];
+                g_flaresys.scrLPos[2] = scrLPos[2];
+                g_flaresys.scrLAngXY = scrAngXY;
+                g_flaresys.scrLAngZ = scrAngZ;
+                /* shLensFlareMakeEffectTargetRate — pow = the env's
+                 * flashlightLensFlareIntensity Q12 (0..1) * light
+                 * intensity scale (engine passes light_intensity = the
+                 * blended spot intensity; PoC: env light intensity/4096
+                 * clamped to 0..1 for the pow table range)            */
+                int powQ12 = env->cur.flashlightLensFlareIntensity;
+                int powIn = (int)(((int64_t)powQ12 *
+                                   fx_min(fx_q12_mul(env->light.intensity,
+                                                     env->cur.flashlightLensFlareIntensity), 4096))
+                                  >> 12);
+                if (powIn > 4096) powIn = 4096;
+                g_flaresys.tgtEffRate = fx_flare_target_rate(
+                    powIn, scrLPos[2], scrAngZ);
+            }
+        }
+    }
+
+    /* ---- water shimmer gate (lens_flare.c:78-93 + WaterZoneGet) ---- */
+    if (!g_flaresys.waterInhibit && sx->nWaterZones > 0 && R->sc) {
+        /* camera (the PoC "player" proxy) inside a zone box? Engine
+         * checks the LIGHT pos (pos = the flashlight holder). Zones are
+         * ENGINE x/z meters; glTF maps (x,-y,-z): engine_x = cam.x,
+         * engine_z = -cam.z.                                          */
+        float ex = cam->pos.x, ez = -cam->pos.z;
+        for (int z = 0; z < sx->nWaterZones; z++) {
+            const Sh1xWaterZone *wz = &sx->waterZones[z];
+            if (!wz->enabled) continue;
+            if (ex >= wz->minX && ex < wz->maxX && ez >= wz->minZ && ez < wz->maxZ) {
+                /* inside: draw the wave tiles + glint + caustics.
+                 * The WATER.TIM/DR_WAVE.TIM pixels are NOT locally
+                 * available — the wave/glint sprite payload comes from
+                 * the consumer-side resolver; here we draw the CAUSTIC
+                 * RING (func_8008EA68 — pure geometry, no texture) and
+                 * the counter-driven shimmer WINDOW as an engine-styled
+                 * translucent overlay band (documented deviation: the
+                 * tile pixels await DR_WAVE.TIM; the geometry + counter
+                 * math + colors are verbatim).                          */
+                g_flaresys.counter++;       /* D_800AFDAC++ per non-zero dt */
+                float lx = (float)g_fxLightPos[0] * (1.0f / 4096.0f);
+                float ly = (float)g_fxLightPos[1] * (1.0f / 4096.0f);
+                float lz = (float)g_fxLightPos[2] * (1.0f / 4096.0f);
+                float posY = wz->illumination;   /* water plane height  */
+                /* func_8008E794: mirrored light position vy = posY*2 - vy */
+                float gx = lx, gy = posY * 2.0f - ly, gz = lz;
+                mat4 view = mat4_view_from_quat(cam->pos, cam->q);
+                float vx = view.m[0] * gx + view.m[4] * gy + view.m[8] * gz + view.m[12];
+                float vy = view.m[1] * gx + view.m[5] * gy + view.m[9] * gz + view.m[13];
+                float vz = view.m[2] * gx + view.m[6] * gy + view.m[10] * gz + view.m[14];
+                float d = -vz;
+                if (d > 0.5f) {
+                    /* the engine glint quad: ±24 x ±48 px around the
+                     * projected point (x±24, y∓48) — screen-centered    */
+                    float invd = 240.0f / d;
+                    int px0 = (int)(vx * invd), py0 = (int)(vy * invd);
+                    int qx[4] = { px0 - 24, px0 + 24, px0 - 24, px0 + 24 };
+                    int qy[4] = { py0 - 48, py0 - 48, py0 + 48, py0 + 48 };
+                    /* brightness: sin(clamp(angle-40°,<=90°)) — the
+                     * angle is scr_l_ang_z; r=sin>>6 g=(sin*7)>>9 b=(sin*5)>>9 */
+                    int ang0 = g_flaresys.scrLAngZ - fx_q12_angle(40.0f);
+                    if (ang0 > fx_q12_angle(90.0f)) ang0 = fx_q12_angle(90.0f);
+                    int sinA = sh_math_sin(ang0);
+                    if (sinA < 0) sinA = 0;
+                    int r = sinA >> 6, g = (sinA * 7) >> 9, b = (sinA * 5) >> 9;
+                    /* clamped u8 colors, SemiTrans avg-1 blend quad     */
+                    int x0 = (fb->w / 2) + qx[0] * scale;
+                    int x1 = (fb->w / 2) + qx[1] * scale;
+                    int y0 = (fb->h / 2) + qy[0] * scale;
+                    int y1 = (fb->h / 2) + qy[2] * scale;
+                    if (x1 > x0 && y1 > y0 && x1 > 0 && y1 > 0 &&
+                        x0 < (int)fb->w && y0 < (int)fb->h) {
+                        int a0 = x0 < 0 ? 0 : x0, a1 = x1 > fb->w ? fb->w : x1;
+                        int b0 = y0 < 0 ? 0 : y0, b1 = y1 > fb->h ? fb->h : y1;
+                        for (int yy = b0; yy < b1; yy++)
+                            for (int xx = a0; xx < a1; xx++) {
+                                size_t pi = (size_t)yy * fb->w + xx;
+                                uint8_t *p = fb->rgb + pi * 3;
+                                /* SemiTrans mode-1 avg (B+F)/2, 5-bit     */
+                                int rr = ((p[0] >> 3) + r) >> 1;
+                                int gg = ((p[1] >> 3) + g) >> 1;
+                                int bb = ((p[2] >> 3) + b) >> 1;
+                                if (rr > 31) rr = 31; if (gg > 31) gg = 31; if (bb > 31) bb = 31;
+                                p[0] = (uint8_t)((rr << 3) | (rr >> 2));
+                                p[1] = (uint8_t)((gg << 3) | (gg >> 2));
+                                p[2] = (uint8_t)((bb << 3) | (bb >> 2));
+                            }
+                    }
+                    /* func_8008EA68 caustic ring: 8 steps of 45°, inner
+                     * radius 0.2m at +1.2m fwd, outer 2.2m at +1.5m in
+                     * the light's yaw frame; colors (20,18,12)/(4,4,4)
+                     * opaque + (4,8,4)/(0,0,0) semi-trans. Implemented
+                     * as screen-space rings around the projected glint   */
+                    for (int i = 0; i < 8; i++) {
+                        int curA = i * fx_q12_angle(45.0f);
+                        int nxtA = (i + 1) * fx_q12_angle(45.0f);
+                        /* ring corners in the light-local frame         */
+                        float s1 = (float)sh_math_sin(curA) / 4096.0f;
+                        float c1 = (float)sh_math_cos(curA) / 4096.0f;
+                        float s2 = (float)sh_math_sin(nxtA) / 4096.0f;
+                        float c2 = (float)sh_math_cos(nxtA) / 4096.0f;
+                        /* inner r=0.2 z=+1.2, outer r=2.2 z=+1.5 (m)   */
+                        float ix0 = 0.2f * s1, iz0 = 1.2f + 0.2f * c1;
+                        float ix1 = 0.2f * s2, iz1 = 1.2f + 0.2f * c2;
+                        float ox0 = 2.2f * s1, oz0 = 1.5f + 2.2f * c1;
+                        float ox1 = 2.2f * s2, oz1 = 1.5f + 2.2f * c2;
+                        /* transform from the light frame: yaw from the
+                         * light direction (the engine builds sp50 from
+                         * ratan2(rot->vx, rot->vz))                     */
+                        float yaw = atan2f(
+                            (float)L->dir[0] / 4096.0f,
+                            (float)L->dir[2] / 4096.0f);
+                        float cyw = cosf(yaw), syw = sinf(yaw);
+                        /* corners in world (relative to light pos)       */
+                        float wpts[4][3];
+                        wpts[0][0] = ix0 * cyw; wpts[0][2] = iz0 * syw;
+                        wpts[1][0] = ix1 * cyw; wpts[1][2] = iz1 * syw;
+                        wpts[2][0] = ox0 * cyw; wpts[2][2] = oz0 * syw;
+                        wpts[3][0] = ox1 * cyw; wpts[3][2] = oz1 * syw;
+                        for (int k = 0; k < 4; k++) {
+                            wpts[k][0] += gx; wpts[k][1] = gy; wpts[k][2] += gz;
+                        }
+                        /* project 4 corners; draw the semi-trans tris   */
+                        int sxp[4], syp[4];
+                        int vis = 1;
+                        for (int k = 0; k < 4; k++) {
+                            float wx = wpts[k][0], wy = wpts[k][1], wz2 = wpts[k][2];
+                            float px = view.m[0] * wx + view.m[4] * wy + view.m[8] * wz2 + view.m[12];
+                            float py = view.m[1] * wx + view.m[5] * wy + view.m[9] * wz2 + view.m[13];
+                            float pz = view.m[2] * wx + view.m[6] * wy + view.m[10] * wz2 + view.m[14];
+                            float dd = -pz;
+                            if (dd <= 0.05f) { vis = 0; break; }
+                            float iv = 240.0f / dd;
+                            sxp[k] = (int)(px * iv) + (int)(fb->w / 2);
+                            syp[k] = (int)(py * iv) + (int)(fb->h / 2);
+                        }
+                        if (vis) {
+                            /* two tris: (0,1,2) + (0,2,3) with flat
+                             * colors (4,8,4)/(0,0,0) semi-trans avg     */
+                            static const int ringR = 4, ringG = 8, ringB = 4;
+                            int tris[2][3] = { { 0, 1, 2 }, { 0, 2, 3 } };
+                            for (int ti = 0; ti < 2; ti++) {
+                                int *tv = tris[ti];
+                                int mnx = sxp[tv[0]], mxx = sxp[tv[0]];
+                                int mny = syp[tv[0]], mxy = syp[tv[0]];
+                                for (int k = 1; k < 3; k++) {
+                                    if (sxp[tv[k]] < mnx) mnx = sxp[tv[k]];
+                                    if (sxp[tv[k]] > mxx) mxx = sxp[tv[k]];
+                                    if (syp[tv[k]] < mny) mny = syp[tv[k]];
+                                    if (syp[tv[k]] > mxy) mxy = syp[tv[k]];
+                                }
+                                if (mxx < 0 || mnx >= (int)fb->w || mxy < 0 || mny >= (int)fb->h) continue;
+                                if (mnx < 0) mnx = 0;
+                                if (mny < 0) mny = 0;
+                                if (mxx >= (int)fb->w) mxx = fb->w - 1;
+                                if (mxy >= (int)fb->h) mxy = fb->h - 1;
+                                for (int yy = mny; yy <= mxy; yy++)
+                                    for (int xx = mnx; xx <= mxx; xx++) {
+                                        double a2 = xx + 0.5, b2 = yy + 0.5;
+                                        double d1 = (sxp[tv[1]] - a2) * (syp[tv[0]] - b2) - (sxp[tv[0]] - a2) * (syp[tv[1]] - b2);
+                                        double d2 = (sxp[tv[2]] - sxp[tv[1]]) * (syp[tv[0]] - syp[tv[1]]) - (sxp[tv[0]] - sxp[tv[1]]) * (syp[tv[2]] - syp[tv[1]]);
+                                        double d3 = (sxp[tv[0]] - sxp[tv[2]]) * (syp[tv[1]] - syp[tv[2]]) - (sxp[tv[1]] - sxp[tv[2]]) * (syp[tv[0]] - syp[tv[2]]);
+                                        int neg = (d1 < 0) || (d2 < 0) || (d3 < 0);
+                                        int pos = (d1 > 0) || (d2 > 0) || (d3 > 0);
+                                        if (neg && pos) continue;
+                                        size_t pi = (size_t)yy * fb->w + xx;
+                                        uint8_t *p = fb->rgb + pi * 3;
+                                        int rr = ((p[0] >> 3) + ringR) >> 1;
+                                        int gg = ((p[1] >> 3) + ringG) >> 1;
+                                        int bb = ((p[2] >> 3) + ringB) >> 1;
+                                        if (rr > 31) rr = 31; if (gg > 31) gg = 31; if (bb > 31) bb = 31;
+                                        p[0] = (uint8_t)((rr << 3) | (rr >> 2));
+                                        p[1] = (uint8_t)((gg << 3) | (gg >> 2));
+                                        p[2] = (uint8_t)((bb << 3) | (bb >> 2));
+                                    }
+                            }
+                        }
+                    }
+                }
+                break;      /* first matching zone wins (engine returns it) */
+            }
+        }
+    }
+
+    /* ---- shLensFlareDraw (lens_flare.c:176-223) ---------------------- */
+    if (!g_flaresys.syncDrawExecF) return;
+    g_flaresys.syncDrawExecF = 0;
+    if (g_flaresys.flareInhibit) return;
+
+    /* occlusion probe: the engine reads back the 1x1 white TILE pixel at
+     * the light's screen center (pixels[0] & 0x7FFF) == 0x7FFF). PoC:
+     * probe the depth buffer — visible iff NO opaque geometry closer
+     * than the light depth at that pixel (fb->z < light depth = covered).
+     */
+    {
+        int px = g_flaresys.scrLPos[0] + fb->w / 2;
+        int py = g_flaresys.scrLPos[1] + fb->h / 2;
+        int visible = 0;
+        if (px >= 0 && px < (int)fb->w && py >= 0 && py < (int)fb->h) {
+            float lightDepth = (float)g_flaresys.scrLPos[2] / 256.0f;
+            visible = fb->z[(size_t)py * fb->w + px] >= lightDepth;
+        }
+        g_flaresys.centerVisible = visible;
+        /* rate easing (lens_flare.c:182-192): now += (tgt-now)/2 or ->0 */
+        int add = visible ? g_flaresys.tgtEffRate - g_flaresys.nowEffRate
+                          : -g_flaresys.nowEffRate;
+        g_flaresys.nowEffRate += fx_div_fast(add, 2);
+        /* PoC is never the engine's VC_MV_CHASE cam (camera-track modes
+         * are the equivalent of the engine's road cams); chase-kill N/A  */
+    }
+
+    /* ---- shLensFlareEffect_Draw (lens_flare.c:296-487) — sprites ----- */
+    int nowRate = g_flaresys.nowEffRate;
+    int scrX = g_flaresys.scrLPos[0];
+    int scrY = g_flaresys.scrLPos[1];
+    int angXY = g_flaresys.scrLAngXY;
+    int angZ = g_flaresys.scrLAngZ;
+    int visF = g_flaresys.centerVisible;
+
+    /* super-cull (lens_flare.c:311-316): ±512 engine px beyond screen  */
+    if (scrX < -160 - 512 || scrX > 160 + 512 ||
+        scrY < -112 - 512 || scrY > 112 + 512) return;
+
+    int hensinX = fx_q12_mul(sh_math_sin(angZ), sh_math_cos(angXY));
+    int hensinY = fx_q12_mul(sh_math_sin(angZ), sh_math_sin(angXY));
+
+    /* sprite blits in PoC px (engine px * scale, screen-centered)      */
+    #define FX_TO_PX(v) ((int)((v) * scale) + (int)(fb->w / 2))
+    #define FX_TO_PY(v) ((int)((v) * scale) + (int)(fb->h / 2))
+
+    /* core quad 1 (lens_flare.c:326-336): grey ((rate+3)>>2)*40, half-
+     * size ((rate+3)>>2)*30, offset hensin*5; UV 0..63 clut+6          */
+    {
+        int rate3 = (nowRate + 3 * 4096) >> 2;
+        int prim = fx_q12_mul(rate3, 40);
+        int half = fx_q12_mul(rate3, 30);
+        int ox = fx_q12_mul(hensinX, 5), oy = fx_q12_mul(hensinY, 5);
+        fx_blit_sprite_quad(fb,
+            FX_TO_PX(scrX + ox - half), FX_TO_PY(scrY + oy - half),
+            FX_TO_PX(scrX + ox + half), FX_TO_PY(scrY + oy - half),
+            FX_TO_PX(scrX + ox - half), FX_TO_PY(scrY + oy + half),
+            FX_TO_PX(scrX + ox + half), FX_TO_PY(scrY + oy + half),
+            (const unsigned char *)kFlareCore, 64, 64, kFlareClutCore,
+            prim, prim, prim);
+    }
+    /* core quad 2: fixed color 0x10, half-size 11 (lens_flare.c:338-365) */
+    fx_blit_sprite_quad(fb,
+        FX_TO_PX(scrX - 11), FX_TO_PY(scrY - 11),
+        FX_TO_PX(scrX + 11), FX_TO_PY(scrY - 11),
+        FX_TO_PX(scrX - 11), FX_TO_PY(scrY + 11),
+        FX_TO_PX(scrX + 11), FX_TO_PY(scrY + 11),
+        (const unsigned char *)kFlareCore, 64, 64, kFlareClutCore,
+        0x10, 0x10, 0x10);
+    /* core quad 3 (lens_flare.c:367-396): grey min(rate*2,1)*48, offset
+     * hensin*9/2? engine FP_MULTIPLY(hensin, 9, Q12_SHIFT-1) = h*9/2   */
+    {
+        int r2 = nowRate * 2; if (r2 > 4096) r2 = 4096;
+        int prim = fx_q12_mul(r2, 48);
+        int half = fx_q12_mul((nowRate + 3 * 4096) >> 2, 48);
+        int ox = (int)(((int64_t)hensinX * 9) >> (FX_Q12_SHIFT - 1));
+        int oy = (int)(((int64_t)hensinY * 9) >> (FX_Q12_SHIFT - 1));
+        fx_blit_sprite_quad(fb,
+            FX_TO_PX(scrX + ox - half), FX_TO_PY(scrY + oy - half),
+            FX_TO_PX(scrX + ox + half), FX_TO_PY(scrY + oy - half),
+            FX_TO_PX(scrX + ox - half), FX_TO_PY(scrY + oy + half),
+            FX_TO_PX(scrX + ox + half), FX_TO_PY(scrY + oy + half),
+            (const unsigned char *)kFlareCore, 64, 64, kFlareClutCore,
+            prim, prim, prim);
+    }
+
+    if (nowRate != 0) {
+        /* 16 streaks (lens_flare.c:398-431) — VERBATIM angles + rate    */
+        static const int ang_dat[16] = {
+            -175, -168, -130, -115, -60, -50, -15, -2,
+            5, 35, 40, 60, 110, 142, 147, 155
+        };                                   /* degrees -> Q12 below     */
+        /* streak quad corners (DVECTOR pos[]), rotated per angle        */
+        const int posx[4] = { -4, 43, 43, 90 };
+        const int posy[4] = { 0, -47, 47, 0 };
+        int addFlareAng = ((-angZ >> 1) + ((scrX + scrY) * 4)) +
+                          fx_q12_angle(60.0f);
+        int addMaskAng = (g_flaresys.scrLPos[2] * 4) + ((scrX + scrY) * 16);
+        for (int i = 0; i < 16; i++) {
+            int ang = fx_q12_angle((float)ang_dat[i]) + addFlareAng;
+            int rate16 = fx_q12_mul(
+                (sh_math_cos(ang - angXY) + 1741 /* Q12(1.7) */),
+                (sh_math_cos((ang * 12) + addMaskAng) + 4096) >> 1);
+            if (rate16 > 6144) rate16 = 6144;          /* MIN 1.5       */
+            int prim = (int)(((int64_t)nowRate * rate16) >> 18);
+            int sv = sh_math_sin(ang), cv = sh_math_cos(ang);
+            /* rotated corners: (x*cos - y*sin, x*sin + y*cos) in Q12->px */
+            int cxp[4], cyp[4];
+            for (int k = 0; k < 4; k++) {
+                /* engine FP_FROM(pos*cos - pos*sin, 12): fixed->int px  */
+                int rx = (int)(((int64_t)posx[k] * cv -
+                                (int64_t)posy[k] * sv) >> 12);
+                int ry = (int)(((int64_t)posx[k] * sv +
+                                (int64_t)posy[k] * cv) >> 12);
+                cxp[k] = FX_TO_PX(scrX + rx);
+                cyp[k] = FX_TO_PY(scrY + ry);
+            }
+            fx_blit_sprite_quad(fb, cxp[0], cyp[0], cxp[1], cyp[1],
+                                cxp[2], cyp[2], cxp[3], cyp[3],
+                                (const unsigned char *)kFlareStreak, 32, 32,
+                                kFlareClutStreak, prim, prim, prim);
+        }
+
+        /* ghost 1 (lens_flare.c:447-459): RGB rate*32/48/32, scale .2  */
+        {
+            int half = fx_q12_mul((nowRate + 3 * 4096) >> 2, 16);
+            int px = fx_q12_mul(scrX, 819 /* Q12(0.2) */);
+            int py = fx_q12_mul(scrY, 819);
+            fx_blit_sprite_quad(fb,
+                FX_TO_PX(px - half), FX_TO_PY(py - half),
+                FX_TO_PX(px + half), FX_TO_PY(py - half),
+                FX_TO_PX(px - half), FX_TO_PY(py + half),
+                FX_TO_PX(px + half), FX_TO_PY(py + half),
+                (const unsigned char *)kFlareGhost, 64, 64, kFlareClutGhost,
+                fx_q12_mul(nowRate, 32) >> 4, fx_q12_mul(nowRate, 48) >> 4,
+                fx_q12_mul(nowRate, 32) >> 4);
+        }
+        /* ghost 2 (lens_flare.c:462-475): RGB rate*7/2^9, *19/2^11, *24;
+         * scale -0.3, half ((rate+3)>>2)*28                            */
+        {
+            int half = fx_q12_mul((nowRate + 3 * 4096) >> 2, 28);
+            int px = fx_q12_mul(scrX, -1229 /* Q12(0.3) */);
+            int py = fx_q12_mul(scrY, -1229);
+            unsigned urate = (unsigned)nowRate;
+            int r = (int)((urate * 7) >> 9);
+            int g = (int)((urate * 19) >> 11);
+            int b = fx_q12_mul(nowRate, 24) >> 4;
+            fx_blit_sprite_quad(fb,
+                FX_TO_PX(px - half), FX_TO_PY(py - half),
+                FX_TO_PX(px + half), FX_TO_PY(py - half),
+                FX_TO_PX(px - half), FX_TO_PY(py + half),
+                FX_TO_PX(px + half), FX_TO_PY(py + half),
+                (const unsigned char *)kFlareGhost, 64, 64, kFlareClutGhost,
+                r, g, b);
+        }
+        /* ghost 3 (lens_flare.c:477-487): tpage 76 window 0..63 clut+6 */
+        {
+            unsigned urate = (unsigned)nowRate;
+            int r = (int)(urate >> 6);
+            int g = fx_q12_mul(nowRate, 24) >> 4;
+            int b = (int)((urate * 47) >> 11);
+            fx_blit_sprite_quad(fb,
+                FX_TO_PX(scrX - 10), FX_TO_PY(scrY - 10),
+                FX_TO_PX(scrX + 10), FX_TO_PY(scrY - 10),
+                FX_TO_PX(scrX - 10), FX_TO_PY(scrY + 10),
+                FX_TO_PX(scrX + 10), FX_TO_PY(scrY + 10),
+                (const unsigned char *)kFlareGhost3, 64, 64, kFlareClutCore,
+                r, g, b);
+        }
+    }
+    (void)visF;
+    #undef FX_TO_PX
+    #undef FX_TO_PY
+}
+
 /* v18 diagnostics — FOGPOC_LIGHTDUMP (globals declared above utils) */
 static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
     const Scene *sc = R->sc;
@@ -6792,6 +8438,24 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
      * CALLOC'd so the compiler can prove initialization — any vertex an
      * item did not cover reads z=0 and is near-culled, no semantic change) */
     int nItems = sc->itemCount;
+    sh1x_anims_draw_apply(sc);   /* v26.3: live driver rotations -> items */
+    if (getenv("SH1X_ANIM_DEBUG")) {
+        static int dbgN = 0;
+        if (dbgN++ < 400) {
+            for (int i = 0; i < sc->sh1x.nAnims; i++)
+                fprintf(stderr, "[animstate] t? cur=(%.2f,%.2f,%.2f) %s\n",
+                        sc->sh1x.anims[i].cur[0], sc->sh1x.anims[i].cur[1],
+                        sc->sh1x.anims[i].cur[2], sc->sh1x.anims[i].object);
+        }
+        static int once = 0;
+        if (!once) { once = 1;
+            for (int i = 0; i < sc->itemCount; i++)
+                if (sc->item[i].animIdx >= 0)
+                    fprintf(stderr, "[animbind] item %d '%s' -> anim %d (%s)\n", i,
+                            sc->item[i].name, sc->item[i].animIdx,
+                            sc->sh1x.anims[sc->item[i].animIdx].object);
+        }
+    }
     RVert *xv = (RVert *)calloc((size_t)(sc->vertCount ? sc->vertCount : 1), sizeof(RVert));
     for (int i = 0; i < nItems; i++) {
         transform_item2(R, &sc->item[i], &view, &viewProj,
@@ -7483,6 +9147,28 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
     }
 
     free(xv); free(post);
+
+    /* ---- v26 SH1X v3: LENS FLARE + WATER SHIMMER pass --------------------
+     * Engine order: shLensFlareExec runs INSIDE WorldGfx_2dEffectsDraw
+     * (before the GPU walk) computing the target rate + the occlusion
+     * seed; shLensFlareDraw runs AFTER DrawSync (game_main.c:223) adding
+     * the sprites at the FRONT OT slots (org[1], depth_ot+7). In the PoC
+     * the whole flare paint happens here — after the mesh OT walk, before
+     * the brightness overlay — which preserves the engine's LAYERING
+     * (flare sprites paint OVER the scene). Water shimmer quads ride
+     * org[641]/org[639] = behind the brightness overlay, over geometry:
+     * drawn here as well (the PoC OT is depth-sorted only for meshes).
+     * All gated by the GLB's SH1X v3 fields (absent = off).            */
+    fx_pass(fb, R, cam);
+    if (getenv("FOGPOC_FXDBG"))
+        fprintf(stderr, "[fx] field_0=%d lensFlareInt=%d lightModeGate=%d "
+                "fi=%d spotInt=%d nowRate=%d tgt=%d sync=%d\n",
+                R->env->field_0, R->env->cur.flashlightLensFlareIntensity,
+                (R->env->field_0 == SHENUM_1) &&
+                (R->env->cur.flashlightLensFlareIntensity != 0),
+                R->env->flashlightIntensity, R->env->light.intensity,
+                g_flaresys.nowEffRate, g_flaresys.tgtEffRate,
+                g_flaresys.syncDrawExecF);
 
     /* ---- v4: WorldGfx_2dEffectsDraw screen-brightness overlay -------------
      * Full-screen additive semi-trans G4 at the FRONT of the OT (drawn last,
@@ -8351,6 +10037,7 @@ static void live_render(LiveApp *A) {
         snow_sync_live(&A->snow, A->play.t, cp.pos, cp.forward,
                        A->track, A->ovr.useFixed ? &A->ovr : NULL);
     sh_env_sync_live(&A->env, A->play.t, cp.pos, cp.q, 0);
+    sh1x_anims_sync(&A->R.sc->sh1x, A->play.t);
     render_frame(&A->fb, &A->R, &cp);
 }
 
@@ -9719,166 +11406,6 @@ static int run_window_x11(LiveApp *A) {
     live_save_final(A);
     return 1;
 }
-/* ------------------------------------------------------------------ */
-/* Android backend - ANativeWindow (no SDL2, no X11; libandroid)       */
-/*                                                                     */
-/* The JNI layer (sh1_jni.c) owns the Surface lifecycle and publishes  */
-/* the current ANativeWindow here; this loop is the X11 loop with      */
-/* XPutImage swapped for a nearest-neighbor scale blit of the engine's */
-/* 0xAARRGGBB framebuffer into the window's RGBA_8888/RGB_565 buffer,  */
-/* aspect-fit + letterboxed. Renderer math is untouched.               */
-/* ------------------------------------------------------------------ */
-#ifdef __ANDROID__
-
-#include <android/native_window.h>
-#include <android/log.h>
-#include <pthread.h>
-
-#define ALOGI(...) __android_log_print(ANDROID_LOG_INFO,  "sh1poc", __VA_ARGS__)
-#define ALOGE(...) __android_log_print(ANDROID_LOG_ERROR, "sh1poc", __VA_ARGS__)
-/* route the engine's stdout chatter (main(), live_save_final, ...) to logcat */
-#define printf(...) ALOGI(__VA_ARGS__)
-
-static ANativeWindow *g_and_win = NULL;
-static pthread_mutex_t g_and_lock = PTHREAD_MUTEX_INITIALIZER;
-static volatile int g_and_visible = 1;
-static volatile int g_and_key = -1;    /* single-slot queued UI key */
-
-void sh1_android_set_window(ANativeWindow *win) {
-    pthread_mutex_lock(&g_and_lock);
-    g_and_win = win;
-    pthread_mutex_unlock(&g_and_lock);
-}
-
-void sh1_android_set_visible(int vis) { g_and_visible = vis ? 1 : 0; }
-
-void sh1_android_post_key(int k) { g_and_key = k; }
-
-static void and_clear_8888(ANativeWindow_Buffer *buf) {
-    uint8_t *base = (uint8_t *)buf->bits;
-    for (int y = 0; y < buf->height; y++)
-        memset(base + (size_t)y * (size_t)buf->stride * 4u, 0,
-               (size_t)buf->width * 4u);
-}
-
-static void and_clear_565(ANativeWindow_Buffer *buf) {
-    uint16_t *base = (uint16_t *)buf->bits;
-    for (int y = 0; y < buf->height; y++)
-        memset(base + (size_t)y * (size_t)buf->stride, 0,
-               (size_t)buf->width * 2u);
-}
-
-static void and_blit(LiveApp *A, ANativeWindow_Buffer *buf) {
-    const int fw = A->fb.w, fh = A->fb.h;
-    const int ww = buf->width, wh = buf->height;
-    int dstW, dstH, offX, offY, sx0 = 0, srcW = fw;
-    const int cover = (wh > ww);   /* portrait wallpaper: full-bleed crop */
-    if (cover) {
-        /* cover: scale to FILL the screen, center-crop the source columns.
-         * A letterboxed 320x224 band would waste ~70% of a phone screen. */
-        int sw = (int)((long long)fh * ww / wh);
-        if (sw > fw) sw = fw;
-        sx0 = (fw - sw) >> 1;
-        srcW = sw;
-        dstW = ww; dstH = wh;
-        offX = 0; offY = 0;
-    } else {
-        /* landscape: aspect-fit + letterbox (the classic PoC look) */
-        dstW = ww;
-        dstH = (int)((long long)fh * ww / fw);
-        if (dstH > wh) { dstH = wh; dstW = (int)((long long)fw * wh / fh); }
-        offX = (ww - dstW) >> 1;
-        offY = (wh - dstH) >> 1;
-    }
-    const uint32_t *src = A->argb;
-    if (buf->format == WINDOW_FORMAT_RGB_565) {
-        if (!cover) and_clear_565(buf);
-        uint16_t *base = (uint16_t *)buf->bits;
-        const int xs = (srcW << 16) / dstW, ys = (fh << 16) / dstH;
-        int ypos = 0;
-        for (int y = 0; y < dstH; y++) {
-            const uint32_t *srow = src + (size_t)(ypos >> 16) * fw;
-            uint16_t *drow = base + (size_t)(y + offY) * (size_t)buf->stride
-                           + (size_t)offX;
-            int xpos = sx0 << 16;
-            for (int x = 0; x < dstW; x++) {
-                uint32_t p = srow[xpos >> 16];
-                int r = (int)(p >> 16) & 0xF8, g = (int)(p >> 8) & 0xFC, b = (int)p & 0xF8;
-                drow[x] = (uint16_t)((r << 8) | (g << 3) | (b >> 3));
-                xpos += xs;
-            }
-            ypos += ys;
-        }
-    } else {
-        /* WINDOW_FORMAT_RGBA_8888 **and** WINDOW_FORMAT_RGBX_8888 —
-         * the system wallpaper surface is typically RGBX_8888 (format 2);
-         * ignoring it was the black-screen bug. Same byte layout for both. */
-        if (!cover) and_clear_8888(buf);
-        uint8_t *base = (uint8_t *)buf->bits;
-        const int xs = (srcW << 16) / dstW, ys = (fh << 16) / dstH;
-        int ypos = 0;
-        for (int y = 0; y < dstH; y++) {
-            const uint32_t *srow = src + (size_t)(ypos >> 16) * fw;
-            uint8_t *drow = base + (size_t)(y + offY) * (size_t)buf->stride * 4u
-                          + (size_t)offX * 4u;
-            int xpos = sx0 << 16;
-            for (int x = 0; x < dstW; x++) {
-                uint32_t p = srow[xpos >> 16];
-                uint8_t *d = drow + (size_t)x * 4u;
-                /* engine packs 0xAARRGGBB -> memory bytes B,G,R,A;      */
-                /* RGBA_8888/RGBX_8888 want memory bytes R,G,B,A(X:=FF)  */
-                d[0] = (uint8_t)(p >> 16);
-                d[1] = (uint8_t)(p >> 8);
-                d[2] = (uint8_t)p;
-                d[3] = 0xFF;
-                xpos += xs;
-            }
-            ypos += ys;
-        }
-    }
-}
-
-static int run_window_android(LiveApp *A) {
-    ALOGI("realtime: Android surface backend (engine raster %dx%d, %.1f fps cap)",
-          A->fb.w, A->fb.h, A->maxFps);
-    double prev = now_sec();
-    while (1) {
-        int k = g_and_key; g_and_key = -1;
-        if (k >= 0 && live_action(A, (LiveKey)k, 1)) break;
-
-        double t0 = now_sec();
-        if (!g_and_visible) { sleep_ms(33u); prev = t0; continue; }
-        double dt = t0 - prev; prev = t0;
-
-        /* v20 whole-tick 30 Hz lockstep - identical to the X11 loop */
-        CamPose cp = live_advance(A, dt);
-        if (live_done(A)) break;
-        render_frame(&A->fb, &A->R, &cp);
-        live_draw_overlay(A);
-        fb_to_argb(&A->fb, A->argb);
-
-        /* present: snapshot the window under the lock, then use it    */
-        pthread_mutex_lock(&g_and_lock);
-        ANativeWindow *win = g_and_win;
-        if (win) ANativeWindow_acquire(win);
-        pthread_mutex_unlock(&g_and_lock);
-        if (win) {
-            ANativeWindow_Buffer buf;
-            if (ANativeWindow_lock(win, &buf, NULL) == 0) {
-                and_blit(A, &buf);
-                ANativeWindow_unlockAndPost(win);
-            }
-            ANativeWindow_release(win);
-        }
-
-        live_pace(t0, A->maxFps > 0 ? 1.0 / A->maxFps : 0.0);
-    }
-    live_save_final(A);
-    return 1;
-}
-
-#endif /* __ANDROID__ backend */
-
 #endif /* platform backends */
 
 /* ------------------------------------------------------------------ */
@@ -9887,8 +11414,6 @@ static int run_window_android(LiveApp *A) {
 static int run_realtime(LiveApp *A, int winW, int winH) {
 #if defined(_WIN32)
     return run_window_win32(A, winW, winH);
-#elif defined(__ANDROID__)
-    return run_window_android(A);
 #else
     if (run_window_sdl(A, winW, winH)) return 1;
     if (run_window_x11(A)) return 1;
@@ -10073,6 +11598,40 @@ int main(int argc, char **argv) {
             if (worldStage < 1 || worldStage > 3) {
                 fprintf(stderr, "bad --worldstage (1 day, 2 night, 3 {9,9})\n");
                 return 1;
+            }
+        }
+        else if (!strcmp(a, "--anims-demo")) {
+            /* v27: treat event gates as SET (engine state after the story
+             * events): the cutscene anims play — the drawbridge door slam,
+             * the locker kick, the boiler light flicker, the rides spin.
+             * Default (engine-fresh): all event-gated drivers idle at
+             * their authored rot0 pose. */
+            g_animsDemo = 1;
+        }
+        else if (!strcmp(a, "--maplink") && i + 1 < argc) {
+            /* v27: 1 = merge neighbor GLBs when present (default), 0 =
+             * single room only (regression A/B) */
+            g_mapLinkLoad = !!atoi(argv[++i]);
+        }
+        else if (!strcmp(a, "--userlight") && i + 1 < argc) {
+            /* v26 task 3: user-programmable light. "off"=engine anchor;
+             * "x,y,z"=free world light; "ahead:D"=D m ahead of camera   */
+            const char *v = argv[++i];
+            if (!strcmp(v, "off")) { g_userLightMode = 0; }
+            else if (!strncmp(v, "ahead:", 6)) {
+                g_userLightMode = 2;
+                g_userLightAheadM = (float)atof(v + 6);
+                if (g_userLightAheadM < 0) g_userLightAheadM = 0;
+            } else {
+                float fx2, fy2, fz2;
+                if (sscanf(v, "%f,%f,%f", &fx2, &fy2, &fz2) == 3) {
+                    g_userLightMode = 1;
+                    g_userLightWorld[0] = fx2; g_userLightWorld[1] = fy2;
+                    g_userLightWorld[2] = fz2;
+                } else {
+                    fprintf(stderr, "--userlight expects off | x,y,z | ahead:D\n");
+                    return 1;
+                }
             }
         }
         else if (!strcmp(a, "--lensflare") && i + 1 < argc) {
@@ -10476,6 +12035,13 @@ int main(int argc, char **argv) {
     /* ---- load the scene DIRECTLY from the GLB ---- */
     Scene sc;
     if (!scene_load_glb(&sc, glbPath)) return 1;
+    {   /* v27 mapLink: merge the present neighbor GLBs (silent no-op when
+         * the files are absent; interior rooms never stream) */
+        int nb = sh1x_load_neighbors(&sc, glbPath);
+        if (nb)
+            printf("mapLink: %d neighbor room(s) merged (cliff continuation)\n",
+                   nb);
+    }
     printf("GLB %s: %d draw items, %d verts, %d indices, %d textures, bounds "
            "(%.1f..%.1f, %.1f..%.1f, %.1f..%.1f) diag %.2f m\n",
            glbPath, sc.itemCount, sc.vertCount, sc.idxCount, sc.texCount,
@@ -10668,6 +12234,10 @@ int main(int argc, char **argv) {
      * (map0_s02_events.c:102, map6_s01_2.c:479). The N key cycles
      * day -> night --nightpair -> the other pair -> day.                */
     LiveApp A; memset(&A, 0, sizeof(A));
+    /* v26: lens flare work state — the engine's LensFlareInit-equivalent
+     * (lens_flare.c:22-24 resets the flags/rate; the PoC starts enabled —
+     * the inhibitors are the map-script Disable calls, unavailable here) */
+    memset(&g_flaresys, 0, sizeof(g_flaresys));
     A.env.nightP0 = nightPair0;
     A.env.nightP1 = nightPair1;
     /* the nightmare pair = the other authentic night pair of {6,3}/{7,4} */
@@ -10973,6 +12543,7 @@ int main(int argc, char **argv) {
                     snow_sync_live(&Ss, P.t, cp.pos, cp.forward, track, NULL);
             }
             sh_env_sync_live(&Es, P.t, cp.pos, cp.q, 0);
+            sh1x_anims_sync(&R.sc->sh1x, P.t);   /* v26.3: driver tick      */
             tSim += tickDt;
             haveCp = 1;
         }
@@ -10983,6 +12554,7 @@ int main(int argc, char **argv) {
         }
         if (Vr.active || Vr.returning) cp = r2view_pose(&Vr, &cp);
         sh_env_sync_live(&Es, P.t, cp.pos, cp.q, 0);
+        sh1x_anims_sync(&R.sc->sh1x, P.t);       /* v26.3: driver tick      */
         Frame fb2; frame_alloc(&fb2, w, h);
         render_frame(&fb2, &R, &cp);
         /* THE RESTRICTION PROOF (all values from the verbatim pipeline) */
@@ -11105,6 +12677,7 @@ int main(int argc, char **argv) {
                     snow_sync_live(&Ss, P.t, cp.pos, cp.forward, track, NULL);
             }
             sh_env_sync_live(&Es, P.t, cp.pos, cp.q, 0);
+            sh1x_anims_sync(&R.sc->sh1x, P.t);   /* v26.3: driver tick      */
             tSim += tickDt;
             haveCp = 1;
         }
@@ -11118,6 +12691,7 @@ int main(int argc, char **argv) {
          * also covers the phase wrap/edge cases where the pose should be
          * re-read from the current phase rather than the stepped one      */
         sh_env_sync_live(&Es, P.t, cp.pos, cp.q, 0);
+        sh1x_anims_sync(&R.sc->sh1x, P.t);       /* v26.3: driver tick      */
         render_frame(&fb, &R, &cp);
         char out[1024];
         snprintf(out, sizeof(out), "%s/%s", outdir, shots[i].file);
@@ -11136,8 +12710,163 @@ int main(int argc, char **argv) {
     return 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* Android backend - ANativeWindow (no SDL2, no X11; libandroid)       */
+/*                                                                     */
+/* The JNI layer (sh1_jni.c) owns the Surface lifecycle and publishes  */
+/* the current ANativeWindow here; this loop is the X11 loop with      */
+/* XPutImage swapped for a nearest-neighbor scale blit of the engine's */
+/* 0xAARRGGBB framebuffer into the window's RGBA_8888/RGB_565 buffer,  */
+/* aspect-fit + letterboxed. Renderer math is untouched.               */
+/* ------------------------------------------------------------------ */
+#ifdef __ANDROID__
 
+#include <android/native_window.h>
+#include <android/log.h>
+#include <pthread.h>
 
+#define ALOGI(...) __android_log_print(ANDROID_LOG_INFO,  "sh1poc", __VA_ARGS__)
+#define ALOGE(...) __android_log_print(ANDROID_LOG_ERROR, "sh1poc", __VA_ARGS__)
+/* route the engine's stdout chatter (main(), live_save_final, ...) to logcat */
+#define printf(...) ALOGI(__VA_ARGS__)
 
+static ANativeWindow *g_and_win = NULL;
+static pthread_mutex_t g_and_lock = PTHREAD_MUTEX_INITIALIZER;
+static volatile int g_and_visible = 1;
+static volatile int g_and_key = -1;    /* single-slot queued UI key */
 
+void sh1_android_set_window(ANativeWindow *win) {
+    pthread_mutex_lock(&g_and_lock);
+    g_and_win = win;
+    pthread_mutex_unlock(&g_and_lock);
+}
+
+void sh1_android_set_visible(int vis) { g_and_visible = vis ? 1 : 0; }
+
+void sh1_android_post_key(int k) { g_and_key = k; }
+
+static void and_clear_8888(ANativeWindow_Buffer *buf) {
+    uint8_t *base = (uint8_t *)buf->bits;
+    for (int y = 0; y < buf->height; y++)
+        memset(base + (size_t)y * (size_t)buf->stride * 4u, 0,
+               (size_t)buf->width * 4u);
+}
+
+static void and_clear_565(ANativeWindow_Buffer *buf) {
+    uint16_t *base = (uint16_t *)buf->bits;
+    for (int y = 0; y < buf->height; y++)
+        memset(base + (size_t)y * (size_t)buf->stride, 0,
+               (size_t)buf->width * 2u);
+}
+
+static void and_blit(LiveApp *A, ANativeWindow_Buffer *buf) {
+    const int fw = A->fb.w, fh = A->fb.h;
+    const int ww = buf->width, wh = buf->height;
+    int dstW, dstH, offX, offY, sx0 = 0, srcW = fw;
+    const int cover = (wh > ww);   /* portrait wallpaper: full-bleed crop */
+    if (cover) {
+        /* cover: scale to FILL the screen, center-crop the source columns.
+         * A letterboxed 320x224 band would waste ~70% of a phone screen. */
+        int sw = (int)((long long)fh * ww / wh);
+        if (sw > fw) sw = fw;
+        sx0 = (fw - sw) >> 1;
+        srcW = sw;
+        dstW = ww; dstH = wh;
+        offX = 0; offY = 0;
+    } else {
+        /* landscape: aspect-fit + letterbox (the classic PoC look) */
+        dstW = ww;
+        dstH = (int)((long long)fh * ww / fw);
+        if (dstH > wh) { dstH = wh; dstW = (int)((long long)fw * wh / fh); }
+        offX = (ww - dstW) >> 1;
+        offY = (wh - dstH) >> 1;
+    }
+    const uint32_t *src = A->argb;
+    if (buf->format == WINDOW_FORMAT_RGB_565) {
+        if (!cover) and_clear_565(buf);
+        uint16_t *base = (uint16_t *)buf->bits;
+        const int xs = (srcW << 16) / dstW, ys = (fh << 16) / dstH;
+        int ypos = 0;
+        for (int y = 0; y < dstH; y++) {
+            const uint32_t *srow = src + (size_t)(ypos >> 16) * fw;
+            uint16_t *drow = base + (size_t)(y + offY) * (size_t)buf->stride
+                           + (size_t)offX;
+            int xpos = sx0 << 16;
+            for (int x = 0; x < dstW; x++) {
+                uint32_t p = srow[xpos >> 16];
+                int r = (int)(p >> 16) & 0xF8, g = (int)(p >> 8) & 0xFC, b = (int)p & 0xF8;
+                drow[x] = (uint16_t)((r << 8) | (g << 3) | (b >> 3));
+                xpos += xs;
+            }
+            ypos += ys;
+        }
+    } else {
+        /* WINDOW_FORMAT_RGBA_8888 **and** WINDOW_FORMAT_RGBX_8888 —
+         * the system wallpaper surface is typically RGBX_8888 (format 2);
+         * ignoring it was the black-screen bug. Same byte layout for both. */
+        if (!cover) and_clear_8888(buf);
+        uint8_t *base = (uint8_t *)buf->bits;
+        const int xs = (srcW << 16) / dstW, ys = (fh << 16) / dstH;
+        int ypos = 0;
+        for (int y = 0; y < dstH; y++) {
+            const uint32_t *srow = src + (size_t)(ypos >> 16) * fw;
+            uint8_t *drow = base + (size_t)(y + offY) * (size_t)buf->stride * 4u
+                          + (size_t)offX * 4u;
+            int xpos = sx0 << 16;
+            for (int x = 0; x < dstW; x++) {
+                uint32_t p = srow[xpos >> 16];
+                uint8_t *d = drow + (size_t)x * 4u;
+                /* engine packs 0xAARRGGBB -> memory bytes B,G,R,A;      */
+                /* RGBA_8888/RGBX_8888 want memory bytes R,G,B,A(X:=FF)  */
+                d[0] = (uint8_t)(p >> 16);
+                d[1] = (uint8_t)(p >> 8);
+                d[2] = (uint8_t)p;
+                d[3] = 0xFF;
+                xpos += xs;
+            }
+            ypos += ys;
+        }
+    }
+}
+
+static int run_window_android(LiveApp *A) {
+    ALOGI("realtime: Android surface backend (engine raster %dx%d, %.1f fps cap)",
+          A->fb.w, A->fb.h, A->maxFps);
+    double prev = now_sec();
+    while (1) {
+        int k = g_and_key; g_and_key = -1;
+        if (k >= 0 && live_action(A, (LiveKey)k, 1)) break;
+
+        double t0 = now_sec();
+        if (!g_and_visible) { sleep_ms(33u); prev = t0; continue; }
+        double dt = t0 - prev; prev = t0;
+
+        /* v20 whole-tick 30 Hz lockstep - identical to the X11 loop */
+        CamPose cp = live_advance(A, dt);
+        if (live_done(A)) break;
+        render_frame(&A->fb, &A->R, &cp);
+        live_draw_overlay(A);
+        fb_to_argb(&A->fb, A->argb);
+
+        /* present: snapshot the window under the lock, then use it    */
+        pthread_mutex_lock(&g_and_lock);
+        ANativeWindow *win = g_and_win;
+        if (win) ANativeWindow_acquire(win);
+        pthread_mutex_unlock(&g_and_lock);
+        if (win) {
+            ANativeWindow_Buffer buf;
+            if (ANativeWindow_lock(win, &buf, NULL) == 0) {
+                and_blit(A, &buf);
+                ANativeWindow_unlockAndPost(win);
+            }
+            ANativeWindow_release(win);
+        }
+
+        live_pace(t0, A->maxFps > 0 ? 1.0 / A->maxFps : 0.0);
+    }
+    live_save_final(A);
+    return 1;
+}
+
+#endif /* __ANDROID__ backend */
 
