@@ -1154,7 +1154,7 @@ typedef struct {
 } Sh1x;
 
 static void sh1x_free(Sh1x *sx) {
-    for (int i = 0; i < sx->nBuffers; i++) {
+    for (int i = 0; sx->bufs && i < sx->nBuffers; i++) {
         free(sx->bufs[i].billboards);
         free(sx->bufs[i].subchunkRanges);
     }
@@ -1254,6 +1254,11 @@ static void sh1x_load(Sh1x *sx, const JValue *json) {
                     sx->bufs[b].subchunkRanges[k].maxZ = jint(e, "maxZ", -1);
                 }
             }
+
+            /* v24.1 FIX (audit #6): JSON 'subchunkCount' field and the parsed
+             * array length are independent — clamp to the parsed length. */
+            if (sx->bufs[b].subchunkCount > ns)
+                sx->bufs[b].subchunkCount = ns;
         }
         sx->hasExtras = 1;
     }
@@ -7191,10 +7196,8 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
              * (Q8) — near/far compare in those units).                */
             int visible = 0;
             if (inRange) {
-                const float cw = 160.0f * R->enginePixScale;  /* screen half-w */
-                const float ch = 120.0f;                       /* screen half-h */
                 int nOutNear = 0, nOutFar = 0;
-                for (int ci = 0; ci < 8 && !visible; ci++) {
+                for (int ci = 0; ci < 8; ci++) {
                     /* world-space AABB corner in the buffer's own frame +
                      * chunk edge offset (engine passes box coords as Q7.8
                      * SVECTORs transformed by the chunk-edge matrix).
@@ -7227,13 +7230,20 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
                     else {
                         /* on-screen region flags (screen center +/- 160/120
                          * px; the PoC screen grid = enginePixScale x 320) */
+                        /* v24.1 FIX (audit #3): GTE projection bounds —
+                         * H = SCREEN_GEOM_DIST 240, screen half 160/120 px
+                         * => |vx| <= d*2/3, |vy| <= d*1/2 (engine's OWN
+                         * frustum; fov-independent). */
                         if (d > 0.05f) {
-                            float sxc = (vx / d) * cw, syc = (vy / d) * ch;
-                            if (sxc >= -cw && sxc <= cw && syc >= -ch && syc <= ch)
-                                visible = 1;   /* flags[1][1]: center region */
+                            float bx = d * (160.0f / 240.0f);
+                            float by = d * (120.0f / 240.0f);
+                            if (vx >= -bx && vx <= bx && vy >= -by && vy <= by)
+                                visible = 1;
                         }
                     }
                 }
+                /* v24.1 FIX (audit #2): engine order — all-8 verdicts
+                 * BEFORE the center flag (vw_calc.c:673-686). */
                 if (nOutNear == 8) visible = 0;
                 else if (nOutFar == 8) visible = 0;
                 else if (visible) { /* center hit above */ }
@@ -7258,10 +7268,11 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
                         float vz = view.m[2]*wx + view.m[6]*wy + view.m[10]*wz + view.m[14];
                         float d = -vz;
                         if (d <= 0.05f) { side[ci][0] = -9; side[ci][1] = -9; continue; }
-                        float sxc = (vx / d) * cw;
-                        float syc = (vy / d) * ch;
-                        side[ci][0] = (sxc < -cw) ? 0 : (sxc > cw ? 2 : 1);
-                        side[ci][1] = (syc < -ch) ? 0 : (syc > ch ? 2 : 1);
+                        /* v24.1 (audit #3): same GTE bounds. */
+                        float bx = d * (160.0f / 240.0f);
+                        float by = d * (120.0f / 240.0f);
+                        side[ci][0] = (vx < -bx) ? 0 : (vx > bx ? 2 : 1);
+                        side[ci][1] = (vy < -by) ? 0 : (vy > by ? 2 : 1);
                     }
                     int L = 0, Rr = 0, T = 0, B = 0, C = 0;
                     for (int ci = 0; ci < 8; ci++) {
@@ -7291,16 +7302,24 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
          * converter's buffer-ordered emission, so mask + keep order)   */
         for (int i = 0; i < nItems; i++) {
             const DrawItem *it = &sc->item[i];
-            if (it->buffer < 0 || it->buffer >= sx->nBuffers) {
+            /* v24.1 FIX (audit #4): billboard anchor meshes ('BILLBOARDS_g{g}_{j}',
+             * extras {ot_base:0, billboard:true}, NO SH1X buffer tag) inherit
+             * the PARENT buffer's verdict — engine draws a buffer's anchors
+             * inside the same modelOrder range + visibility check
+             * (map.c:1424-1446). */
+            int parentBuf = it->buffer;
+            if (parentBuf < 0 && it->isBillboard &&
+                strncmp(it->name, "BILLBOARDS_g", 12) == 0)
+                parentBuf = atoi(it->name + 12);
+            if (parentBuf < 0) {
                 /* untagged items (billboard meshes, unused, legacy):
                  * engine billboards are drawn per buffer AFTER instances
                  * — v24 marks a billboard item visible iff its PARENT
                  * buffer is visible (they are emitted under the same
                  * buffer's node group; the converter's BILLBOARDS_gN).  */
-                sh1xItemMask[i] = 1;    /* keep (engine always-adds BBs of
-                                           visible buffers; untagged =
-                                           not part of the room IPD set) */
-            } else if (bufVis[it->buffer] == 2) {
+                sh1xItemMask[i] = 1;   /* untagged non-billboard: keep */
+            } else if (parentBuf < sx->nBuffers && parentBuf < 256 &&
+                       bufVis[parentBuf] == 2) {
                 sh1xItemMask[i] = 1;
             }
         }
