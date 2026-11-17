@@ -6,12 +6,10 @@ tick lockstep) via the NDK — no OpenGL, no game engine, no Java renderer:
 `libsh1.so` blits the engine framebuffer straight into the wallpaper's
 `Surface` through `ANativeWindow`.
 
-> **This project is 100% AI Slop / Vibe Coded and is non-commerical**
+> **This project is 100% AI Slop / Vibe Coded and is non-commercial**
 >
-> **This project's **CODE** is licenced under the GPL but any included assets **ARE NOT**. Assets are copywrited by Konami. Using any assets for commerical use is **strictly prohibited** and must be removed immediately** — see
+> **This project's **CODE** is licenced under the GPL but any included assets **ARE NOT**. Assets are copyrighted by Konami. Using any assets for commercial use is **strictly prohibited** and must be removed immediately** — see
 > [Konami's copyright notice](https://eu-support.konami.com/hc/en-gb/articles/9648771731479-Copyrights-Career-Opportunities-Goodies).
-
-*This statement is included verbatim as required. Note the correct spelling of the two trademarks concerned: "commercial", "copyrighted".*
 
 The bundled sample scene is the **HP0003 hospital corridor** (interior day
 environment — the engine runs no weather particles indoors), with the
@@ -80,8 +78,9 @@ The engine is a port of the [SH1 PoC renderer](https://github.com/sh-clock/PoC)
 (see its [ACKNOWLEDGEMENTS.md](https://github.com/sh-clock/PoC/blob/main/ACKNOWLEDGEMENTS.md)):
 [silent-hill-decomp](https://github.com/shdecompilations/silent-hill-decomp)
 (decompilation the engine math is replicated from) and
-[DuckStation](https://github.com/stenzek/duckstation) (PS1 GPU/GTE ground
-truth). Silent Hill and its assets are © Konami — this is a non-commercial
+[SwanStation](https://github.com/libretro/swanstation) (PS1 GPU/GTE ground
+truth — the GPL-3.0 maintained fork of the DuckStation core). Silent Hill
+and its assets are © Konami — this is a non-commercial
 fan research project.
 
 ## CI / Releases
