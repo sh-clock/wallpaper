@@ -1,16 +1,14 @@
 # Building SH1 Fog Wallpaper
 
-Silent Hill 1 environment renderer as a live wallpaper — v3.
+Silent Hill 1 environment renderer as a live wallpaper.
 
-## What's new in v3
+## Notable engineering notes
 
-- **Fixed: black wallpaper after applying.** Android runs several engines of a
-  WallpaperService in one process (the system preview AND the real wallpaper).
-  The v2 bridge kept one global window, so the preview's teardown nulled the
-  live wallpaper's window during "Set wallpaper" -> permanent black screen.
-  Every engine now registers its own surface binding (generation id) and the
-  native side publishes the newest engine with a live surface, falling back
-  automatically when the preview goes away.
+- **Per-engine surface bindings.** Android runs several engines of a
+  WallpaperService in one process (the system preview AND the real wallpaper);
+  each registers its own surface (generation id) and the newest live one
+  owns the output — the preview's teardown can no longer null the real
+  wallpaper's window.
 - **16 KB page-size compatibility** (Google Play requirement for Android 15+
   devices): `libsh1.so` is linked with `-Wl,-z,max-page-size=16384` /
   `-Wl,-z,common-page-size=16384` + `ANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON`,
