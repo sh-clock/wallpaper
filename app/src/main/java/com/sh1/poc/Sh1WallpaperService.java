@@ -45,7 +45,7 @@ public class Sh1WallpaperService extends WallpaperService {
     }
 
     private static final String[] ASSETS = {
-            "THRF9FD.glb", "THRF9FD.IPD", "THR_GLB.PLM", "camdat.json"
+            "HP0003.glb", "HP0003.IPD", "camdat.json", "THRF9FD.glb"
     };
 
     private static volatile boolean sAssetsReady = false;

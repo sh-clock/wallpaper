@@ -173,7 +173,7 @@ SH1_JNI_FN(start)(JNIEnv *env, jclass clz, jstring filesDir) {
     if (!ma->argv) { free(ma); return; }
     ma->argv[0]  = strdup("fog_poc");
     ma->argv[1]  = strdup("--glb");
-    ma->argv[2]  = path_join(g_dir, "sh1/THRF9FD.glb");
+    ma->argv[2]  = path_join(g_dir, "sh1/HP0003.glb");
     ma->argv[3]  = strdup("--camdat");
     ma->argv[4]  = path_join(g_dir, "sh1/camdat.json");
     ma->argv[5]  = strdup("--input");

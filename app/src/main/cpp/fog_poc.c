@@ -1116,14 +1116,148 @@ typedef struct {
     int matIdx, vbase, vcount, ibase, icount;
     mat4 model;               /* composed node transform (glTF column-major) */
     char name[64];            /* GLTF node name (model instance + mesh idx)  */
-    int otBase;               /* v16: per-model OT section base (engine
-                                func_80057090/func_800571D0 — field_B_1)   */
+    int otBase;               /* per-model OT section base (engine
+                                func_80057090 -> func_800571D0, read from
+                                the node extras — v24, was the v16 table)  */
+    int buffer;               /* v24: SH1X model-buffer index of this
+                                instance (-1 = not tagged: legacy GLB)      */
+    int addSeq;               /* v24: engine add slot (WorldMap_Draw order)  */
+    int isBillboard;          /* v24: node tagged as billboard anchor mesh    */
 } DrawItem;
 
 typedef struct {
     v3 bmin, bmax;
     float diag;               /* bbox diagonal — camdat turn-filter jump threshold */
 } SceneBounds;
+
+/* ---- the scene-level SH1X container (parsed once at load) ---------- */
+typedef struct {
+    int off[3], idx;                        /* billboard anchor (Q8 s16)   */
+} Sh1xBillboard;
+typedef struct {
+    int minX, maxX, minZ, maxZ;             /* Q7.8 subchunk range         */
+} Sh1xSubchunkRange;
+typedef struct {
+    int modelInstanceCount, billboardInstanceCount, subchunkCount;
+    int minX, maxX, minZ, maxZ;             /* Q7.8 raw s16                */
+    Sh1xBillboard *billboards;
+    Sh1xSubchunkRange *subchunkRanges;
+} Sh1xBuffer;
+typedef struct {
+    int chunkX, chunkZ;            /* s_IpdHeader s8 @2/@3 (fixed s8!)     */
+    int subcell[5][5][2];          /* [z][x] = (start, count) into order   */
+    int modelOrderSize;
+    uint8_t *modelOrder;           /* u8 buffer indices                   */
+    int nBuffers;
+    Sh1xBuffer *bufs;
+    int hasExtras;                 /* 0 = no SH1X in the GLB (old GLB)     */
+} Sh1x;
+
+static void sh1x_free(Sh1x *sx) {
+    for (int i = 0; i < sx->nBuffers; i++) {
+        free(sx->bufs[i].billboards);
+        free(sx->bufs[i].subchunkRanges);
+    }
+    free(sx->bufs);
+    free(sx->modelOrder);
+    memset(sx, 0, sizeof(*sx));
+}
+
+/* Parse scenes[0].extras.SH1X into sx (all counts bounds-checked; on any
+ * structural problem the room falls back to the legacy all-items path
+ * with extras ot_base where present, which is still engine-correct for
+ * layering — only the subcell window degenerates to "everything").     */
+static void sh1x_load(Sh1x *sx, const JValue *json) {
+    memset(sx, 0, sizeof(*sx));
+    const JValue *scenes = jarr(json, "scenes");
+    const JValue *sceneDef = jat(scenes, jint(json, "scene", 0));
+    if (!sceneDef) return;
+    const JValue *ex = jget(sceneDef, "extras");
+    if (!ex) return;
+    const JValue *sh = jget(ex, "SH1X");
+    if (!sh || sh->type != JV_OBJ) return;
+    const JValue *hdr = jget(sh, "header");
+    if (!hdr) return;
+    sx->chunkX = jint(hdr, "chunkX", 0);         /* s8 (converter v14.1+) */
+    sx->chunkZ = jint(hdr, "chunkZ", 0);
+    const JValue *tbl = jarr(hdr, "subcellTable");
+    for (int z = 0; z < 5; z++) {
+        const JValue *row = jat(tbl, z);
+        for (int x = 0; x < 5; x++) {
+            const JValue *ent = jat(row, x);
+            sx->subcell[z][x][0] = ent ? jint(ent, 0, -1) : -1;   /* arrays of [start,count] */
+            sx->subcell[z][x][1] = ent ? jcount(ent) > 1 ? (int)jat(ent, 1)->num : 0 : 0;
+        }
+    }
+    /* subcellTable entries are [start, count] pairs of NUMBERS, not objects */
+    for (int z = 0; z < 5; z++) {
+        const JValue *row = jat(tbl, z);
+        for (int x = 0; x < 5; x++) {
+            const JValue *ent = jat(row, x);
+            if (ent && ent->type == JV_ARR && ent->count == 2) {
+                sx->subcell[z][x][0] = (int)jat(ent, 0)->num;
+                sx->subcell[z][x][1] = (int)jat(ent, 1)->num;
+            }
+        }
+    }
+    const JValue *order = jarr(sh, "modelOrder");
+    sx->modelOrderSize = jcount(order);
+    if (sx->modelOrderSize > 0) {
+        sx->modelOrder = (uint8_t *)calloc((size_t)sx->modelOrderSize, 1);
+        for (int i = 0; i < sx->modelOrderSize; i++) {
+            const JValue *v = jat(order, i);
+            if (!v || v->type != JV_NUM) { sx->modelOrderSize = 0; break; }
+            sx->modelOrder[i] = (uint8_t)(int)v->num;
+        }
+    }
+    const JValue *bufs = jarr(sh, "modelBuffers");
+    sx->nBuffers = jcount(bufs);
+    if (sx->nBuffers > 0 && sx->modelOrderSize > 0) {
+        sx->bufs = (Sh1xBuffer *)calloc((size_t)sx->nBuffers, sizeof(Sh1xBuffer));
+        for (int b = 0; b < sx->nBuffers; b++) {
+            const JValue *mb = jat(bufs, b);
+            if (!mb) continue;
+            sx->bufs[b].modelInstanceCount = jint(mb, "modelInstanceCount", 0);
+            sx->bufs[b].billboardInstanceCount = jint(mb, "billboardInstanceCount", 0);
+            sx->bufs[b].subchunkCount = jint(mb, "subchunkCount", 0);
+            sx->bufs[b].minX = jint(mb, "minX", -1);
+            sx->bufs[b].maxX = jint(mb, "maxX", -1);
+            sx->bufs[b].minZ = jint(mb, "minZ", -1);
+            sx->bufs[b].maxZ = jint(mb, "maxZ", -1);
+            const JValue *bb = jarr(mb, "billboards");
+            int nb = jcount(bb);
+            if (nb > 0) {
+                sx->bufs[b].billboards =
+                    (Sh1xBillboard *)calloc((size_t)nb, sizeof(Sh1xBillboard));
+                for (int k = 0; k < nb; k++) {
+                    const JValue *e = jat(bb, k);
+                    const JValue *off = e ? jarr(e, "offset") : NULL;
+                    if (off && off->count == 3) {
+                        sx->bufs[b].billboards[k].off[0] = (int)jat(off, 0)->num;
+                        sx->bufs[b].billboards[k].off[1] = (int)jat(off, 1)->num;
+                        sx->bufs[b].billboards[k].off[2] = (int)jat(off, 2)->num;
+                        sx->bufs[b].billboards[k].idx = jint(e, "idx", -1);
+                    }
+                }
+            }
+            const JValue *sr = jarr(mb, "subchunkRanges");
+            int ns = jcount(sr);
+            if (ns > 0) {
+                sx->bufs[b].subchunkRanges =
+                    (Sh1xSubchunkRange *)calloc((size_t)ns, sizeof(Sh1xSubchunkRange));
+                for (int k = 0; k < ns; k++) {
+                    const JValue *e = jat(sr, k);
+                    if (!e) continue;
+                    sx->bufs[b].subchunkRanges[k].minX = jint(e, "minX", -1);
+                    sx->bufs[b].subchunkRanges[k].maxX = jint(e, "maxX", -1);
+                    sx->bufs[b].subchunkRanges[k].minZ = jint(e, "minZ", -1);
+                    sx->bufs[b].subchunkRanges[k].maxZ = jint(e, "maxZ", -1);
+                }
+            }
+        }
+        sx->hasExtras = 1;
+    }
+}
 
 typedef struct {
     int texCount, matCount, itemCount, vertCount, idxCount;
@@ -1136,6 +1270,7 @@ typedef struct {
     size_t texBlobSize;
     SceneBounds bounds;
     char srcFile[512];
+    Sh1x sh1x;                /* v24: WorldMap_Draw window data (may be empty) */
 } Scene;
 
 /* ---- GLB container --------------------------------------------------- */
@@ -1296,41 +1431,27 @@ static void sb_push_item(SceneBuild *b, DrawItem it) {
 }
 
 /* ==================================================================== */
-/* v16 — THE PER-MODEL OT SECTION BASE (engine-verbatim layering)        */
+/* v24 — SH1X: the OT layer bases + the WorldMap_Draw painter window     */
+/* come from the GLB's scenes[0].extras.SH1X (the verbatim IPD payload   */
+/* emitted by tools/ipd2gltf.py v14+; docs/SH1X_EXTRAS_SCHEMA.md).        */
 /*                                                                      */
 /* func_80057090 (bodyprog_80056D8C.c:126-162): every model's quads are  */
 /* addPrim'd through `otTag = &arg1->org[func_800571D0(modelHdr->       */
-/* field_B_1)]` — i.e. the OT bucket index is  BASE + (zQ8 >> 3), with  */
+/* field_B_1)]` — i.e. the OT bucket index is  BASE + (zQ8 >> 3), with   */
 /* the per-model BASE from the s_ModelHeader::field_B_1 bits of the     */
 /* room's IPD (func_800571D0: 0->2, 1->0, 2->4, 3->33, 4->66, 5->99).   */
 /* Gfx_BillboardDraw adds at org[z>>3] with NO base (billboards + snow  */
-/* flakes ride the base-0 section). The v15 PoC put ALL mesh quads in   */
-/* the base-0 section, so cross-layer overlaps (fence/chains/doors/B-   */
-/* models vs bushes/hedges vs signs) resolved by raw depth and flipped  */
-/* frame-to-frame — the reported fence/bush flickering.                 */
-/* The table below is the ACTUAL THRF9FD.IPD model-header survey        */
-/* (field_B_1 parsed from every s_ModelHeader in the archive; nodes not */
-/* in the table default to field_B_1=0 -> base 2, the standard layer    */
-/* that every THRxxxx/TREE02/72xx mesh model uses).                     */
+/* flakes ride the base-0 section).                                     */
+/* v16's IPD_MODEL_LAYERS was a THRF9FD-only hardcoded name table — it   */
+/* flattened every other room's models to the default base 2 (the       */
+/* HP0003 poster flicker). v24 reads the per-object ot_base the          */
+/* converter emits on every instance/mesh node extras, and the          */
+/* subcell/modelOrder/buffer/instance/billboard draw WINDOW from the     */
+/* scene-level SH1X container — WorldMap_Draw verbatim for ANY room.    */
 /* ==================================================================== */
-typedef struct { const char *model; int fieldB1; } IpdModelLayer;
-static const IpdModelLayer IPD_MODEL_LAYERS[] = {
-    {"7201_1_H", 0}, {"7201_2_H", 0}, {"7201_3_H", 0},   /* fence rails   */
-    {"7203_18_", 2}, {"7203_30_", 2}, {"7203_31_", 2},
-    {"7203_3_N", 1}, {"7203_6_H", 0},
-    {"7203_7_B", 5}, {"7206_1_H", 0}, {"7206_3_H", 0},   /* hedges/bushes */
-    {"7207_1_B", 5}, {"7207_6_H", 0}, {"7207_7_H", 0},
-    {"7207_8_H", 0}, {"7207_9_H", 0},
-    {"7222_1_B", 4}, {"7222_7_B", 5},
-    {"CHAIN1_1", 5}, {"CHAIN1_2", 3}, {"CHAIN1_3", 1},   /* fence chains  */
-    {"CHAIN2_1", 5}, {"CHAIN2_2", 3}, {"CHAIN2_3", 1}, {"CHAIN2_4", 5},
-    {"DOOR1_BA", 4}, {"NOTICE_N", 1},
-    {"THR0001", 0}, {"THR0002", 0}, {"THR0020", 0},
-    {"THR7202", 0}, {"THR7203", 0}, {"THR7204", 0},
-    {"THR7206", 0}, {"THR7207", 0}, {"TREE02", 0},
-};
 
-/* func_800571D0 — verbatim base table */
+/* func_800571D0 — verbatim base table (kept: the extras fallback for
+ * pre-SH1X GLBs reconstructs base from field_B_1 when present) */
 static int sh_ot_base_of_field(int fieldB1) {
     switch (fieldB1) {
         default: case 0: return 2;
@@ -1342,30 +1463,23 @@ static int sh_ot_base_of_field(int fieldB1) {
     }
 }
 
-/* GLTF node name ("MODEL#inst_mN" / "MODEL_mN") -> the model name ->
- * field_B_1 -> the OT base. The converter emits the IPD model name as
- * the node-name prefix; the instance suffix (#N) and mesh suffix (_mN)
- * are stripped. */
-static int sh_model_ot_base(const char *nodeName) {
-    char model[64];
-    size_t n = 0;
-    if (!nodeName) return 2;
-    while (nodeName[n] && nodeName[n] != '#' && n < sizeof(model) - 1) {
-        model[n] = nodeName[n];
-        n++;
+/* v24: the node's own extras carry the engine ot_base (converter v14+:
+ * {"ot_base": N, "field_B_1": b, "SH1X": {...}} on every instance/mesh
+ * node; billboards {"ot_base": 0, "billboard": true}). Legacy GLBs
+ * (v11-v13 extras {ot_base, field_B_1} on some nodes) still resolve; the
+ * old NAME TABLE is gone — the fallback is base 2 (field_B_1=0), exactly
+ * the engine default for an un-tabled model name. */
+static int sh_node_ot_base(const JValue *node) {
+    const JValue *ex = jget(node, "extras");
+    if (ex) {
+        int ob = jint(ex, "ot_base", -1);
+        if (ob >= 0) return ob;
+        int fb = jint(ex, "field_B_1", -1);
+        if (fb >= 0) return sh_ot_base_of_field(fb);
     }
-    model[n] = '\0';
-    /* strip the trailing "_mN" mesh suffix (the converter's per-mesh
-     * node naming: "MODEL_m0", "MODEL#2_m0") */
-    if (n >= 2 && model[n-2] == '_') model[n-2] = '\0';
-    else if (n >= 3 && model[n-3] == '_') model[n-3] = '\0';
-    for (size_t i = 0; i < sizeof(IPD_MODEL_LAYERS) / sizeof(IPD_MODEL_LAYERS[0]); i++) {
-        if (!strcmp(IPD_MODEL_LAYERS[i].model, model)) {
-            return sh_ot_base_of_field(IPD_MODEL_LAYERS[i].fieldB1);
-        }
-    }
-    return 2; /* default: field_B_1 = 0 (base 2 — the standard mesh layer) */
+    return 2;   /* engine default: field_B_1 = 0 -> base 2 */
 }
+
 
 /* walk a mesh node (recursive; composes transforms) */
 static void glb_walk_node(Glb *g, const JValue *nodes, int nodeIdx, mat4 parent,
@@ -1377,7 +1491,15 @@ static void glb_walk_node(Glb *g, const JValue *nodes, int nodeIdx, mat4 parent,
     int meshIdx = jint(node, "mesh", -1);
     const JValue *mesh = jat(meshes, meshIdx);
     const char *nodeName = jstr(node, "name", "");
-    int nodeOtBase = sh_model_ot_base(nodeName);   /* v16: engine layer */
+    int nodeOtBase = sh_node_ot_base(node);   /* v24: extras ot_base     */
+    /* v24: the node extras also tag WHICH model buffer + engine add-slot
+     * this instance belongs to (converter emits SH1X.buffer/add_seq on
+     * every instance node) — used by the WorldMap_Draw window at render */
+    const JValue *ex = jget(node, "extras");
+    const JValue *sx = ex ? jget(ex, "SH1X") : NULL;
+    int nodeBuffer = sx ? jint(sx, "buffer", -1) : -1;
+    int nodeAddSeq = sx ? jint(sx, "add_seq", -1) : -1;
+    int nodeIsBillboard = ex ? jbool(ex, "billboard", 0) : 0;
     if (mesh) {
         const JValue *prims = jarr(mesh, "primitives");
         int np = jcount(prims);
@@ -1401,6 +1523,9 @@ static void glb_walk_node(Glb *g, const JValue *nodes, int nodeIdx, mat4 parent,
             item.model = world;
             snprintf(item.name, sizeof(item.name), "%s", nodeName);
             item.otBase = nodeOtBase;
+            item.buffer = nodeBuffer;      /* v24: SH1X.buffer (-1 = n/a)  */
+            item.addSeq = nodeAddSeq;      /* v24: engine add slot         */
+            item.isBillboard = nodeIsBillboard;
             item.vbase = (int)(sb->n / 8);
             item.ibase = (int)sb->in;
             for (int i = 0; i < pos.count; i++) {
@@ -1546,6 +1671,9 @@ static int scene_load_glb(Scene *s, const char *path) {
     s->bounds.diag = v3_len(szv);
     if (s->bounds.diag <= 0.0f) s->bounds.diag = 10.0f;
 
+    /* v24: the SH1X container (before glb_close frees the JSON) */
+    sh1x_load(&s->sh1x, g.json);
+
     glb_close(&g);
     return 1;
 }
@@ -1553,6 +1681,7 @@ static int scene_load_glb(Scene *s, const char *path) {
 static void scene_free(Scene *s) {
     free(s->tex); free(s->mat); free(s->item);
     free(s->verts); free(s->idxs); free(s->texBlob);
+    sh1x_free(&s->sh1x);
     memset(s, 0, sizeof(*s));
 }
 
@@ -5953,7 +6082,7 @@ static void raster_tri(Frame *fb, const RVert *vA, const RVert *vB, const RVert 
              * UNCONDITIONAL (last-drawn covering quad wins, exactly like
              * the engine's OT paint-over); it never gates visibility.   */
             if (pass == RP_OPAQUE) fb->z[pi] = z;   /* flake-occlusion ref */
-            /* v4 AUDIT FIX #1 — VERBATIM swanstation modulate:
+/* v4 AUDIT FIX #1 — VERBATIM swanstation modulate:
              *   gpu_sw_backend.cpp ShadePixel:
              *     s_dither_lut[dy][dx][(texture_color.r * color_r) >> 4]
              *   texture_color.r is the VRAM 5-bit texel T5, color_r the
@@ -5969,6 +6098,7 @@ static void raster_tri(Frame *fb, const RVert *vA, const RVert *vB, const RVert 
             int r = (((tr >> 3) * vr) >> 4) + orr;
             int g = (((tg >> 3) * vg) >> 4) + og;
             int b = (((tb >> 3) * vb) >> 4) + ob;
+
             fb_put(fb, x, y, r, g, b, quantize, dither);
         }
     }
@@ -6976,8 +7106,208 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
      *     screen coords (the GTE SXY FIFO stores), and NOT applied to
      *     MASK items (Gfx_BillboardDraw has no cull — the converter marks
      *     BILLBOARD_LEAF doubleSided for exactly this reason).           */
+    /* ==================================================================
+     * v24 — the WorldMap_Draw SUBCELL WINDOW (engine-verbatim).
+     * world_map.c:1348-1447 WorldMap_Draw:
+     *   curPosX/curPosZ = camera pos Q8 (this PoC: cam->pos*256)
+     *   chunkEdgeX/Z    = ipdHdr->chunkX/Z * Q8(CHUNK_SIZE=40)  [10240 Q8]
+     *   subchunkX = FLOOR_TO_STEP(curPosX-chunkEdgeX, Q8(8)) clamped [0,4]
+     *   subchunkZ likewise;
+     *   modelOrderIdxs = &textureCount + z*10 + x*2  -> (start, count)
+     *   for i in [start, start+count): buffer = modelBuffers[modelOrder[i]]
+     *     WorldMap_SubchunkVisibleCheck(buffer, curPosX-chunkEdgeX,
+     *                                    curPosZ-chunkEdgeZ, edges)
+     *       -> ranges: subchunkX > minX && < maxX && subchunkZ > minZ &&
+     *                  < maxZ  (NOTE: the same Q8 value, NOT the floored
+     *                  subchunk corner — verbatim)
+     *          then AABB (minX, Q8(-8), minZ)-(maxX, Q8(4), maxZ) vs the
+     *          Vw_AabbVisibleInFrustumCheck(modelMat @ chunk edge, near
+     *          Q8(25), far SCREEN_GEOM_DIST=240): 8 corners -> visible iff
+     *          NOT all outside near / all outside far / fully off-screen.
+     *     instances in buffer order (modelInfo.modelHdr NULL -> skip;
+     *       workm = rt,t; t += chunkEdge), then billboard anchors.
+     * SH1X GLBs carry all of it; legacy GLBs (no SH1X) keep the old
+     * all-items path (v11-v23 behaviour). The per-quad OT bucket math
+     * below is UNCHANGED — the window only SELECTS which items add.    */
+    int *sh1xItemMask = NULL;    /* 1 = this item is in the engine window */
+    const Sh1x *sx = &sc->sh1x;
+    if (sx->hasExtras && R->dbgItem < 0) {
+        /* SH1X axes are ENGINE axes (converter: pos=(x+edge,-y,-(z+edge))/256
+         * — glTF_z = -engine_z, glTF_y = -engine_y). WorldMap_Draw consumes
+         * engine-space curPosX/curPosZ, so the camera's engine position is
+         * (x, -z) of the glTF camera. Chunk edges/box Q7.8 values are in
+         * engine units as stored.                                      */
+        int curPosX = (int)floorf(cam->pos.x * 256.0f + 0.5f);
+        int curPosZ = (int)floorf(-cam->pos.z * 256.0f + 0.5f);
+        int chunkEdgeX = sx->chunkX * 10240;   /* Q8(CHUNK_SIZE 40) */
+        int chunkEdgeZ = sx->chunkZ * 10240;
+        int subX = curPosX - chunkEdgeX, subZ = curPosZ - chunkEdgeZ;
+        /* FLOOR_TO_STEP(x, 2048): x>=0 ? x/2048 : (x-2047)/2048 (int C
+         * division truncates toward zero, matching the macro's intent) */
+        subX = (subX >= 0) ? (subX / 2048) : ((subX - 2047) / 2048);
+        subZ = (subZ >= 0) ? (subZ / 2048) : ((subZ - 2047) / 2048);
+        if (subX < 0) subX = 0;
+        if (subX > 4) subX = 4;
+        if (subZ < 0) subZ = 0;
+        if (subZ > 4) subZ = 4;
+        int start = sx->subcell[subZ][subX][0];
+        int count = sx->subcell[subZ][subX][1];
+        if (getenv("FOGPOC_SH1X_DEBUG"))
+            fprintf(stderr, "[sh1x] cam engine pos Q8 (%d,%d) chunk (%d,%d) edges (%d,%d) subcell (%d,%d) start=%d count=%d\n",
+                    curPosX, curPosZ, sx->chunkX, sx->chunkZ, chunkEdgeX, chunkEdgeZ,
+                    subX, subZ, start, count);
+        if (start < 0 || count < 0) { start = 0; count = sx->modelOrderSize; }
+        if (start + count > sx->modelOrderSize)
+            count = sx->modelOrderSize - start;
+        sh1xItemMask = (int *)calloc((size_t)(nItems > 0 ? nItems : 1), sizeof(int));
+        /* the visible buffers set (engine WorldMap_SubchunkVisibleCheck):
+         * subchunkX/Z here are the UNfloored camera-relative Q8 values —
+         * the engine passes curPosX-chunkEdgeX (Q8, not floored).      */
+        int relX = curPosX - chunkEdgeX, relZ = curPosZ - chunkEdgeZ;
+        unsigned char bufVis[256];
+        memset(bufVis, 0, sizeof(bufVis));
+        for (int i = 0; i < count; i++) {
+            int b = sx->modelOrder[start + i];
+            if (b < 0 || b >= sx->nBuffers || b >= 256) continue;
+            if (bufVis[b]) continue;          /* already verdict-ed */
+            bufVis[b] = 1;
+            /* range test (verbatim: strict > and <) */
+            int inRange = 0;
+            for (int r = 0; r < sx->bufs[b].subchunkCount && !inRange; r++) {
+                const int mnX = sx->bufs[b].subchunkRanges[r].minX;
+                const int mxX = sx->bufs[b].subchunkRanges[r].maxX;
+                const int mnZ = sx->bufs[b].subchunkRanges[r].minZ;
+                const int mxZ = sx->bufs[b].subchunkRanges[r].maxZ;
+                if (relX > mnX && relX < mxX && relZ > mnZ && relZ < mxZ)
+                    inRange = 1;
+            }
+            /* AABB frustum check: Vw_AabbVisibleInFrustumCheck with
+             * modelMat = translate(chunkEdgeX, 0, chunkEdgeZ), box corners
+             * (minX,-2048,minZ)..(maxX,1024,maxZ) Q8, near Q8(25)=6400,
+             * far SCREEN_GEOM_DIST=240 (a GTE-projection test: the box is
+             * visible unless ALL 8 corners are behind near / beyond far /
+             * off-screen on one side. Implemented in view space with the
+             * PoC view matrix; a corner at view depth d has GTE SZ = d*256
+             * (Q8) — near/far compare in those units).                */
+            int visible = 0;
+            if (inRange) {
+                const float cw = 160.0f * R->enginePixScale;  /* screen half-w */
+                const float ch = 120.0f;                       /* screen half-h */
+                int nOutNear = 0, nOutFar = 0;
+                for (int ci = 0; ci < 8 && !visible; ci++) {
+                    /* world-space AABB corner in the buffer's own frame +
+                     * chunk edge offset (engine passes box coords as Q7.8
+                     * SVECTORs transformed by the chunk-edge matrix).
+                     * SH1X Q7.8 box values are ENGINE units; the PoC view
+                     * matrix is glTF-space — convert (x,y,z)e -> (x,-y,-z)g
+                     * (the converter's axis map) before projecting.       */
+                    float ex = (float)((ci & 1) ? sx->bufs[b].maxX : sx->bufs[b].minX) / 256.0f
+                              + (float)chunkEdgeX / 256.0f;
+                    float ey = (ci & 2) ? (1024.0f / 256.0f) : (-2048.0f / 256.0f);
+                    float ez = (float)((ci & 4) ? sx->bufs[b].maxZ : sx->bufs[b].minZ) / 256.0f
+                              + (float)chunkEdgeZ / 256.0f;
+                    float wx = ex, wy = -ey, wz = -ez;   /* engine -> glTF  */
+                    float vx = view.m[0]*wx + view.m[4]*wy + view.m[8]*wz + view.m[12];
+                    float vy = view.m[1]*wx + view.m[5]*wy + view.m[9]*wz + view.m[13];
+                    float vz = view.m[2]*wx + view.m[6]*wy + view.m[10]*wz + view.m[14];
+                    float d = -vz;                 /* PoC forward depth (m)  */
+                    int szQ8 = (int)floorf(d * 256.0f + 0.5f);
+                    /* Engine units (vw_calc.c:619-623, cross-calibrated with
+                     * the sibling Vw_AabbVisibleInScreenCheck's 0x3FFE depth
+                     * guard = 63 m at Q8): transformedZ = RotTransPers*4 =
+                     * Q8 view depth (256/m). The WorldMap call passes
+                     * nearPlane = Q8(25.0f) = 6400 (25 m — the TRUE far
+                     * cull; all 8 corners beyond 25 m => invisible) and
+                     * farPlane = SCREEN_GEOM_DIST = 240 (0.94 m — the
+                     * near-plane guard: corners closer than 0.94 m or
+                     * behind the camera get region-flagged for the
+                     * near-plane span test instead).                    */
+                    if (szQ8 > 6400) nOutNear++;    /* all-beyond-25m cull  */
+                    if (szQ8 < 240) nOutFar++;     /* near-guard sliver    */
+                    else {
+                        /* on-screen region flags (screen center +/- 160/120
+                         * px; the PoC screen grid = enginePixScale x 320) */
+                        if (d > 0.05f) {
+                            float sxc = (vx / d) * cw, syc = (vy / d) * ch;
+                            if (sxc >= -cw && sxc <= cw && syc >= -ch && syc <= ch)
+                                visible = 1;   /* flags[1][1]: center region */
+                        }
+                    }
+                }
+                if (nOutNear == 8) visible = 0;
+                else if (nOutFar == 8) visible = 0;
+                else if (visible) { /* center hit above */ }
+                else {
+                    /* span check (Vw_ScreenRegionSpanCheck + edge-flag
+                     * verdicts): approximate the engine's 8-corner screen
+                     * regions — a box whose projected corners span BOTH
+                     * left-right or BOTH top-bottom is visible; corners
+                     * behind the near plane count as off-screen on ALL
+                     * sides (the GTE clips them to the screen edges)    */
+                    int side[8][2];
+                    int anySpan = 0;
+                    for (int ci = 0; ci < 8; ci++) {
+                        float ex = (float)((ci & 1) ? sx->bufs[b].maxX : sx->bufs[b].minX) / 256.0f
+                                  + (float)chunkEdgeX / 256.0f;
+                        float ey = (ci & 2) ? (1024.0f / 256.0f) : (-2048.0f / 256.0f);
+                        float ez = (float)((ci & 4) ? sx->bufs[b].maxZ : sx->bufs[b].minZ) / 256.0f
+                                  + (float)chunkEdgeZ / 256.0f;
+                        float wx = ex, wy = -ey, wz = -ez;   /* engine -> glTF */
+                        float vx = view.m[0]*wx + view.m[4]*wy + view.m[8]*wz + view.m[12];
+                        float vy = view.m[1]*wx + view.m[5]*wy + view.m[9]*wz + view.m[13];
+                        float vz = view.m[2]*wx + view.m[6]*wy + view.m[10]*wz + view.m[14];
+                        float d = -vz;
+                        if (d <= 0.05f) { side[ci][0] = -9; side[ci][1] = -9; continue; }
+                        float sxc = (vx / d) * cw;
+                        float syc = (vy / d) * ch;
+                        side[ci][0] = (sxc < -cw) ? 0 : (sxc > cw ? 2 : 1);
+                        side[ci][1] = (syc < -ch) ? 0 : (syc > ch ? 2 : 1);
+                    }
+                    int L = 0, Rr = 0, T = 0, B = 0, C = 0;
+                    for (int ci = 0; ci < 8; ci++) {
+                        if (side[ci][0] == 0 || side[ci][0] == -9) L++;
+                        if (side[ci][0] == 2 || side[ci][0] == -9) Rr++;
+                        if (side[ci][1] == 0 || side[ci][1] == -9) T++;
+                        if (side[ci][1] == 2 || side[ci][1] == -9) B++;
+                        if (side[ci][0] == 1 && side[ci][1] == 1) C = 1;
+                    }
+                    if (C) anySpan = 1;
+                    else if (L && Rr) anySpan = 1;   /* spans left-right */
+                    else if (T && B) anySpan = 1;     /* spans top-bottom  */
+                    /* engine edge verdicts (flags0/flags1 exclusive-pair
+                     * rules): all-corners-left / all-right / all-top /
+                     * all-bottom with no center -> NOT visible          */
+                    if (anySpan) visible = 1;
+                }
+            }
+            bufVis[b] = (unsigned char)(visible ? 2 : 3);
+            if (getenv("FOGPOC_SH1X_DEBUG"))
+                fprintf(stderr, "[sh1x] buf %d inRange=%d visible=%d (minX %d maxX %d minZ %d maxZ %d)\n",
+                        b, inRange, visible, sx->bufs[b].minX, sx->bufs[b].maxX,
+                        sx->bufs[b].minZ, sx->bufs[b].maxZ);
+        }
+        /* mark items whose buffer is visible (engine draw order = the
+         * modelOrder range; the PoC's item index order is already the
+         * converter's buffer-ordered emission, so mask + keep order)   */
+        for (int i = 0; i < nItems; i++) {
+            const DrawItem *it = &sc->item[i];
+            if (it->buffer < 0 || it->buffer >= sx->nBuffers) {
+                /* untagged items (billboard meshes, unused, legacy):
+                 * engine billboards are drawn per buffer AFTER instances
+                 * — v24 marks a billboard item visible iff its PARENT
+                 * buffer is visible (they are emitted under the same
+                 * buffer's node group; the converter's BILLBOARDS_gN).  */
+                sh1xItemMask[i] = 1;    /* keep (engine always-adds BBs of
+                                           visible buffers; untagged =
+                                           not part of the room IPD set) */
+            } else if (bufVis[it->buffer] == 2) {
+                sh1xItemMask[i] = 1;
+            }
+        }
+    }
     for (int i = 0; i < nItems; i++) {
         if (R->dbgItem >= 0 && i != R->dbgItem) continue;
+        if (sh1xItemMask && !sh1xItemMask[i]) continue;   /* v24 window  */
         const DrawItem *it = &sc->item[i];
         if (it->matIdx < 0 || it->matIdx >= sc->matCount) continue;
         const int ams = sc->mat[it->matIdx].alphaMode;
@@ -7157,6 +7487,7 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
         }
     }
     g_dbgFrame++;                    /* v18 diagnostics (light dump) */
+    free(sh1xItemMask);              /* v24 window mask (NULL when off) */
 }
 
 /* ==================================================================== */
@@ -9369,7 +9700,6 @@ static int run_window_x11(LiveApp *A) {
     live_save_final(A);
     return 1;
 }
-
 /* ------------------------------------------------------------------ */
 /* Android backend - ANativeWindow (no SDL2, no X11; libandroid)       */
 /*                                                                     */

@@ -1,71 +1,71 @@
 {
-  "format": "camdat",
-  "version": 1,
-  "generatedBy": "CamTrack Editor 1.0.0",
-  "units": {
-    "length": "meters",
-    "angle": "degrees",
-    "time": "seconds",
-    "up": "+Y",
-    "handedness": "right-handed (glTF)"
-  },
-  "doc": "Parametric constant-speed camera tracks. line: pos(t)=start+s(t)*(end-start). circle: theta deg, pos(t)=center+[radiusX*cos(theta),0,radiusZ*sin(theta)], y=center[1]. fixed: pos=position, yaw/pitch advance by *SpeedDegS with optional *MinDeg/*MaxDeg boundaries. curve: uniform Catmull-Rom spline through points[] (end tangents duplicated by clamping); a fixed 64-samples-per-segment chord table plus a monotone cubic Hermite (Fritsch-Carlson) refinement maps traveled distance to the spline parameter, pos(t) is the exact spline point (C1-smooth) at constant speedMS; lookMode path uses the analytic spline derivative. polyline: a line with multiple turns — straight segments through points[] at constant speedMS; arc length is the exact segment-length sum, pos(t) lerps inside the segment reached by traveled distance, lookMode path uses the (piecewise-constant) segment direction. spiral: f=phase01(t,turns*360/speedDegS,loopMode), theta=startAngleDeg+dir*turns*360*f with dir=+1 for cw and -1 for ccw, r=radiusStart+(radiusEnd-radiusStart)*f, y=center[1]+yStart+(yEnd-yStart)*f, pos(t)=center+[r*cos(theta),y-center[1],r*sin(theta)] — radius and height interpolate over the sweep (a circle when radiusStart=radiusEnd and yStart=yEnd). zigzag: lawnmower sweep — lanes passes across a sizeX by sizeZ rectangle centered at center, waypoints at x=center[0]+/-sizeX/2 alternating direction while z advances sizeZ/(lanes-1) per pass, joined by straight segments at constant speedMS (same segment walk as polyline). figure8: theta deg advances like circle over one full 360 deg period (angleAt with bounds startAngleDeg..startAngleDeg+/-360), pos(t)=center+[semiX*sin(theta),0,semiZ*sin(2*theta)], y=center[1] (Gerono lemniscate; closes every 360 deg). loopMode: loop wraps, pingPong mirrors at ends, once stops at end. Orientation: lookAt point when lookMode is center|point|path; lookMode \"normal\" looks along N=normalize(cross(T,up)) with T the travel tangent (reversed on the pingPong return leg, same rule as path) and up=+Y, so N is horizontal and perpendicular to T (T parallel to up falls back to cross(T,+Z), then cross(T,+X)); normalDirection \"forward\"|\"backward\" selects +N|-N; else fixed yaw/pitch (YXZ Euler, +Y up, pitch positive = up). Units: meters / degrees / seconds. Coordinates are the glTF file own world space (identity transform). Per-model flags: fogon, nighton, flashlighton (booleans, derived from the World & Weather panel in v1) ride with each models[] entry for the consuming program; the full world env also rides as models[].env { pair:[A,B] (MAP_EFFECTS_INFOS indices 0..20), weatherTarget 0..8 (sharedFunc_800D0B18 arg), bootWeather -1..6, lensFlare 0..5, flashlightOn, psxWobble, dither, particles, engine }. durationSec is informational (one playback cycle).",
-  "models": [
+ "format": "camdat",
+ "version": 1,
+ "generatedBy": "CamTrack Editor 1.0.0",
+ "units": {
+  "length": "meters",
+  "angle": "degrees",
+  "time": "seconds",
+  "up": "+Y",
+  "handedness": "right-handed (glTF)"
+ },
+ "doc": "Parametric constant-speed camera tracks. line: pos(t)=start+s(t)*(end-start). circle: theta deg, pos(t)=center+[radiusX*cos(theta),0,radiusZ*sin(theta)], y=center[1]. fixed: pos=position, yaw/pitch advance by *SpeedDegS with optional *MinDeg/*MaxDeg boundaries. curve: uniform Catmull-Rom spline through points[] (end tangents duplicated by clamping); a fixed 64-samples-per-segment chord table plus a monotone cubic Hermite (Fritsch-Carlson) refinement maps traveled distance to the spline parameter, pos(t) is the exact spline point (C1-smooth) at constant speedMS; lookMode path uses the analytic spline derivative. polyline: a line with multiple turns \u2014 straight segments through points[] at constant speedMS; arc length is the exact segment-length sum, pos(t) lerps inside the segment reached by traveled distance, lookMode path uses the (piecewise-constant) segment direction. spiral: f=phase01(t,turns*360/speedDegS,loopMode), theta=startAngleDeg+dir*turns*360*f with dir=+1 for cw and -1 for ccw, r=radiusStart+(radiusEnd-radiusStart)*f, y=center[1]+yStart+(yEnd-yStart)*f, pos(t)=center+[r*cos(theta),y-center[1],r*sin(theta)] \u2014 radius and height interpolate over the sweep (a circle when radiusStart=radiusEnd and yStart=yEnd). zigzag: lawnmower sweep \u2014 lanes passes across a sizeX by sizeZ rectangle centered at center, waypoints at x=center[0]+/-sizeX/2 alternating direction while z advances sizeZ/(lanes-1) per pass, joined by straight segments at constant speedMS (same segment walk as polyline). figure8: theta deg advances like circle over one full 360 deg period (angleAt with bounds startAngleDeg..startAngleDeg+/-360), pos(t)=center+[semiX*sin(theta),0,semiZ*sin(2*theta)], y=center[1] (Gerono lemniscate; closes every 360 deg). loopMode: loop wraps, pingPong mirrors at ends, once stops at end. Orientation: lookAt point when lookMode is center|point|path; lookMode \"normal\" looks along N=normalize(cross(T,up)) with T the travel tangent (reversed on the pingPong return leg, same rule as path) and up=+Y, so N is horizontal and perpendicular to T (T parallel to up falls back to cross(T,+Z), then cross(T,+X)); normalDirection \"forward\"|\"backward\" selects +N|-N; else fixed yaw/pitch (YXZ Euler, +Y up, pitch positive = up). Units: meters / degrees / seconds. Coordinates are the glTF file own world space (identity transform). Per-model flags: fogon, nighton, flashlighton (booleans, derived from the World & Weather panel in v1) ride with each models[] entry for the consuming program; the full world env also rides as models[].env { pair:[A,B] (MAP_EFFECTS_INFOS indices 0..20), weatherTarget 0..8 (sharedFunc_800D0B18 arg), bootWeather -1..6, lensFlare 0..5, flashlightOn, psxWobble, dither, particles, engine }. durationSec is informational (one playback cycle).",
+ "models": [
+  {
+   "file": "HP0003.glb",
+   "addedAt": "2026-09-20T07:54:58.658Z",
+   "bounds": {
+    "min": [
+     -274,
+     -1.25,
+     78.46393585205078
+    ],
+    "max": [
+     -239.9765625,
+     8.11328125,
+     120.05078125
+    ]
+   },
+   "fogon": true,
+   "nighton": false,
+   "flashlighton": false,
+   "env": {
+    "pair": [
+     6,
+     3
+    ],
+    "weatherTarget": 4,
+    "bootWeather": -1,
+    "lensFlare": 0,
+    "flashlightOn": true,
+    "psxWobble": true,
+    "dither": true,
+    "particles": true,
+    "engine": true
+   },
+   "tracks": [
     {
-      "file": "THRF9FD.glb",
-      "addedAt": "2026-09-20T07:54:58.658Z",
-      "bounds": {
-        "min": [
-          -274,
-          -1.25,
-          78.46393585205078
-        ],
-        "max": [
-          -239.9765625,
-          8.11328125,
-          120.05078125
-        ]
-      },
-      "fogon": false,
-      "nighton": true,
-      "flashlighton": true,
-      "env": {
-        "pair": [
-          6,
-          3
-        ],
-        "weatherTarget": 4,
-        "bootWeather": -1,
-        "lensFlare": 0,
-        "flashlightOn": true,
-        "psxWobble": true,
-        "dither": true,
-        "particles": true,
-        "engine": true
-      },
-      "tracks": [
-        {
-          "id": "tmu9iudw118ov0",
-          "name": "Line 1",
-          "type": "line",
-          "enabled": true,
-          "fovDeg": 60,
-          "loopMode": "pingPong",
-          "start": [
-            -256.347,
-            1.1169,
-            110.9005
-          ],
-          "end": [
-            -256.1334,
-            1.5052,
-            85.7087
-          ],
-          "speedMS": 1.7012,
-          "lookMode": "path",
-          "durationSec": 29.6211
-        }
-      ]
+     "id": "tmu9iudw118ov0",
+     "name": "HP corridor",
+     "type": "line",
+     "enabled": true,
+     "fovDeg": 60,
+     "loopMode": "pingPong",
+     "start": [
+      23.5,
+      1.7,
+      -136.0
+     ],
+     "end": [
+      23.5,
+      1.7,
+      -147.0
+     ],
+     "speedMS": 1.0,
+     "lookMode": "path",
+     "durationSec": 12.0
     }
-  ]
+   ]
+  }
+ ]
 }
