@@ -1,0 +1,48 @@
+name: android-ci
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # create the GitHub Release (release assets are FREE, unlike artifacts)
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Android SDK + NDK 27.2 + CMake 3.22.1 are preinstalled on
+      # ubuntu-latest runners; gradle resolves them via the SDK locator.
+
+      - name: Build debug APK
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Build release APK (signed with the committed sh1.keystore)
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Smoke test — verify the APKs exist, are zips and contain the native lib
+        run: |
+          test -s app/build/outputs/apk/debug/app-debug.apk
+          test -s app/build/outputs/apk/release/app-release.apk
+          file app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/release/app-release.apk
+          unzip -l app/build/outputs/apk/debug/app-debug.apk | grep -E 'libsh1\.so|AndroidManifest' | head
+
+      - name: Upload release assets (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            app/build/outputs/apk/debug/app-debug.apk
+            app/build/outputs/apk/release/app-release.apk
