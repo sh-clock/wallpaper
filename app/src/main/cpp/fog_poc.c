@@ -1508,6 +1508,16 @@ static void sh1x_load(Sh1x *sx, const JValue *json) {
     if (envarr && envarr->type == JV_OBJ) {
         int p0 = jint(envarr, "presetIdx0", -1);
         int p1 = jint(envarr, "presetIdx1", -1);
+        /* audit C-1: BOUND-CHECK both indices — every other preset source
+         * (CLI --envpair/--nightpair, the camdat env pair) validates 0..20;
+         * the GLB path must too (SH_MAP_EFFECTS_INFOS is a fixed 21). */
+        if (p0 >= 0 && p1 >= 0) {
+            if (p0 > 20 || p1 > 20) {
+                fprintf(stderr, "[sh1x] env presetIdx {%d,%d} out of range"
+                        " (0..20) — ignored\n", p0, p1);
+                p0 = p1 = -1;
+            }
+        }
         if (p0 >= 0 && p1 >= 0) {
             sx->hasEnv = 1;
             sx->envIdx0 = p0;
@@ -7902,7 +7912,7 @@ static void sh1x_anims_bind(Scene *sc) {
          * per primitive). v27-v32 bound ONE nearest ITEM per copy and
          * then ONE more per count>1 iteration — the OTHER items of the
          * same instance stayed unbound: the 12-capsule carnival ride
-         * (WHEEL_BA lissajousOrbit, map6_s04_2.c:3848-3875) animated
+         * (WHEEL_BA lissajousOrbit, map6_s04_2.c:3844-3871) animated
          * one capsule's pieces while the other capsules floated STATIC
          * at their authored poses (user-reported: "only one capsule
          * spins, the others float in the air on top of it").
@@ -7931,7 +7941,17 @@ static void sh1x_anims_bind(Scene *sc) {
             if (c != 0 && c != '#' &&
                 !(c == '_' && nl > ol + 1 && it->name[ol + 1] == 'm'))
                 continue;                       /* not this object's inst  */
-            /* centroid from the item's own vertices (glTF space) */
+            /* audit M-1: the LOCAL vertex centroid transformed through the
+             * item's FULL world matrix (posed nodes carry the world
+             * translation in model.m[12..14]; baked instances have identity
+             * translations with world-space verts). The v33 first cut read
+             * the RAW local verts — ER02FC's belt has BOTH a posed emission
+             * (roots translated to (100,0,120/140/160), local meshes near
+             * the origin) AND baked duplicates (identity roots, verts at
+             * world (80..90,156..163)): the posed groups' LOCAL centroids
+             * sat ~169 m off and the baked group won the distance rank —
+             * one segment froze + a phantom animated copy (runtime-proven
+             * by the audit). M = R*local + t is the correct world center. */
             float cx = 0, cy = 0, cz = 0; int n = 0;
             for (int v = 0; v < it->vcount && it->vbase + v < sc->vertCount; v++) {
                 const float *vp = sc->verts + (size_t)(it->vbase + v) * 8;
@@ -7939,6 +7959,16 @@ static void sh1x_anims_bind(Scene *sc) {
             }
             if (!n) continue;
             cx /= n; cy /= n; cz /= n;
+            {
+                const mat4 *Mw = &it->model;
+                float wx = Mw->m[0] * cx + Mw->m[4] * cy + Mw->m[8]  * cz
+                           + Mw->m[12];
+                float wy = Mw->m[1] * cx + Mw->m[5] * cy + Mw->m[9]  * cz
+                           + Mw->m[13];
+                float wz = Mw->m[2] * cx + Mw->m[6] * cy + Mw->m[10] * cz
+                           + Mw->m[14];
+                cx = wx; cy = wy; cz = wz;
+            }
             /* find / make this item's group */
             int g = -1;
             if (it->posedInst >= 0) {
@@ -7982,29 +8012,57 @@ static void sh1x_anims_bind(Scene *sc) {
                 grps[q].cx = 1e30f;
             }
         }
-        /* selection: count==1 -> the nearest group; count>1 -> the nearest
-         * `count` groups. posedInst is the AUTHORITATIVE instance index
-         * (the emission order); unposed groups fall back to the distance
-         * rank (the old v27 nth rule). */
+        /* selection (audit M-4 rewrite): count==1 -> the nearest group;
+         * count>1 -> fill `count` slots. POSED groups are the ripper's own
+         * emission (the authoritative driver instances) — they bind FIRST
+         * with their own posedInst index; UNPOSED groups only fill the
+         * remaining slots, clamped to want-1 (the v33 first cut could mint
+         * inst == count from the nth counter after a posed gap and could
+         * double-bind an index alongside a posed group — both runtime-
+         * proven by the audit on ER02FC). */
         {
             int want = (a->count > 1) ? a->count : 1;
-            if (want > ngrp) want = ngrp;
+            int posedAvail = 0;
+            for (int q = 0; q < ngrp; q++)
+                if (grps[q].n && grps[q].posed >= 0 &&
+                    grps[q].posed < a->count) posedAvail++;
+            /* pass 1: every valid posed group */
+            if (posedAvail > 0) {
+                for (int q = 0; q < ngrp && posedAvail > 0; q++) {
+                    if (grps[q].n == 0 || grps[q].posed < 0) continue;
+                    if (grps[q].posed >= a->count) continue;
+                    for (int j = 0; j < grps[q].n; j++) {
+                        DrawItem *it = &sc->item[grps[q].items[j]];
+                        it->animIdx = k;
+                        it->animInst = grps[q].posed;
+                    }
+                    grps[q].n = 0;                 /* mark used */
+                    posedAvail--;
+                }
+            }
+            /* pass 2: unposed groups fill the remaining slots by distance */
+            int took = 0;
+            for (int q = 0; q < ngrp && posedAvail > 0; q++) {
+                if (grps[q].n && grps[q].posed >= 0 &&
+                    grps[q].posed < a->count) took++;
+            }
+            int fill = want - took;
             int nth = 0;
-            for (int taken = 0; taken < want; ) {
+            for (int taken = 0; taken < fill; ) {
                 int bg = -1; float bd = 1e30f;
                 for (int q = 0; q < ngrp; q++) {
                     if (grps[q].n == 0) continue;          /* already used */
-                    if (grps[q].posed >= a->count) continue; /* out of rng */
+                    if (grps[q].posed >= 0) continue;      /* posed: done  */
                     if (grps[q].cx < bd) { bd = grps[q].cx; bg = q; }
                 }
                 if (bg < 0) break;
-                int inst = (grps[bg].posed >= 0) ? grps[bg].posed : nth;
+                if (nth > want - 1) nth = want - 1;        /* clamp (M-4) */
                 for (int j = 0; j < grps[bg].n; j++) {
                     DrawItem *it = &sc->item[grps[bg].items[j]];
                     it->animIdx = k;
-                    it->animInst = inst;
+                    it->animInst = nth;
                 }
-                if ((int)inst >= nth) nth = inst + 1; else nth++;
+                nth++;
                 grps[bg].n = 0;                            /* mark used */
                 taken++;
             }
@@ -14340,7 +14398,9 @@ int main(int argc, char **argv) {
      * engine does.                                                          */
     int fogEnabled;
     if (fogForced >= 0) fogEnabled = fogForced;            /* --nofog/--fog   */
-    else if (cd.hasEnv && cd.envEngine >= 0) fogEnabled = cd.envEngine;  /* v2 env */
+    else if (cd.hasEnv && !camdatAuto && cd.envEngine >= 0)
+        fogEnabled = cd.envEngine;   /* audit M-2: the auto-camdat is not an
+                                      * authored env for this room */
     else fogEnabled = 1;                                   /* engine default  */
 
     /* ---- realtime live app (shared by window + benchmark modes) ---- */
@@ -14388,8 +14448,8 @@ int main(int argc, char **argv) {
         snow_reset(&A.snow);
     } else if (bootWeather < 0 &&
                !(cd.hasEnv && !camdatAuto && cd.envBootWeather >= 0) &&
-               sc.sh1x.hasEnv && sc.sh1x.envField17 > 0 &&
-               sc.sh1x.envField17 != 2) {
+               sc.sh1x.hasEnv && sc.sh1x.envField17 != 2 &&
+               sc.sh1x.envField17 >= 0) {
         /* v33 (S20): the GLB's ROOM-ORIGINAL map-load weather — the map
          * overlay header's own field_17 (Particle_EnvironmentSet(field_17,
          * field_16), load_screen.c:36), e.g. 1/2 the street snow, 5 the
