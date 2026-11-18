@@ -1,0 +1,36 @@
+{
+ "format": "camdat",
+ "version": 1,
+ "generatedBy": "sh1 scene set",
+ "models": [
+  {
+   "file": "THRF9FD.glb",
+   "fogon": false,
+   "nighton": true,
+   "flashlighton": true,
+   "tracks": [
+    {
+     "id": "streetswalk",
+     "name": "Streets west walk",
+     "type": "line",
+     "enabled": true,
+     "fovDeg": 60,
+     "loopMode": "pingPong",
+     "start": [
+      -265.0,
+      1.6,
+      108.0
+     ],
+     "end": [
+      -249.0,
+      1.6,
+      90.0
+     ],
+     "speedMS": 0.8,
+     "lookMode": "path",
+     "durationSec": 40.0
+    }
+   ]
+  }
+ ]
+}
