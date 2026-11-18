@@ -1155,6 +1155,8 @@ typedef struct {
      *        parsing THRF9FD.IPD), so every STP quad renders opaque
      *        texels + holes + veil, exactly like v13's composite. */
     int alphaMode;            /* 0 = OPAQUE, 1 = MASK (billboard), 2 = BLEND (STP) */
+    int waterLive;            /* v33: SH1X.waterLive — the DWAVE material the
+                               * engine redirects to the animated tile   */
 } MaterialInfo;
 
 typedef struct {
@@ -1343,6 +1345,16 @@ typedef struct {
     float userLightOffset[3];       /* Game_FlashlightAttribsSet local      */
     float userLightRot[3];          /* degrees (pitch, yaw, roll)           */
     int hasUserLight;
+    /* v33 (S20): the room's ORIGINAL environment — SH1X.env emitted at
+     * RIP time (the map overlay's field_16/field_17 + the WorldEnv pair
+     * via WorldEnv_MapPresetSet + D_800A9F80..A98). The players boot it
+     * by default; camdat env / CLI flags keep precedence. */
+    int hasEnv;
+    int envIdx0, envIdx1;           /* preset pair (flashlight off/on)     */
+    int envField16, envField17;     /* the map header's own fields          */
+    int envIsDark;                  /* idx1 Spot && idx0 != idx1: the game's
+                                     * dark-room flashlight-ON signature    */
+    char envSrc[80];
 } Sh1x;
 
 static void sh1x_free(Sh1x *sx) {
@@ -1360,11 +1372,17 @@ static void sh1x_free(Sh1x *sx) {
  * with extras ot_base where present, which is still engine-correct for
  * layering — only the subcell window degenerates to "everything").     */
 /* v27: prop-anim runtime globals ------------------------------------- */
-static int   g_animsDemo = 0;          /* --anims-demo: event gates SET  */
+/* v33 (S20): animations play BY DEFAULT (the user-facing contract — the
+ * GLB embeds the special animations; the players play them). --no-anims
+ * opts out (the engine-fresh state: event-gated drivers idle at their
+ * authored rot0 pose — the old default). */
+static int   g_animsDemo = 1;          /* default ON since v33          */
+static int   g_animsForced = -1;       /* CLI: --anims-demo / --no-anims */
 static float g_sh1xLightFlicker = 1.0f;/* lightFlicker live multiplier   */
 static int g_sh1xBeltScroll;      /* v32: scrollBelt D_800F48A4 (raw Q12) */
 static unsigned char g_waterTileRGB[32][32][3]; /* v32: the live DR_WAVE tile */
 static void fx_water_tile_update(int ctr);   /* fwd: called by fx_pass   */
+static int g_waterTileEverUpdated;             /* fwd: first-composite gate */
 
 static int sh_sin_q12(int angle) {
     /* v27.2 (B-13): the ENGINE's own LUT — kSineTable is the verbatim
@@ -1480,6 +1498,29 @@ static void sh1x_load(Sh1x *sx, const JValue *json) {
         sx->hasEnvEffects = 1;
         const char *fl = jstr(ee, "effectTexFlag", "");
         sx->envFlagIsWaterRefract = !strcmp(fl, "WaterRefract");
+    }
+    /* v33 (S20): SH1X.env — the room-original WorldEnv pair (the ripper
+     * resolves it from the decomp map overlay headers: field_16/field_17
+     * + MAP_INFOS flags + the D_800A9F80 table + WorldEnv_MapPresetSet
+     * switch, effects.c:220-267). presetIdx0/1 are DECOMP indices that
+     * index the engine's own verbatim 21-preset table. */
+    const JValue *envarr = jget(sh, "env");
+    if (envarr && envarr->type == JV_OBJ) {
+        int p0 = jint(envarr, "presetIdx0", -1);
+        int p1 = jint(envarr, "presetIdx1", -1);
+        if (p0 >= 0 && p1 >= 0) {
+            sx->hasEnv = 1;
+            sx->envIdx0 = p0;
+            sx->envIdx1 = p1;
+            sx->envField16 = jint(envarr, "field16", 0);
+            sx->envField17 = jint(envarr, "field17", 0);
+            /* envIsDark resolved at boot (needs the preset table defined
+             * below): idx1 Spot && idx0 != idx1 = the dark-room
+             * flashlight-ON signature. */
+            sx->envIsDark = 0;
+            snprintf(sx->envSrc, sizeof(sx->envSrc), "%s",
+                     jstr(envarr, "src", ""));
+        }
     }
     const JValue *wz = jarr(sh, "waterZones");
     int nwz = jcount(wz);
@@ -2219,6 +2260,17 @@ static int scene_load_glb_q(Scene *s, const char *path, int quiet) {
         const JValue *tex = jat(textures, texIdx);
         int srcImg = jint(tex, "source", -1);
         s->mat[i].texIdx = srcImg;
+        /* v33 (S20): SH1X.waterLive — the material the ENGINE redirects
+         * to the live animated tile at every chunk load
+         * (WorldMap_ChunkPropertiesSet -> func_8008E4EC matches the
+         * material by NAME — "DWAVE" in the sewer IPDs — and rewrites
+         * its tpage to 13 x=832, lens_flare.c:497-502 + map.c:1167-1186);
+         * func_8008E5B4 then rewrites the 32x32 window per frame. */
+        {
+            const JValue *ex = jget(m, "extras");
+            const JValue *sx = jget(ex, "SH1X");
+            s->mat[i].waterLive = jintb(sx, "waterLive", 0);
+        }
     }
 
     /* ---- textures: decode every image (PNG in the BIN chunk) ---- */
@@ -7843,102 +7895,118 @@ static void sh1x_anims_bind(Scene *sc) {
         const Sh1xPropAnim *a = &sc->sh1x.anims[k];
         if (a->object[0] == '<' || !a->object[0]) continue; /* <light> etc */
         const size_t ol = strlen(a->object);
-        int    bestI = -1;
-        float  bestD = 1e30f;
-        int    nth = 0;
+
+        /* v33 (S20): bind by INSTANCE GROUP, not by single item. One
+         * engine WorldObjects_Add copy = the parent node + its '_mN'
+         * mesh pieces, and each mesh can yield several draw items (one
+         * per primitive). v27-v32 bound ONE nearest ITEM per copy and
+         * then ONE more per count>1 iteration — the OTHER items of the
+         * same instance stayed unbound: the 12-capsule carnival ride
+         * (WHEEL_BA lissajousOrbit, map6_s04_2.c:3848-3875) animated
+         * one capsule's pieces while the other capsules floated STATIC
+         * at their authored poses (user-reported: "only one capsule
+         * spins, the others float in the air on top of it").
+         * GROUP RULES (the engine's own one-rot/one-pos-per-Add
+         * contract, world/draw.c:565-575):
+         *   1. items with posedInst >= 0 group BY posedInst (the
+         *      ripper's authoritative emission index — the node extras'
+         *      animInst);
+         *   2. unposed items group by stem + shared world translation:
+         *      the '#N' duplicate and '_mN' piece suffixes stripped,
+         *      two same-stem items at the same translation are one
+         *      instance's pieces/prims.
+         * Candidate names must be the object name followed by END,
+         * '#' (duplicate) or '_m' (piece) — WHEEL_BAX never binds
+         * WHEEL_BA (v33 hardening of the old prefix rule).           */
+        typedef struct { int items[64]; int n; int posed; float cx, cy, cz; } Grp;
+        Grp grps[64];
+        int ngrp = 0;
         for (int i = 0; i < sc->itemCount; i++) {
             DrawItem *it = &sc->item[i];
             if (it->animIdx >= 0) continue;    /* already bound */
             const size_t nl = strlen(it->name);
-            if (!nl || ol > nl) continue;
+            if (ol > nl) continue;
             if (memcmp(it->name, a->object, ol) != 0) continue;
-            /* world center from the item's own vertices (glTF space) */
-            float cx = 0, cy = 0, cz = 0;
-            int n = 0;
-            for (int v = 0; v < it->vcount && it->vbase + v < sc->vertCount;
-                 v++) {
+            char c = (nl > ol) ? it->name[ol] : 0;
+            if (c != 0 && c != '#' &&
+                !(c == '_' && nl > ol + 1 && it->name[ol + 1] == 'm'))
+                continue;                       /* not this object's inst  */
+            /* centroid from the item's own vertices (glTF space) */
+            float cx = 0, cy = 0, cz = 0; int n = 0;
+            for (int v = 0; v < it->vcount && it->vbase + v < sc->vertCount; v++) {
                 const float *vp = sc->verts + (size_t)(it->vbase + v) * 8;
                 cx += vp[0]; cy += vp[1]; cz += vp[2]; n++;
             }
             if (!n) continue;
             cx /= n; cy /= n; cz /= n;
-            const float dx = cx - a->pos[0];
-            const float dz = cz - (-a->pos[2]);   /* glTF z = -engine z */
-            const float dy = cy - (-a->pos[1]);
-            const float d = dx * dx + dy * dy + dz * dz;
-            if (d < bestD) { bestD = d; bestI = i; }
-        }
-        if (bestI < 0) continue;
-        /* v31.3 (task 17-FIX1): multi-mesh models — the ripper splits ONE
-         * engine model into '_mN' mesh-piece nodes under a shared parent;
-         * the engine's WorldObjects_Add rotates the WHOLE model (all its
-         * meshes, world/draw.c:565-575 — one rot for the model). Bind the
-         * chosen instance's OTHER mesh pieces too: same object prefix,
-         * the name remainder starts with '_m', SAME world translation
-         * (the shared parent pose = the same instance). Genuine '#N'/
-         * duplicate-name instances at OTHER poses stay free for the
-         * count>1 loop (unchanged behavior — verified on the SU0203 two-
-         * fan room: the 2nd fan sits 2.35 m off, not a piece).        */
-        {
-            const DrawItem *B = &sc->item[bestI];
-            for (int i = 0; i < sc->itemCount; i++) {
-                DrawItem *it2 = &sc->item[i];
-                if (it2->animIdx >= 0 || i == bestI) continue;
-                const size_t nl2 = strlen(it2->name);
-                if (ol > nl2 || memcmp(it2->name, a->object, ol) != 0)
-                    continue;
-                if (!(nl2 > ol + 1 && it2->name[ol] == '_' &&
-                      it2->name[ol + 1] == 'm')) continue;   /* only _mN */
-                float dx = it2->model.m[12] - B->model.m[12];
-                float dy = it2->model.m[13] - B->model.m[13];
-                float dz = it2->model.m[14] - B->model.m[14];
-                if (dx * dx + dy * dy + dz * dz > 1e-6f) continue;
-                it2->animIdx = k;
-                it2->animInst = B->animInst;
+            /* find / make this item's group */
+            int g = -1;
+            if (it->posedInst >= 0) {
+                for (int q = 0; q < ngrp; q++)
+                    if (grps[q].posed == it->posedInst) { g = q; break; }
+            } else {
+                for (int q = 0; q < ngrp; q++) {
+                    if (grps[q].posed >= 0) continue;
+                    const DrawItem *b = &sc->item[grps[q].items[0]];
+                    float dx = b->model.m[12] - it->model.m[12];
+                    float dy = b->model.m[13] - it->model.m[13];
+                    float dz = b->model.m[14] - it->model.m[14];
+                    if (dx * dx + dy * dy + dz * dz > 1e-6f) continue;
+                    g = q; break;   /* same stem family + same translation */
+                }
+            }
+            if (g < 0) {
+                if (ngrp >= 64) break;
+                g = ngrp++;
+                grps[g].n = 0;
+                grps[g].posed = it->posedInst;
+                grps[g].cx = 0; grps[g].cy = 0; grps[g].cz = 0;
+            }
+            if (grps[g].n < 64) {
+                grps[g].items[grps[g].n++] = i;
+                grps[g].cx += cx; grps[g].cy += cy; grps[g].cz += cz;
             }
         }
-        /* assign instance index 0; if MULTIPLE unbound items match this
-         * same anim, the next ones get i=1.. by distance order (the
-         * engine's per-copy index i). v27.2: a posed node's extras carry
-         * the AUTHORITATIVE emission index — use it when present. */
-        {
-            int inst0 = sc->item[bestI].posedInst >= 0 ?
-                        sc->item[bestI].posedInst : nth;
-            sc->item[bestI].animIdx = k;
-            sc->item[bestI].animInst = inst0;
-            if ((int)inst0 >= nth) nth = inst0 + 1; else nth++;
+        if (!ngrp) continue;
+        /* group centroids -> distance^2 (kept in the cx/cy/cz slot) */
+        for (int q = 0; q < ngrp; q++) {
+            if (grps[q].n) {
+                float fx = grps[q].cx / grps[q].n;
+                float fy = grps[q].cy / grps[q].n;
+                float fz = grps[q].cz / grps[q].n;
+                const float dx = fx - a->pos[0];
+                const float dy = fy - (-a->pos[1]);   /* glTF y = -eng y */
+                const float dz = fz - (-a->pos[2]);   /* glTF z = -eng z */
+                grps[q].cx = dx * dx + dy * dy + dz * dz;
+            } else {
+                grps[q].cx = 1e30f;
+            }
         }
-        if (a->count > 1) {
-            for (int more = 1; more < a->count; more++) {
-                float bd = 1e30f; int bi = -1;
-                for (int i = 0; i < sc->itemCount; i++) {
-                    DrawItem *it = &sc->item[i];
-                    if (it->animIdx >= 0) continue;
-                    const size_t nl = strlen(it->name);
-                    if (ol > nl) continue;
-                    if (memcmp(it->name, a->object, ol) != 0) continue;
-                    float cx = 0, cy = 0, cz = 0; int n = 0;
-                    for (int v = 0; v < it->vcount &&
-                         it->vbase + v < sc->vertCount; v++) {
-                        const float *vp =
-                            sc->verts + (size_t)(it->vbase + v) * 8;
-                        cx += vp[0]; cy += vp[1]; cz += vp[2]; n++;
-                    }
-                    if (!n) continue;
-                    cx /= n; cy /= n; cz /= n;
-                    float ddx = cx - a->pos[0];
-                    float ddz = cz - (-a->pos[2]);
-                    float d = ddx * ddx + ddz * ddz;
-                    if (d < bd) { bd = d; bi = i; }
+        /* selection: count==1 -> the nearest group; count>1 -> the nearest
+         * `count` groups. posedInst is the AUTHORITATIVE instance index
+         * (the emission order); unposed groups fall back to the distance
+         * rank (the old v27 nth rule). */
+        {
+            int want = (a->count > 1) ? a->count : 1;
+            if (want > ngrp) want = ngrp;
+            int nth = 0;
+            for (int taken = 0; taken < want; ) {
+                int bg = -1; float bd = 1e30f;
+                for (int q = 0; q < ngrp; q++) {
+                    if (grps[q].n == 0) continue;          /* already used */
+                    if (grps[q].posed >= a->count) continue; /* out of rng */
+                    if (grps[q].cx < bd) { bd = grps[q].cx; bg = q; }
                 }
-                if (bi < 0) break;
-                {
-                    int instM = sc->item[bi].posedInst >= 0 ?
-                                sc->item[bi].posedInst : nth;
-                    sc->item[bi].animIdx = k;
-                    sc->item[bi].animInst = instM;
-                    if ((int)instM >= nth) nth = instM + 1; else nth++;
+                if (bg < 0) break;
+                int inst = (grps[bg].posed >= 0) ? grps[bg].posed : nth;
+                for (int j = 0; j < grps[bg].n; j++) {
+                    DrawItem *it = &sc->item[grps[bg].items[j]];
+                    it->animIdx = k;
+                    it->animInst = inst;
                 }
+                if ((int)inst >= nth) nth = inst + 1; else nth++;
+                grps[bg].n = 0;                            /* mark used */
+                taken++;
             }
         }
     }
@@ -9902,7 +9970,27 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
  * the TPAGE field bits 5-6 (getTPage, libgpu.h:259-261) and 45 = mode 1
  * = ADDITIVE. Draw order poly[0] then poly[1]-on-top stands (AddPrim
  * head-insert chain). */
+/* v33 (S20): the RGBA view of the live DR_WAVE tile the water-floor
+ * materials sample (MaterialInfo.waterLive). Updated from the same
+ * composite fx_water_tile_update writes (RGB + opaque alpha). */
+static unsigned char g_waterLiveRGBA[32 * 32 * 4];
+static void fx_water_live_rgba(void) {
+    /* lazy first composite: before the first in-zone tick the RGB canvas
+     * is pristine zeros — composite ctr=0 (the engine's first frame) so
+     * the water floor never renders black before the flashlight enters
+     * the zone (the scroll itself stays gated exactly like the engine). */
+    if (!g_waterTileEverUpdated)
+        fx_water_tile_update(0);
+    for (int y = 0; y < 32; y++)
+        for (int x = 0; x < 32; x++) {
+            unsigned char *d = g_waterLiveRGBA + ((size_t)y * 32 + x) * 4;
+            const unsigned char *s = g_waterTileRGB[y][x];
+            d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = 255;
+        }
+}
+
 static void fx_water_tile_update(int ctr) {
+    g_waterTileEverUpdated = 1;
     int vA = (ctr >> 1) & 0x1F;          /* poly[0] v scroll   */
     int uB = ((ctr + 1) >> 2) & 0x1F;    /* poly[1] u scroll  */
     for (int y = 0; y < 32; y++) {
@@ -10969,6 +11057,19 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
         const TexInfo *t = &sc->tex[m->texIdx];
         if (t->w <= 0) continue;
         const uint8_t *tex = sc->texBlob + t->off;
+        int tw = t->w, th = t->h;
+        if (m->waterLive) {
+            /* v33 (S20): the LIVE DR_WAVE tile — the engine's material
+             * redirect (func_8008E4EC rewrites the DWAVE material to
+             * tpage 13 x=832 at every chunk load) makes the water-floor
+             * prims sample the region func_8008E5B4 rewrites per frame
+             * (the 32x32 two-quad composite at (832,224)). Sample the
+             * ANIMATED tile instead of the static art; u/v wrap mod 32
+             * (the sewer floor prims wrap v 4x — the tiled surface). */
+            fx_water_live_rgba();
+            tex = g_waterLiveRGBA;
+            tw = th = 32;
+        }
         const PassMode quadPass = (m->alphaMode == 0) ? RP_OPAQUE : RP_BLEND_TEX;
         for (int ti = 0; ti < post[bi].ntri && post[bi].tri0 + ti * 3 + 2 < it->icount; ti++) {
             int k = post[bi].tri0 + ti * 3;
@@ -10988,7 +11089,7 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
              * with the SAME engine formula as opaque prims (see raster_tri)
              * + the additive fog veil ON TOP (engine semi-trans G4 after the
              * textured quad in draw order). Holes stay truly transparent. */
-            raster_tri(fb, a, b, c, tex, t->w, t->h, quadPass, &R->opts,
+            raster_tri(fb, a, b, c, tex, tw, th, quadPass, &R->opts,
                        R->opts.ps1, R->dither, R->enginePixScale, R->enginePixScaleY);
         }
     }
@@ -13331,6 +13432,9 @@ typedef struct { double t; char file[512]; } Shot;
 
 int main(int argc, char **argv) {
     const char *glbPath = NULL, *camdatPath = NULL, *inputDir = NULL;
+    int camdatAuto = 0;    /* v33: auto-discovered camdat — its env is NOT
+                            * authored for THIS room; the GLB SH1X.env owns
+                            * the boot env in that case */
     const char *outdir = "shots";
     const char *timFile = NULL;
     int timView = -1, timPalette = 0;
@@ -13467,9 +13571,17 @@ int main(int argc, char **argv) {
             /* v27: treat event gates as SET (engine state after the story
              * events): the cutscene anims play — the drawbridge door slam,
              * the locker kick, the boiler light flicker, the rides spin.
-             * Default (engine-fresh): all event-gated drivers idle at
-             * their authored rot0 pose. */
+             * v33: this is now the DEFAULT (g_animsDemo starts 1); the
+             * flag remains as an explicit force. */
             g_animsDemo = 1;
+            g_animsForced = 1;
+        }
+        else if (!strcmp(a, "--no-anims")) {
+            /* v33 (S20): the engine-fresh opt-out — every event-gated
+             * driver idles at its authored rot0 pose (the pre-v33
+             * default; regression A/B for the byte-identical contracts). */
+            g_animsDemo = 0;
+            g_animsForced = 0;
         }
         else if (!strcmp(a, "--maplink") && i + 1 < argc) {
             /* v27: 1 = merge neighbor GLBs when present (default), 0 =
@@ -13872,6 +13984,8 @@ int main(int argc, char **argv) {
             fprintf(stderr, "cannot find camdat.json (use --camdat FILE or --input DIR)\n");
             return 1;
         }
+        camdatAuto = 1;   /* auto-discovered: camera track only, not an
+                           * authored env for this room (v33) */
     }
 
     /* ---- optional standalone TIM viewer ---- */
@@ -13975,7 +14089,7 @@ int main(int argc, char **argv) {
      * sharedFunc_800D0B18 512-tick sine cross-fade (resolved below).   */
     if (bootWeatherTarget < 0 && track->weatherTarget >= 0)
         bootWeatherTarget = track->weatherTarget;
-    if (cd.hasEnv) {
+    if (cd.hasEnv && !camdatAuto) {
         if (psxForced < 0 && cd.envPsxWobble >= 0) {
             opts.ps1 = cd.envPsxWobble ? 1 : 0;          /* 0 = --modern    */
             opts.linear = cd.envPsxWobble ? 0 : 1;
@@ -13988,10 +14102,11 @@ int main(int argc, char **argv) {
             lensFlareType = cd.envLensFlare;
         if (bootWeatherTarget < 0 && cd.envWeatherTarget >= 0)
             bootWeatherTarget = cd.envWeatherTarget;     /* resolved below  */
-        /* v32.2: animsDemo folds like the other env booleans — CLI
-         * --anims-demo wins (no off-flag to distinguish, so the fold
-         * only applies when the CLI left it at the default 0). */
-        if (g_animsDemo == 0 && cd.envAnimsDemo >= 0)
+        /* v32.2: animsDemo folds like the other env booleans — the CLI
+         * flags win (--anims-demo / --no-anims set g_animsForced), then
+         * the camdat env boolean. v33: the DEFAULT is ON (animations
+         * play; the GLB embeds them). */
+        if (g_animsForced < 0 && cd.envAnimsDemo >= 0)
             g_animsDemo = cd.envAnimsDemo ? 1 : 0;
     }
 
@@ -14136,15 +14251,39 @@ int main(int argc, char **argv) {
          * override the saved env). The env pair supersedes the nighton-
          * derived boot pair exactly like an explicit --envpair would (the
          * night flag then reads 0, like --envpair without --night).       */
-        if (nightForced < 0 && cd.hasEnv && cd.envPair0 >= 0) night = 0;
-        if (flashlightForced < 0 && cd.hasEnv && cd.envFlashlightOn >= 0)
+        if (nightForced < 0 && cd.hasEnv && !camdatAuto &&
+            cd.envPair0 >= 0) night = 0;
+        if (flashlightForced < 0 && cd.hasEnv && !camdatAuto &&
+            cd.envFlashlightOn >= 0)
             flOn = cd.envFlashlightOn;
         bootPair0 = night ? A.env.nightP0 : SH_PRESET_DAY_IDX;
         bootPair1 = night ? A.env.nightP1 : SH_PRESET_DAY_IDX;
-        if (cd.hasEnv && cd.envPair0 >= 0 &&
+        if (cd.hasEnv && !camdatAuto && cd.envPair0 >= 0 &&
             nightForced < 0 && worldStage < 0 && envPair0 < 0) {
             bootPair0 = cd.envPair0;                 /* the saved v2 selection */
             bootPair1 = cd.envPair1;
+        }
+        /* v33 (S20): the GLB's ROOM-ORIGINAL env — the new default BELOW
+         * the camdat env (the camdat is an authored override; the GLB
+         * carries the room's own WorldEnv pair resolved at rip time from
+         * the decomp map overlay headers). Applies only when the camdat
+         * provided no pair and no worldstage/CLI pair was given. */
+        if (!(cd.hasEnv && !camdatAuto && cd.envPair0 >= 0) &&
+            worldStage < 0 && envPair0 < 0 && nightForced < 0 &&
+            sc.sh1x.hasEnv) {
+            bootPair0 = sc.sh1x.envIdx0;
+            bootPair1 = sc.sh1x.envIdx1;
+            night = 0;
+            sc.sh1x.envIsDark = (sc.sh1x.envIdx0 != sc.sh1x.envIdx1) &&
+                (SH_MAP_EFFECTS_INFOS[sc.sh1x.envIdx1].flags[2] == SHENUM_1);
+            /* the dark-room signature: the ON-state preset is a Spot and
+             * the pair differs -> the game's dark-interior state has the
+             * FLASHLIGHT ON (the school/sewer/nightmare interiors where
+             * Harry finds/uses it). No camdat/CLI flashlight opinion. */
+            if (flashlightForced < 0 &&
+                !(cd.hasEnv && !camdatAuto && cd.envFlashlightOn >= 0) &&
+                sc.sh1x.envIsDark)
+                flOn = 1;
         }
         if (worldStage == 1) { bootPair0 = 1; bootPair1 = 1; }   /* D_800A9F80 */
         if (worldStage == 2) { bootPair0 = 6; bootPair1 = 3; }   /* D_800A9F88 */
@@ -14229,7 +14368,8 @@ int main(int argc, char **argv) {
         A.snow.snowTypeEnable = 1;
         A.snow.weatherTick = 0;
         snow_reset(&A.snow);
-    } else if (bootWeather < 0 && cd.hasEnv && cd.envBootWeather >= 0) {
+    } else if (bootWeather < 0 && cd.hasEnv && !camdatAuto &&
+               cd.envBootWeather >= 0) {
         /* v13: the camdat v2 env boot recipe — Particle_EnvironmentSet at
          * load, applied UNCONDITIONALLY like the v2 editor's setBootWeather
          * (the editor offers recipe 2 "snow + wind flag" as a first-class
@@ -14246,6 +14386,27 @@ int main(int argc, char **argv) {
         A.snow.weatherTick = 0;
         A.snow.transitionLock = 1;
         snow_reset(&A.snow);
+    } else if (bootWeather < 0 &&
+               !(cd.hasEnv && !camdatAuto && cd.envBootWeather >= 0) &&
+               sc.sh1x.hasEnv && sc.sh1x.envField17 > 0 &&
+               sc.sh1x.envField17 != 2) {
+        /* v33 (S20): the GLB's ROOM-ORIGINAL map-load weather — the map
+         * overlay header's own field_17 (Particle_EnvironmentSet(field_17,
+         * field_16), load_screen.c:36), e.g. 1/2 the street snow, 5 the
+         * sewer rain. The same recipe numbering as --weather. Recipe 2
+         * (snow+wind) stays the map0 default exactly like the v13 rule
+         * above; CLI/camdat boot weather keeps precedence. */
+        particle_environment_set(&A.snow, sc.sh1x.envField17, 1);
+        A.snow.weatherSettings = (uint16_t)(A.snow.weatherBits >> 12);
+        A.snow.weatherCurrent = A.snow.weatherBits;
+        A.snow.weatherTarget = A.snow.weatherBits;
+        A.snow.rainGravity = 30;
+        A.snow.snowTypeEnable = 1;
+        A.snow.weatherTick = 0;
+        A.snow.transitionLock = 1;
+        snow_reset(&A.snow);
+        printf("[weather] boot Particle_EnvironmentSet(%d) — the room's "
+               "map-load recipe (SH1X.env.field17)\n", sc.sh1x.envField17);
     }
     A.snow.nextWeather = 2;    /* the W-key cycle starts at snow          */
     /* v12: --weather-target N — the RUNTIME transition recipe at boot
@@ -14753,4 +14914,3 @@ static int run_window_android(LiveApp *A) {
 }
 
 #endif /* __ANDROID__ backend */
-
