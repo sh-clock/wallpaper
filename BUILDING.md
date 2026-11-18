@@ -36,8 +36,20 @@ echo "sdk.dir=/path/to/android-sdk" > local.properties   # once
 
 ## CI
 
-`.github/workflows/android.yml` runs on ubuntu-latest (SDK/NDK preinstalled)
-and uploads both APKs as artifacts on every push / PR / manual run.
+`.github/workflows/android.yml` runs on ubuntu-latest (SDK/NDK preinstalled).
+Behavior (v7.1):
+
+* Every push to main **with asset changes** (`app/src/main/assets/**`,
+  detected across the whole push range): the `bump` job bumps
+  `version.properties` by ONE level (1.7.30 -> 1.7.31), commits it with
+  `[skip ci]`, pushes the commit + `vX.Y.Z` tag to main; the `build` job
+  then checks out main (now carrying the bump) and publishes BOTH APKs
+  as RELEASE ASSETS under the new tag.
+* Pushes without asset changes: build + smoke, no bump, no release.
+* Tag pushes (`v*`, a human PAT tag): build + release under that tag.
+* PRs: build + smoke the PR HEAD only (no release).
+* No workflow artifacts are ever uploaded (release assets only — zero
+  Actions billing).
 
 ## Install
 

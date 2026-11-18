@@ -103,6 +103,17 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+#if defined(__ANDROID__)
+/* v7.1 (audit W-D9): the printf->logcat redirect sat AFTER main() — the
+ * engine's boot chatter never reached logcat (stdout is /dev/null under
+ * the wallpaper service). Declared at the TOP so EVERY printf (incl.
+ * main) routes to logcat on Android. */
+#include <android/log.h>
+#define ALOGI(...) __android_log_print(ANDROID_LOG_INFO,  "sh1poc", __VA_ARGS__)
+#define ALOGE(...) __android_log_print(ANDROID_LOG_ERROR, "sh1poc", __VA_ARGS__)
+#define printf(...) ALOGI(__VA_ARGS__)
+#endif
+
 #if defined(_WIN32)
   #include <windows.h>
   #include <direct.h>
@@ -1141,6 +1152,10 @@ typedef struct {
                                  WorldObject model name), -1 = none      */
     int animInst;             /* v27: instance index within the anim (the
                                  engine's per-copy phase/index i)          */
+    int posedInst;            /* v27.2: the posed node extras' authoritative
+                                 animInst (rip emission order)             */
+    int cutsceneOnly;          /* v27.2: node extras cutsceneOnly — hidden at
+                                 engine-fresh (map7_s02 beans)             */
 } DrawItem;
 
 typedef struct {
@@ -1214,6 +1229,18 @@ typedef struct {
     int posPerInstN;                /* fanArray posed positions (glTF m)     */
     float posPerInst[16][3];
     int rotY180From;                /* fanArray: i>=this gets +180 deg y     */
+    /* ---- v27.2 (audit fleet fixes) ---- */
+    int eventGateAlt;               /* 'clear-or' second flag (map1_s03 102) */
+    int eventGatePol;               /* 0=set 1=clear 2=clear-or (rip field)  */
+    int cutsceneOnly;               /* engine-fresh: NOT drawn (map7_s02 beans) */
+    int hasRng;                     /* rngBase/rngMask authored (not defaults) */
+    int fanAng[16];                 /* fanArray per-instance raw Q12 angles  */
+    int fanSplit;                   /* fanArray: i<split subtracts (map4_s02) */
+    int scatterAng[16], scatterAmp[16];  /* gravityScatter per-inst state    */
+    int liveVy[16], liveVz[16];     /* gravityScatter live pos (raw Q12 m)   */
+    int seeded;                     /* gravityScatter: per-inst state seeded  */
+    int isCabin;                    /* ferrisWheel cabin (FWBOX parity set)   */
+    int pendSlot[5];                /* ferris arm i pendulum slot (4 aliased) */
 } Sh1xPropAnim;
 typedef struct {
     char tag[8];
@@ -1262,10 +1289,15 @@ static int   g_animsDemo = 0;          /* --anims-demo: event gates SET  */
 static float g_sh1xLightFlicker = 1.0f;/* lightFlicker live multiplier   */
 
 static int sh_sin_q12(int angle) {
-    /* engine Math_Sin: Q3.12 angle (4096 = full turn) -> Q19.12 sine
-     * ([-4096, 4096]); g_SineTable is a plain sine table. */
-    return (int)(sinf((float)(angle & 0xFFF) * (float)(2.0 * M_PI / 4096.0))
-                 * 4096.0f);
+    /* v27.2 (B-13): the ENGINE's own LUT — kSineTable is the verbatim
+     * g_SineTable extracted from libkmath.s (Math_Sin = table[a&0xFFF]).
+     * The float sinf() approximation differed by up to 1 count. */
+    return kSineTable[angle & 0xFFF];
+}
+
+static int sh_cos_q12(int angle) {
+    /* engine Math_Cos: table[(a & 0xFFF) + 0x400] (the no-wrap window) */
+    return kSineTable[(angle & 0xFFF) + 0x400];
 }
 
 static void sh1x_load(Sh1x *sx, const JValue *json) {
@@ -1452,6 +1484,11 @@ static void sh1x_load(Sh1x *sx, const JValue *json) {
         a->rate = (float)jnum(e, "rate", jnum(e, "rngBase", 0.0));
         a->rngBase = (float)jnum(e, "rngBase", -180.0);
         a->rngMask = jint(e, "rngMask", 0x1FF);
+        /* v27.2 (B-2): spinConst entries carry ONLY rate — the parse
+         * defaults (-180/0x1FF) poisoned them (SU00FF run: SPHERE_H at
+         * -400.9deg/2s vs the engine's -180; WHEEL_HI -395.6 vs +30).
+         * Apply the RNG form ONLY when the fields are AUTHORED. */
+        a->hasRng = (jget(e, "rngBase") != NULL) || (jget(e, "rngMask") != NULL);
         a->rattleD = 0;                   /* doorRattle kick state          */
         a->kick = (float)jnum(e, "kick", 0.0);
         a->restAngle = (float)jnum(e, "rest", jnum(e, "restAngle", 0.0));
@@ -1467,23 +1504,39 @@ static void sh1x_load(Sh1x *sx, const JValue *json) {
         a->rawRebound = jint(e, "reboundVelRaw", 32);
         a->kickPhase = 0;
         a->sharedLeader = -1;
-        a->count = jint(e, "count", jint(e, "arms", 1));
-        /* lightFlicker verbatim (map1_s05.c:371-396) */
+        a->count = jint(e, "count", jint(e, "arms", jint(e, "bladeCount", 1)));
+        /* lightFlicker verbatim (map1_s05.c:319-341 init, 371-396 update):
+         * periods D_800D86FC[0..1] = 0x40 = 64, amplitude D_800D86FE = 48;
+         * v27.2 (B-3): the v27 parse zeroed both periods (never flickered)
+         * and mis-rounded the Q12 constants (5534/2458 vs the engine's
+         * truncating Q12(1.35)=5529 / Q12(0.6)=2457 / Q12(0.9)=3686). */
         a->flBase = (float)jnum(e, "base", 1.35);
         a->flAmpA = (float)jnum(e, "ampA", 0.9);
         a->flAmpB = (float)jnum(e, "ampB", 0.6);
         a->flRampThresh = jint(e, "rampThreshRaw", 262144);
-        { const JValue *ra = jarr(e, "rerollA");
-            /* rerollA may arrive as [lo,hi] or a legacy scalar (hi) */
-            if (ra && ra->count >= 2) { a->flAmp = 32; (void)jat(ra,1); }
-            else { a->flAmp = 32; } }
-        a->flT0 = 0; a->flT1 = 0; a->flPer0 = 0; a->flPer1 = 0;
+        a->flPer0 = jint(e, "per0", 64);
+        a->flPer1 = jint(e, "per1", 64);
+        a->flAmp  = jint(e, "amp", 48);
         /* movement driver params */
         a->mvMaster = 0; a->mvMaster2 = 0; a->mvWrap = 0; a->mvWrapCount = 0;
         a->mvVel = 0; a->mvState = 0; a->mvTimer = 0;
         for (int q = 0; q < 4; q++) { a->mvPend[q] = 0; a->mvPendVel[q] = 0; }
         a->posPerInstN = 0;
         a->rotY180From = jint(e, "rotY180From", 7);
+        /* v27.2: fanArray per-instance split — map4_s02.c:140-149: i<7
+         * angle -= dt*Q12_ANGLE(90), i>=7 angle += (per-fan state
+         * D_800ED8B0[i], NOT one shared master) */
+        a->fanSplit = jint(e, "spinSplit", 7);
+        for (int q = 0; q < 16; q++) a->fanAng[q] = 0;
+        /* v27.2: gate polarity + cutscene-only (audit D1/C-D4) */
+        a->eventGateAlt = jint(e, "eventGateAlt", 0);
+        a->cutsceneOnly = jintb(e, "cutsceneOnly", 0);
+        {
+            const char *pol = jstr(e, "eventGatePolarity", "set");
+            a->eventGatePol = !strcmp(pol, "clear") ? 1 :
+                              !strcmp(pol, "clear-or") ? 2 : 0;
+        }
+        a->isCabin = jintb(e, "cabin", 0);
         { const JValue *ppi = jarr(e, "posPerInst");
             int n = jcount(ppi);
             for (int q = 0; q < n && q < 16; q++) {
@@ -1538,6 +1591,9 @@ static void sh1x_load(Sh1x *sx, const JValue *json) {
         a->cur[0] = a->rot0[0];
         a->cur[1] = a->rot0[1];
         a->cur[2] = a->rot0[2];
+        /* v27.2 (B-4): translate/MOVACHES cur[2] starts at the authored
+         * PLACEMENT z (60.0667) — the shelf sits static at engine-fresh. */
+        if (a->driver == 3) a->cur[2] = a->pos[2];
         a->rawVy = (int)(a->rot0[1] * 4096.0f / 360.0f);
         a->rawVel = 0;
         /* v27: the dampedSwing demo start = the post-event pose (the
@@ -1628,16 +1684,21 @@ static int glb_open(Glb *g, const char *path) {
     memset(g, 0, sizeof(*g));
     long len = 0;
     g->fileData = read_whole_file(path, &len);
-    if (!g->fileData || (size_t)len < 20) return 0;
+    if (!g->fileData || (size_t)len < 20) goto fail;
     const uint8_t *d = g->fileData;
-    if (memcmp(d, "glTF", 4) != 0) return 0;          /* magic */
+    if (memcmp(d, "glTF", 4) != 0) goto fail;      /* magic */
     uint32_t ver = d[4] | (d[5] << 8) | (d[6] << 16) | ((uint32_t)d[7] << 24);
-    if (ver != 2) return 0;                            /* glTF 2.0 */
+    if (ver != 2) goto fail;                        /* glTF 2.0 */
     /* chunk 0 = JSON */
     uint32_t jlen = d[12] | (d[13] << 8) | (d[14] << 16) | ((uint32_t)d[15] << 24);
-    if (memcmp(d + 16, "JSON", 4) != 0) return 0;
+    /* v27.2 (audit C-D2): validate the JSON chunk fits the FILE before
+     * parsing — a truncated/corrupt <room>.glb next to the active GLB
+     * (the mapLink probe path) previously read out of bounds (ASAN
+     * heap-buffer-overflow via json_parse). */
+    if ((size_t)jlen == 0 || (size_t)jlen > (size_t)len - 20) goto fail;
+    if (memcmp(d + 16, "JSON", 4) != 0) goto fail;
     g->json = json_parse((const char *)d + 20, jlen);
-    if (!g->json) return 0;
+    if (!g->json) goto fail;
     size_t p = 20 + jlen;
     if (p & 3) p += 4 - (p & 3);                       /* chunk padding */
     if (p + 8 <= (size_t)len) {
@@ -1649,6 +1710,14 @@ static int glb_open(Glb *g, const char *path) {
         }
     }
     return 1;
+fail:
+    /* v27.2 (C-D3): self-clean — early failures free what they allocated
+     * (the mapLink neighbor probe used to LEAK fileData on
+     * present-but-invalid files). */
+    jfree(g->json);
+    free(g->fileData);
+    memset(g, 0, sizeof(*g));
+    return 0;
 }
 static void glb_close(Glb *g) {
     jfree(g->json);
@@ -1843,6 +1912,12 @@ static void glb_walk_node(Glb *g, const JValue *nodes, int nodeIdx, mat4 parent,
     int nodeBuffer = sx ? jint(sx, "buffer", -1) : -1;
     int nodeAddSeq = sx ? jint(sx, "add_seq", -1) : -1;
     int nodeIsBillboard = ex ? jbool(ex, "billboard", 0) : 0;
+    /* v27.2: posed-node tags (the ripper's propAnimPosed emission): the
+     * AUTHORITATIVE per-instance index (the emission order — beats the
+     * distance-rank for tight clusters like the 16 beans) + the
+     * cutsceneOnly visibility contract. */
+    int nodePosedInst = ex ? jint(ex, "animInst", -1) : -1;
+    int nodeCutsceneOnly = ex ? jintb(ex, "cutsceneOnly", 0) : 0;
     if (mesh) {
         const JValue *prims = jarr(mesh, "primitives");
         int np = jcount(prims);
@@ -1870,6 +1945,8 @@ static void glb_walk_node(Glb *g, const JValue *nodes, int nodeIdx, mat4 parent,
             item.addSeq = nodeAddSeq;      /* v24: engine add slot         */
             item.isBillboard = nodeIsBillboard;
             item.animIdx = -1;   /* v26.3: bound in sh1x_anims_bind */
+            item.posedInst = nodePosedInst;   /* v27.2                  */
+            item.cutsceneOnly = nodeCutsceneOnly; /* v27.2               */
             item.vbase = (int)(sb->n / 8);
             item.ibase = (int)sb->in;
             for (int i = 0; i < pos.count; i++) {
@@ -1907,12 +1984,21 @@ static void glb_walk_node(Glb *g, const JValue *nodes, int nodeIdx, mat4 parent,
 }
 
 /* full GLB -> Scene load. Returns 1 on success. */
+static int scene_load_glb_q(Scene *s, const char *path, int quiet);
 static int scene_load_glb(Scene *s, const char *path) {
+    return scene_load_glb_q(s, path, 0);
+}
+
+/* v27.2 (C-D3): the quiet variant — the mapLink neighbor probe contract
+ * is a SILENT no-op for present-but-invalid files (absent files were
+ * already silent); parse errors go to stderr only for the MAIN load. */
+static int scene_load_glb_q(Scene *s, const char *path, int quiet) {
     memset(s, 0, sizeof(*s));
     snprintf(s->srcFile, sizeof(s->srcFile), "%s", path);
     Glb g;
     if (!glb_open(&g, path)) {
-        fprintf(stderr, "cannot open GLB %s (not a glTF 2.0 binary?)\n", path);
+        if (!quiet)
+            fprintf(stderr, "cannot open GLB %s (not a glTF 2.0 binary?)\n", path);
         return 0;
     }
     const JValue *meshes = jarr(g.json, "meshes");
@@ -2128,7 +2214,7 @@ static int sh1x_load_neighbors(Scene *sc, const char *glbPath) {
         if (!f) continue;
         fclose(f);
         Scene *ns = (Scene *)calloc(1, sizeof(Scene));
-        if (!scene_load_glb(ns, p)) {   /* parse failure: silent skip */
+        if (!scene_load_glb_q(ns, p, 1)) {  /* parse failure: silent skip */
             free(ns);
             continue;
         }
@@ -4623,8 +4709,15 @@ static void sh_env_update_pose(ShEnv *env, v3 camPos, Quat camQ) {
         L->dir[1] = -evy;
         L->dir[2] = -evz;
         /* lightIntensity = Q12_MULT(lightWeight, g_SysWork.lightIntensity)
-         * with g_SysWork.lightIntensity = Q12(1.0) — the identity.         */
-        env->light.intensity = lightWeight;
+         * — v27.2 (B-3): g_SysWork.lightIntensity is the lightFlicker
+         * value when the boiler-room driver is LIVE (map1_s05.c:395:
+         * g_SysWork.lightIntensity = Q12(1.35) + flicker; engine-fresh
+         * the driver is flag-129-gated and the multiplier stays 1.0). */
+        {
+            int flickerQ12 = (int)(g_sh1xLightFlicker * 4096.0f);
+            env->light.intensity =
+                (int)(((int64_t)lightWeight * flickerQ12) >> 12);
+        }
     } else {
     v3 d = { (float)SH_LIGHT_DIR_CAM_Q12[0], (float)SH_LIGHT_DIR_CAM_Q12[1],
              (float)SH_LIGHT_DIR_CAM_Q12[2] };
@@ -5310,7 +5403,7 @@ static int32_t snow_ground_engine(const Snow *S, int32_t wxQ12, int32_t wzQ12) {
     if (cx < 0 || cx >= S->gnx || cz < 0 || cz >= S->gnz) return 32768;
     int16_t h = S->gh[cz * S->gnx + cx];
     if (h == SNOW_GND_NODATA) return 32768;
-    return ((int32_t)S->datumQ8 - (int32_t)h) << 4;
+    return ((int32_t)S->datumQ8 - (int32_t)h) * 16;
 }
 
 /* ---- RNG: main/rng.c 1:1 ------------------------------------------- */
@@ -5433,9 +5526,9 @@ static void snow_movement_update(Snow *S, SnowPart *p, uint16_t *randv,
      * g_Particle_SpeedX/Z here VERBATIM (v11 hardcoded 0 because the wind
      * machinery was unreachable; windy weather (D0B18 args 2-4/6-8) makes
      * it live — ramped by the wind block in snow_tick). */
-    p->pos[0] += ((int32_t)(p->mv[0] << 2) + S->windX + deltaX) * SNOW_TS30 / SNOW_TS30;
-    p->pos[1] += ((p->mv[1] >> 1) << 2);
-    p->pos[2] += ((int32_t)(p->mv[2] << 2) + S->windZ + deltaZ) * SNOW_TS30 / SNOW_TS30;
+    p->pos[0] += ((int32_t)(p->mv[0] * 4) + S->windX + deltaX) * SNOW_TS30 / SNOW_TS30;
+    p->pos[1] += ((p->mv[1] >> 1) * 4);
+    p->pos[2] += ((int32_t)(p->mv[2] * 4) + S->windZ + deltaZ) * SNOW_TS30 / SNOW_TS30;
 
     int ax = p->pos[0] < 0 ? -p->pos[0] : p->pos[0];
     int az = p->pos[2] < 0 ? -p->pos[2] : p->pos[2];
@@ -6395,8 +6488,8 @@ static void raster_tri(Frame *fb, const RVert *vA, const RVert *vB, const RVert 
             /* UVStepper::Init: (u << 12) + (1 << 11), all << 12 -> Q24 texel */
             ddaU0 = ((uint32_t)(uint8_t)iu[0] << 24) + (2048u << 12);
             ddaV0 = ((uint32_t)(uint8_t)iv[0] << 24) + (2048u << 12);
-            ddaX0 = (int64_t)ex[0] << 12;      /* anchor pos, Q12 engine px   */
-            ddaY0 = (int64_t)ey[0] << 12;
+            ddaX0 = (int64_t)ex[0] * 4096;   /* anchor pos, Q12 engine px   */
+            ddaY0 = (int64_t)ey[0] * 4096;
             ddaKX = 4096.0 / (double)engScaleX; /* output px -> Q12 engine px */
             ddaKY = 4096.0 / (double)engScaleY;
             ddaValid = 1;
@@ -7012,9 +7105,9 @@ static void transform_item2(const Renderer *R, const DrawItem *it,
                 int dx = (int16_t)((int)((wx * 256.0f) - (env->light.pos[0] >> 4)));
                 int dy = (int16_t)((int)((wy * 256.0f) - (env->light.pos[1] >> 4)));
                 int dz = (int16_t)((int)((wz * 256.0f) - (env->light.pos[2] >> 4)));
-                int nx5 = (int)(-(int)lrintf(nx * 127.0f)) << 5;
-                int ny5 = (int)(-(int)lrintf(ny * 127.0f)) << 5;
-                int nz5 = (int)(-(int)lrintf(nz * 127.0f)) << 5;
+                int nx5 = (int)(-(int)lrintf(nx * 127.0f)) * 32;
+                int ny5 = (int)(-(int)lrintf(ny * 127.0f)) * 32;
+                int nz5 = (int)(-(int)lrintf(nz * 127.0f)) * 32;
                 if (nx5 > 4064) nx5 = 4064;
                 if (nx5 < -4064) nx5 = -4064;
                 if (ny5 > 4064) ny5 = 4064;
@@ -7438,9 +7531,15 @@ static void sh1x_anims_bind(Scene *sc) {
         if (bestI < 0) continue;
         /* assign instance index 0; if MULTIPLE unbound items match this
          * same anim, the next ones get i=1.. by distance order (the
-         * engine's per-copy index i). */
-        sc->item[bestI].animIdx = k;
-        sc->item[bestI].animInst = nth++;
+         * engine's per-copy index i). v27.2: a posed node's extras carry
+         * the AUTHORITATIVE emission index — use it when present. */
+        {
+            int inst0 = sc->item[bestI].posedInst >= 0 ?
+                        sc->item[bestI].posedInst : nth;
+            sc->item[bestI].animIdx = k;
+            sc->item[bestI].animInst = inst0;
+            if ((int)inst0 >= nth) nth = inst0 + 1; else nth++;
+        }
         if (a->count > 1) {
             for (int more = 1; more < a->count; more++) {
                 float bd = 1e30f; int bi = -1;
@@ -7465,8 +7564,37 @@ static void sh1x_anims_bind(Scene *sc) {
                     if (d < bd) { bd = d; bi = i; }
                 }
                 if (bi < 0) break;
-                sc->item[bi].animIdx = k;
-                sc->item[bi].animInst = nth++;
+                {
+                    int instM = sc->item[bi].posedInst >= 0 ?
+                                sc->item[bi].posedInst : nth;
+                    sc->item[bi].animIdx = k;
+                    sc->item[bi].animInst = instM;
+                    if ((int)instM >= nth) nth = instM + 1; else nth++;
+                }
+            }
+        }
+    }
+    /* v27.2: gravityScatter seeding — per-instance live pos from each
+     * bean's AUTHORED posed translation (the ripper's verbatim RNG
+     * ranges), + the scatter state rolls (map7_s02_2.c:3480-3488:
+     * ang[i] = Rng(0,4095); amp[i] = FP_FROM(Sin(Rng(0,511)|0x200) *
+     * Q12(2.2), 12) — the engine rolls at INIT with the boot RNG; the
+     * consumer's deterministic sh_rng is the documented stand-in). */
+    for (int k = 0; k < sc->sh1x.nAnims; k++) {
+        Sh1xPropAnim *a = &sc->sh1x.anims[k];
+        if (a->driver == 9 && !a->seeded) {
+            a->seeded = 1;
+            for (int i = 0; i < sc->itemCount; i++) {
+                const DrawItem *it = &sc->item[i];
+                if (it->animIdx != k) continue;
+                int q = it->animInst;
+                if (q < 0 || q > 15) continue;
+                a->liveVy[q] = (int)(-it->model.m[13] * 4096.0f);
+                a->liveVz[q] = (int)(-it->model.m[14] * 4096.0f);
+                a->scatterAng[q] = (int)(sh_rng_next() & 0xFFF);
+                a->scatterAmp[q] = (int)(((int64_t)
+                    sh_sin_q12((int)(sh_rng_next() & 0x1FF) | 0x200) *
+                    9011 /* Q12(2.2f) */) >> 12);
             }
         }
     }
@@ -7498,9 +7626,12 @@ static void sh1x_anim_pose(const Sh1x *sx, const Sh1xPropAnim *a, int inst,
     case 0:   /* spinRng / spinConst: live angle on the anim axis */
         rotDeg[a->axis] = a->cur[a->axis];
         break;
-    case 1: { /* fanArray: per-instance x spin ±90deg/s, y=180 for i>=7 */
+    case 1: { /* fanArray — map4_s02.c:140-155 VERBATIM: rot.vx = the
+               * PER-FAN raw angle D_800ED8B0[i]; rot.vy = 180 for the
+               * case-7-and-later fans (the switch's sticky y). */
         int i = inst > 0 ? inst : 0;
-        rotDeg[0] = a->cur[0];
+        if (i > 15) i = 15;
+        rotDeg[0] = (float)a->fanAng[i] * R2D;
         if (i >= a->rotY180From) rotDeg[1] = 180.0f;
         if (i < a->posPerInstN) {
             posEng[0] = a->posPerInst[i][0];
@@ -7519,10 +7650,19 @@ static void sh1x_anim_pose(const Sh1x *sx, const Sh1xPropAnim *a, int inst,
     case 8:   /* kickSwing (TOBIRA2_): vy in raw units */
         rotDeg[1] = (float)a->rawVy * R2D;
         break;
-    case 9:   /* gravityScatter: per-instance fall offsets */
-        posEng[1] += a->cur[1];
-        *posReplaceMask = 2;
+    case 9: { /* gravityScatter — per-instance live pos (raw Q12 m).
+               * Seeded at bind from each bean's authored pose; the tick
+               * updates liveVy/liveVz verbatim (map7_s02_2.c:1179-1184).
+               * x stays the authored 62.3. */
+        int i = inst > 0 ? inst : 0;
+        if (i > 15) i = 15;
+        if (i < 16) {
+            posEng[1] = (float)a->liveVy[i] / 4096.0f;
+            posEng[2] = (float)a->liveVz[i] / 4096.0f;
+        }
+        *posReplaceMask = 6;               /* y + z */
         break;
+    }
     case 12: { /* sineBob: horse y = (Q12(-1) - sin(master*4+phase))/5 */
         int master = 0;
         for (int m = 0; m < sx->nAnims; m++)
@@ -7537,17 +7677,30 @@ static void sh1x_anim_pose(const Sh1x *sx, const Sh1xPropAnim *a, int inst,
     case 13:  /* carouselSpin: hub rot.vy = master angle */
         rotDeg[1] = (float)a->mvMaster * R2D;
         break;
-    case 14: { /* ferrisWheel: arm i angle/pos from the raw master
-                 * (map6_s04_2.c:3814-3845: angle=(m>>12)+(-739+i*307),
-                 * pos=(8.7, 10cos-13.8, 10sin-28)) */
+    case 14: { /* ferrisWheel — map6_s04_2.c:3814-3845 VERBATIM:
+                 * arm angle a = (master >> 12) + (-739 + i*307) Q12_ANGLE
+                 * counts; the WHEEL models ride (a,0,0) at radius 10.0,
+                 * the CABINS (isCabin) ride (D_800EBB10[i]>>12,0,0) at
+                 * radius 11.25 around the center (8.7,-13.8,-28).
+                 * Pendulum slot for arm i: [0..3]; the 5th arm reads
+                 * D_800EBB10[4] which ALIASES D_800EBB20[0] (the arrays
+                 * are 16B apart: 0x800EDFE0/0x800EDFF0) — ported as-is. */
         int i = inst > 0 ? inst : 0;
+        if (i > 15) i = 15;
         int ang = (a->mvMaster >> 12) + (-739 + i * 307);
-        rotDeg[0] = (float)ang * R2D;
+        if (a->isCabin) {
+            /* the pendulum POSITION is Q12-shifted counts: angle = >>12 */
+            int pendPos = (i < 4) ? a->mvPend[i] : a->mvPendVel[0];
+            rotDeg[0] = (float)(pendPos >> 12) * R2D;
+        } else {
+            rotDeg[0] = (float)ang * R2D;
+        }
         {
             float rad = (float)ang * R2D * (float)M_PI / 180.0f;
+            float radius = a->isCabin ? 11.25f : 10.0f;
             posEng[0] = 8.7f;
-            posEng[1] = 10.0f * cosf(rad) - 13.8f;
-            posEng[2] = 10.0f * sinf(rad) - 28.0f;
+            posEng[1] = radius * cosf(rad) - 13.8f;
+            posEng[2] = radius * sinf(rad) - 28.0f;
         }
         *posReplaceMask = 7;
         break;
@@ -7573,48 +7726,114 @@ static void sh1x_anim_pose(const Sh1x *sx, const Sh1xPropAnim *a, int inst,
     }
 }
 
-/* Compose the live driver pose into the item transform — v27 semantics:
- * the engine builds ONE matrix per WorldObject from the FULL rot vector
- * (WorldObjects_Draw -> Math_RotMatrixZxyNeg, draw.c:577) and its pos.
- * The item's AUTHORED translation stands for rotation-only drivers (it
- * equals the engine pos: the ripper emits WorldObject poses as node
- * translations); movement drivers replace the flagged axes. The authored
- * base rotation is REPLACED (not composed): the driver owns the whole
- * rotation, exactly like the engine. */
+/* v27.2 (B-1): the ENGINE's WorldObjects rotation matrix, VERBATIM from
+ * libkmath.s Math_RotMatrixZxyNeg (lines 360-384, incl. the two helper
+ * subroutines 227-358) — register-exact port:
+ *   * inputs negated: v0=-vz, v1=-vx, a3=-vy (the 'Neg' in the name);
+ *   * Math_RotMatrix0 (v1=-vx masked, v0=-vz, a3=-vy):
+ *       idx1 = (-(vz+vy)) & 0xFFF, idx2 = (vy-vz) & 0xFFF,
+ *       S0 = table[-vx & 0xFFF];
+ *       P1 = (S(idx1) * (S0 + 4096)) >> 12   (signed, floor)
+ *       P2 = (C(idx1) * (S0 + 4096)) >> 12
+ *       P3 = (-C(idx2)) * (S0 - 4096) >> 12
+ *       P4 = (S(idx2) * (S0 - 4096)) >> 12
+ *       t0=S0, t1=(P1+P4)/2, t2=(P3+P2)/2, t3=(P3-P2)/2, t4=(P1-P4)/2
+ *       (the /2 uses the engine's trunc-toward-zero idiom
+ *        (x + (u32)x>>31) >> 1 == C integer division)
+ *   * Math_RotMatrix1 (v0=-vz, v1=-vx, a3=-vy):
+ *       t3=cos(-vz), t2=-sin(-vz)negu=sin(vz), t8=cos(-vx)=cos(vx)
+ *       t0=(cos(vy)*t8)>>12, t1=(sin(vy)*t8)>>12,
+ *       t2=(sin(vz)*t8)>>12,  t3=(cos(vz)*t8)>>12
+ *   * store map (s16 slots at $a1 offsets): m[0]=t2R0 m[1]=t4R0
+ *     m[2]=t1R1 m[3]=t2R1 m[4]=t3R1 m[5]=t0R0 m[6]=t1R0 m[7]=t3R0
+ *     m[8]=t0R1 — ROW-major M (v' = M·v, swanstation gte.cpp
+ *     MulMatVec: MAC_i = M[i][0]Vx + M[i][1]Vy + M[i][2]Vz).
+ * Algebraically (verified against pure-axis and mixed-angle probes):
+ * M == Ry(vy)·Rx(vx)·Rz(vz) — the engine composes Y·X·Z with POSITIVE
+ * angles; the v27 apply built a different composition that only matched
+ * single-axis cases (audit B-1). */
+static void sh1x_rot_matrix_zxy_neg(const int rotQ12[3], int m9[9]) {
+    const int nA = -rotQ12[0], nB = -rotQ12[1], nC = -rotQ12[2];
+    /* ---- Math_RotMatrix0 ---- */
+    const int aMask = nA & 0xFFF;
+    const int S0 = kSineTable[aMask];
+    const int idx1 = (nC + nB) & 0xFFF;
+    const int S1 = kSineTable[idx1];
+    const int C1 = kSineTable[idx1 + 0x400];
+    const int idx2 = (nC - nB) & 0xFFF;
+    const int S2 = kSineTable[idx2];
+    const int C2 = kSineTable[idx2 + 0x400];
+    const int P1 = (int)(((int64_t)S1 * (S0 + 4096)) >> 12);
+    const int P2 = (int)(((int64_t)C1 * (S0 + 4096)) >> 12);
+    const int P3 = (int)(((int64_t)-C2 * (S0 - 4096)) >> 12);
+    const int P4 = (int)(((int64_t)S2 * (S0 - 4096)) >> 12);
+    const int r0_t0 = S0;
+    const int r0_t1 = (P1 + P4) / 2;   /* C trunc division = engine idiom */
+    const int r0_t2 = (P3 + P2) / 2;
+    const int r0_t3 = (P3 - P2) / 2;
+    const int r0_t4 = (P1 - P4) / 2;
+    /* ---- Math_RotMatrix1 ---- */
+    const int cA = kSineTable[aMask + 0x400];        /* cos(vx)   */
+    const int cC = kSineTable[(nC & 0xFFF) + 0x400]; /* cos(vz)   */
+    const int sC = kSineTable[nC & 0xFFF];           /* sin(-vz)  */
+    const int cB = kSineTable[(nB & 0xFFF) + 0x400]; /* cos(vy)   */
+    const int sB = kSineTable[nB & 0xFFF];           /* sin(-vy)  */
+    const int r1_t0 = (int)(((int64_t)cB * cA) >> 12);
+    const int r1_t1 = (int)(((int64_t)(-sB) * cA) >> 12);
+    const int r1_t2 = (int)(((int64_t)(-sC) * cA) >> 12);
+    const int r1_t3 = (int)(((int64_t)cC * cA) >> 12);
+    /* ---- store map ---- */
+    m9[0] = r0_t2; m9[1] = r0_t4; m9[2] = r1_t1;
+    m9[3] = r1_t2; m9[4] = r1_t3; m9[5] = r0_t0;
+    m9[6] = r0_t1; m9[7] = r0_t3; m9[8] = r1_t0;
+}
+
+/* Compose the live driver pose into the item transform — v27.2:
+ * the rotation is built through the VERBATIM engine matrix builder
+ * (above), then conjugated by the glTF axis flip S=diag(1,-1,-1)
+ * (M_gl = S·M_eng·S — exactly what the ripper's static path bakes:
+ * wp = R_eng·v + t, then gp = (x,-y,-z)); stored column-major.
+ * The engine's WorldObjects_Add Q10 grid on rot x/z (>>2) and Q8 grid
+ * on the translation (>>4, world/draw.c:503-504,572-574) are applied —
+ * the live pose goes through the SAME quantizer on hardware. The
+ * authored base rotation is REPLACED (the driver owns the whole
+ * rotation, exactly like the engine). */
 static void sh1x_anim_apply(Scene *sc, DrawItem *it, const Sh1xPropAnim *a) {
     if (!it || !a) return;
     float rotDeg[3], posEng[3];
     unsigned mask = 0;
     sh1x_anim_pose(&sc->sh1x, a, it->animInst, rotDeg, posEng, &mask);
-    const float rx = rotDeg[0] * (float)M_PI / 180.0f;
-    const float ry = rotDeg[1] * (float)M_PI / 180.0f;
-    const float rz = rotDeg[2] * (float)M_PI / 180.0f;
-    /* ENGINE ORDER — WorldObjects_Draw -> Math_RotMatrixZxyNeg
-     * (draw.c:577; libkmath.s:360-384, asm-sim verified vs g_SineTable):
-     * Ry(rx')*Rx(ry')*Rz(rz') with all three angles NEGATED. Column-major. */
-    const float nrx = -rx, nry = -ry, nrz = -rz;
-    const float ncy = cosf(nry), nsy = sinf(nry);
-    const float ncz = cosf(nrz), nsz = sinf(nrz);
-    const float ncx = cosf(nrx), nsx_ = sinf(nrx);
-    mat4 R;
-    memset(&R, 0, sizeof(R));
-    R.m[0]  = ncy * ncz;
-    R.m[1]  = nsx_ * nsy * ncz + ncx * nsz;
-    R.m[2]  = -ncx * nsy * ncz + nsx_ * nsz;
-    R.m[4]  = -ncy * nsz;
-    R.m[5]  = -nsx_ * nsy * nsz + ncx * ncz;
-    R.m[6]  = ncx * nsy * nsz + nsx_ * ncz;
-    R.m[8]  = nsy;
-    R.m[9]  = -nsx_ * ncy;
-    R.m[10] = ncx * ncy;
-    R.m[15] = 1.0f;
-    /* translation: the authored base (glTF) with flagged axes replaced */
+    /* the engine rot vector in raw Q12_ANGLE — deg->raw with round-trip
+     * exactness (the ripper emits grid-quantized degrees) */
+    int rotQ12[3];
+    for (int k = 0; k < 3; k++)
+        rotQ12[k] = (int)floorf(rotDeg[k] * (4096.0f / 360.0f) + 0.5f);
+    /* WorldObjects_Add: rot x/z stored Q12_TO_Q10 (>>2) then drawn
+     * Q10_TO_Q12 (<<2) — the engine's own 0.3515625deg grid (floor). */
+    rotQ12[0] = (rotQ12[0] >> 2) * 4;
+    rotQ12[2] = (rotQ12[2] >> 2) * 4;
+    int m9[9];
+    sh1x_rot_matrix_zxy_neg(rotQ12, m9);
+    /* M_gl = S·M_eng·S, column-major storage: entry (r,c) negated iff
+     * exactly one of r,c in {1,2} (s = (1,-1,-1)). */
+    mat4 M;
+    memset(&M, 0, sizeof(M));
+    for (int c = 0; c < 3; c++)
+        for (int r = 0; r < 3; r++) {
+            float sgn = ((r == 1 || r == 2) ^ (c == 1 || c == 2)) ? -1.0f : 1.0f;
+            M.m[c * 4 + r] = sgn * (float)m9[r * 3 + c] / 4096.0f;
+        }
+    M.m[15] = 1.0f;
+    /* translation: the authored base (glTF) with flagged axes replaced,
+     * through the engine's Q8 grid (>>4 floor) on the LIVE values */
     float tx = it->model.m[12], ty = it->model.m[13], tz = it->model.m[14];
-    if (mask & 1u) tx = posEng[0];
-    if (mask & 2u) ty = -posEng[1];            /* glTF y = -engine y */
-    if (mask & 4u) tz = -posEng[2];            /* glTF z = -engine z */
-    mat4 M = R;
-    M.m[12] = tx; M.m[13] = ty; M.m[14] = tz; M.m[15] = 1.0f;
+    if (mask & 1u) tx = (float)((int)floorf(posEng[0] * 4096.0f) >> 4) * 16.0f
+                       / 65536.0f;
+    if (mask & 2u) ty = -(float)((int)floorf(posEng[1] * 4096.0f) >> 4) * 16.0f
+                        / 65536.0f;       /* glTF y = -engine y */
+    if (mask & 4u) tz = -(float)((int)floorf(posEng[2] * 4096.0f) >> 4) * 16.0f
+                        / 65536.0f;       /* glTF z = -engine z */
+    M.m[12] = tx; M.m[13] = ty; M.m[14] = tz;
     it->model = M;
 }
 
@@ -7653,9 +7872,13 @@ static void sh1x_anims_draw_apply(Scene *sc) {
  *   * the discrete per-frame drivers (doorRattle, kickSwing) step once
  *     per 1/30s of elapsed time exactly like the 30Hz game frames.
  * Gates: chunkGate (the engine's PLAYER_IN_MAP_CHUNK — for a single-room
- * consumer the viewed room's cell) and eventGate (engine-fresh: CLEAR;
- * --anims-demo treats them as SET). Cutscene/gated drivers idle at their
- * authored rot0 pose (engine-true). */
+ * consumer the viewed room's cell) and eventGate WITH the engine's own
+ * per-site polarity (v27.2, audit D1: map0_s00_2.c:1259 !Get(24) and
+ * map1_s01.c:1233 !Get(76) are DRIVE-WHILE-CLEAR — the wheelchair wheel
+ * and the reception rattle are LIVE at engine-fresh; 129/168/320/324/452/
+ * 453 stay drive-when-SET). Cutscene/gated drivers idle at their
+ * authored rot0 pose (engine-true). --anims-demo forces every gate open
+ * (the cutscene state) exactly like the v27 behavior. */
 static int anim_gate_on(const Sh1x *sx, const Sh1xPropAnim *a) {
     if (a->hasChunkGate) {
         int okx = (sx->chunkX == a->chunkGate[0]) ||
@@ -7664,7 +7887,18 @@ static int anim_gate_on(const Sh1x *sx, const Sh1xPropAnim *a) {
                   (a->chunkGateAlt[1] != 0 && sx->chunkZ == a->chunkGateAlt[1]);
         if (!(okx && okz)) return 0;
     }
-    if (a->eventGate && !g_animsDemo) return 0;
+    if (g_animsDemo) return 1;          /* demo: every event gate is open  */
+    if (a->eventGate) {
+        /* engine-fresh: all savegame flags CLEAR. */
+        if (a->eventGatePol == 1) return 1;         /* clear: live at fresh */
+        if (a->eventGatePol == 2) {
+            if (!a->eventGateAlt) return 1;
+            /* clear-or: live while EITHER flag is clear (map1_s03
+             * !Get(101)||!Get(102)) — engine-fresh: BOTH clear -> live */
+            return 1;
+        }
+        return 0;                      /* set: gated off until the event   */
+    }
     return 1;
 }
 
@@ -7673,26 +7907,55 @@ static void sh1x_anims_tick(Sh1x *sx, double dt) {
     for (int i = 0; i < sx->nAnims; i++) {
         Sh1xPropAnim *a = &sx->anims[i];
         a->gated = !anim_gate_on(sx, a);
-        if (a->gated) continue;        /* engine: the update loop is gated */
+        if (a->gated) {
+            if (a->driver == 11)
+                g_sh1xLightFlicker = 1.0f;  /* fresh: Q12(1.0) identity */
+            continue;        /* engine: the update loop is gated */
+        }
         if (a->sharedLeader >= 0) continue;  /* follower: leader's state */
         switch (a->driver) {
-        case 0: {  /* spinRng / spinConst — vz or axis += dt*(base-(r&mask)) */
-            float base = (a->rngBase != 0.0f || a->rngMask) ? a->rngBase : a->rate;
-            float d = base;
-            if (a->rngMask)
-                d -= (float)(sh_rng_next() & a->rngMask) * (360.0f / 4096.0f);
+        case 0: {  /* spinRng / spinConst — map0_s00_2.c:1263-1264:
+                    * vz += Q12_MULT_PRECISE(dt, Q12_ANGLE(rngBase) -
+                    * (Rng_Rand16() & mask)); spinConst (map1_s05.c:398-402)
+                    * carries ONLY rate — v27.2 (B-2): no parse-default
+                    * RNG poisoning for rate-only entries. */
+            float d;
+            if (a->hasRng) {
+                d = a->rngBase;
+                if (a->rngMask)
+                    d -= (float)(sh_rng_next() & a->rngMask)
+                         * (360.0f / 4096.0f);
+            } else {
+                d = a->rate;
+            }
             a->cur[a->axis] += (float)dt * d;
             break;
         }
-        case 1:   /* fanArray master: rot.vx ±= dt*Q12_ANGLE(90) raw/s */
-            a->mvMaster += (int)(((long long)dtRaw * 1024) >> 12);
-            a->cur[0] = (float)a->mvMaster * (360.0f / 4096.0f);
+        case 1: {  /* fanArray — map4_s02.c:131,140-149 VERBATIM: per-fan
+                    * raw angle D_800ED8B0[i]; tmp0 = Q12_MULT_PRECISE(
+                    * dt, Q12_ANGLE(90)); i < 7 -= tmp0, i >= 7 += tmp0
+                    * (v27.2 (B-9): the ±split was missing; one shared
+                    * master made all 16 fans spin the same way). */
+            int tmp0 = (int)(((int64_t)dtRaw * 1024) >> 12);
+            for (int q = 0; q < a->count && q < 16; q++)
+                a->fanAng[q] += (q < a->fanSplit) ? -tmp0 : tmp0;
             break;
-        case 3: { /* translate — map5_s03_2.c:664-693: vz += dt*0.14,
-                   * clamp 60.35 (state 5) / 60.44 (state 6) */
-            float z = a->cur[2] + (float)dt * 0.14f;
-            if (z > 60.35f) z = 60.35f;
-            a->cur[2] = z;
+        }
+        case 3: {  /* translate/MOVACHES — map5_s03_2.c:712 placement
+                    * (104.2225, -0.1683, 60.0667) static at engine-fresh
+                    * (the shelf WorldObjects_Add carries the PLACEMENT
+                    * pose; only the cutscene cases move it — D_800D6F8C
+                    * = 0x3C720 target). v27.2 (B-4): cur[2] starts at the
+                    * authored pos (was 0 — a ~60m teleport on tick 1),
+                    * the crawl is cutscene/demo-only, clamp 0x3C720
+                    * raw = 60.3203m (the v27 60.35/60.44 were the decomp
+                    * TODO comment's wrong guesses). */
+            if (g_animsDemo) {
+                float z = a->cur[2] + (float)dt * 0.14f;
+                float clampM = (float)0x3C720 / 4096.0f;
+                if (z > clampM) z = clampM;
+                a->cur[2] = z;
+            }
             break;
         }
         case 4: {  /* doorRattle — map1_s01.c:1229-1290 VERBATIM in raw
@@ -7743,7 +8006,10 @@ static void sh1x_anims_tick(Sh1x *sx, double dt) {
         }
         case 8: {  /* kickSwing — map1_s03.c:1956-1999 VERBATIM in raw
                     * units, one discrete step per 30Hz frame (the kick
-                    * velocity is added PER FRAME, no dt multiply). */
+                    * velocity is added PER FRAME, no dt multiply).
+                    * v27.2 (B-7): when the halving bounce ends (vel==0)
+                    * the door rests at the flag-106 settle pose
+                    * Q12_ANGLE(-157.4f) = -1790 raw (map1_s03.c:1994). */
             if (a->kickPhase == 0) {
                 if (g_animsDemo) {       /* the cutscene state-6 kick fires */
                     a->rawVel = a->rawKickVel;
@@ -7766,49 +8032,77 @@ static void sh1x_anims_tick(Sh1x *sx, double dt) {
                     a->rawVel = t;
                     if (t == 1 || t == -1) a->rawVel = 0;
                 }
+                if (a->rawVel == 0 && a->kickPhase == 1) {
+                    a->rawVy = a->rawSettle;    /* rest: Q12_ANGLE(-157.4) */
+                    a->kickPhase = 2;
+                }
             }
             break;
         }
-        case 9: {  /* gravityScatter — map7_s02_2.c:1170-1189: shared fall
-                    * velocity += g_GravitySpeed(10419)/tick, clamp 20480
-                    * (Q12(5.0)); the y fall accumulates; floor y=0. */
+        case 9: {  /* gravityScatter — map7_s02_2.c:1167-1188 VERBATIM:
+                    * one discrete step per 30Hz frame; the fall velocity
+                    * D_800E9ED0 += g_GravitySpeed (= Q12_MULT(vCount,
+                    * 10419) = 1336 raw at the 30Hz tick, vCount 526 —
+                    * game_main.c:295; v27.2 (B-5): was 10419 = 7.8x),
+                    * clamped Q12(5.0)=20480; PER-INSTANCE scatter
+                    * (map7_s02_2.c:1179-1180): vy += Q12_MULT_PRECISE(dt,
+                    * vel + FP_FROM(amp[i]*sin(ang[i]),12)); vz +=
+                    * Q12_MULT_PRECISE(dt, FP_FROM(amp[i]*cos(ang[i]),12));
+                    * floor: vy > 0 -> vy = 0 per bean. */
+            if (a->kickPhase == 0) {
+                if (g_animsDemo)          /* the bag cutscene case 13 fires */
+                    a->kickPhase = 1;
+                else break;
+            }
             a->mvTimer += (float)(dt * 30.0);
             int steps = 0;
             while (a->mvTimer >= 1.0f && steps < 8) {
                 a->mvTimer -= 1.0f; steps++;
-                a->mvVel += 10419;
+                a->mvVel += (int)(((int64_t)526 * 10419) >> 12);
                 if (a->mvVel > 20480) a->mvVel = 20480;
-                a->cur[1] += (float)((int)(((long long)dtRaw * a->mvVel)
-                                           >> 12)) / 4096.0f;
-                if (a->cur[1] > 0.0f) a->cur[1] = 0.0f;   /* floor y=0 */
+                for (int q = 0; q < a->count && q < 16; q++) {
+                    int rateY = a->mvVel +
+                        (int)(((int64_t)a->scatterAmp[q] *
+                               sh_sin_q12(a->scatterAng[q])) >> 12);
+                    int rateZ =
+                        (int)(((int64_t)a->scatterAmp[q] *
+                               sh_cos_q12(a->scatterAng[q])) >> 12);
+                    a->liveVy[q] += (int)(((int64_t)dtRaw * rateY) >> 12);
+                    a->liveVz[q] += (int)(((int64_t)dtRaw * rateZ) >> 12);
+                    if (a->liveVy[q] > 0) a->liveVy[q] = 0; /* floor 0 */
+                }
             }
             break;
         }
-        case 11: { /* lightFlicker — map1_s05.c:371-396 VERBATIM (raw Q12).
-                    * t0 ramp: t0*per >= Q12(64)=262144 -> reroll per
-                    * [32,95] + amp [32,63] (the v27 rerollA fix);
-                    * envelope = amp*sin(t1); phase = (t1*per1)>>6
-                    * wraps at Q12(1.0); intensity = Q12(1.35) +
-                    * ((Q12(0.9) + 0.6*env) * sin(phase)) >> 15. */
+        case 11: { /* lightFlicker — map1_s05.c:371-396 VERBATIM (raw Q12):
+                    * t0 ramp: t0*per0 >= Q12(SQUARE(8))=262144 -> reroll
+                    * per0 = Rng(32,95), amp = Rng(32,63); envelope sp0 =
+                    * Q12_MULT(amp, Sin(t1)); t1 advances; sp1 = (t1*per1)>>6
+                    * wraps at Q12(1.0) with per1 reroll (Rng(32,95));
+                    * intensity = Q12(1.35)=5529 + (((Q12(0.9)=3686 +
+                    * Q12_MULT_PRECISE(sp0, Q12(0.6)=2457)) * Sin(sp1)) >> 15)
+                    * (v27.2 (B-3): periods init 64/64 (0x40) — the v27
+                    * zero-init never flickered — and the constants were
+                    * 5534/2458). */
             a->flT0 += dtRaw;
             if (a->flT0 * a->flPer0 >= a->flRampThresh) {
                 a->flT0 = 0;
                 a->flPer0 = 32 + (int)(sh_rng_next() % 64);  /* Rng(32,95) */
                 a->flAmp  = 32 + (int)(sh_rng_next() % 32);  /* Rng(32,63) */
             }
-            int sp0 = (int)(((long long)a->flAmp *
+            int sp0 = (int)(((int64_t)a->flAmp *
                              sh_sin_q12(a->flT1)) >> 12);
             a->flT1 += dtRaw;
-            int sp1 = (int)(((long long)a->flT1 * a->flPer1) >> 6);
+            int sp1 = (int)(((int64_t)a->flT1 * a->flPer1) >> 6);
             if (sp1 >= 4096) {
                 a->flT1 = 0;
                 a->flPer1 = 32 + (int)(sh_rng_next() % 64);
                 sp1 &= 0xFFF;
             }
-            int inten = 5534 /* Q12(1.35f) */
+            int inten = 5529 /* Q12(1.35f) */
                       + (int)((long long)(
                           (3686 +
-                           (int)(((long long)sp0 * 2458) >> 12)) *
+                           (int)(((long long)sp0 * 2457) >> 12)) *
                           sh_sin_q12(sp1)) >> 15);
             g_sh1xLightFlicker = (float)inten / 4096.0f;
             break;
@@ -7846,12 +8140,29 @@ static void sh1x_anims_tick(Sh1x *sx, double dt) {
                         a->mvPendVel[q]--;
                 } else if (a->mvPend[q] > 0) {
                     a->mvPendVel[q] +=
-                        (int)(((long long)dtRaw * -279620) >> 12);
+                        (int)(((int64_t)dtRaw * -279620) >> 12);
                     if (a->mvPendVel[q] < -139810) a->mvPendVel[q] = -139810;
                     a->mvPend[q] +=
-                        (int)(((long long)dtRaw * a->mvPendVel[q]) >> 12);
+                        (int)(((int64_t)dtRaw * a->mvPendVel[q]) >> 12);
                     if (a->mvPend[q] < 0) {
                         if (a->mvPendVel[q] > -93206) {
+                            a->mvPendVel[q] = 0; a->mvPend[q] = 0;
+                        } else {
+                            a->mvPendVel[q] >>= 1;
+                        }
+                    }
+                } else {  /* v27.2 (B-6): the ENGINE's THIRD branch
+                            * (map6_s04_2.c:3793-3811) — the RETURN swing
+                            * (position <= 0): +68.2667 accel, CLAMP_HIGH
+                            * +34.1334, settle at +22.7554, else halve.
+                            * v27 shipped only 2 of the 3 branches. */
+                    a->mvPendVel[q] +=
+                        (int)(((int64_t)dtRaw * 279620) >> 12);
+                    if (a->mvPendVel[q] > 139810) a->mvPendVel[q] = 139810;
+                    a->mvPend[q] +=
+                        (int)(((int64_t)dtRaw * a->mvPendVel[q]) >> 12);
+                    if (a->mvPend[q] > 0) {
+                        if (a->mvPendVel[q] < 93206) {
                             a->mvPendVel[q] = 0; a->mvPend[q] = 0;
                         } else {
                             a->mvPendVel[q] >>= 1;
@@ -8438,14 +8749,32 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
      * CALLOC'd so the compiler can prove initialization — any vertex an
      * item did not cover reads z=0 and is near-culled, no semantic change) */
     int nItems = sc->itemCount;
-    sh1x_anims_draw_apply(sc);   /* v26.3: live driver rotations -> items */
+    /* v27.2 (B-12): the anim tick + apply are the SANCTIONED mutation of
+     * the heap-owned scene (the Renderer treats it const for render
+     * purity; the driver state lives in sc->sh1x/items) — one documented
+     * cast, replacing the scattered const-discards. */
+    sh1x_anims_draw_apply((Scene *)sc);   /* v26.3: live driver rotations -> items */
     if (getenv("SH1X_ANIM_DEBUG")) {
         static int dbgN = 0;
         if (dbgN++ < 400) {
-            for (int i = 0; i < sc->sh1x.nAnims; i++)
-                fprintf(stderr, "[animstate] t? cur=(%.2f,%.2f,%.2f) %s\n",
-                        sc->sh1x.anims[i].cur[0], sc->sh1x.anims[i].cur[1],
-                        sc->sh1x.anims[i].cur[2], sc->sh1x.anims[i].object);
+            for (int i = 0; i < sc->sh1x.nAnims; i++) {
+                const Sh1xPropAnim *da = &sc->sh1x.anims[i];
+                fprintf(stderr, "[animstate] t? cur=(%.2f,%.2f,%.2f) %s",
+                        da->cur[0], da->cur[1], da->cur[2], da->object);
+                if (da->driver == 1)   /* fanArray per-fan split state */
+                    fprintf(stderr, " fanAng[0]=%d fanAng[6]=%d "
+                            "fanAng[7]=%d fanAng[15]=%d (raw)",
+                            da->fanAng[0], da->fanAng[6],
+                            da->fanAng[7], da->fanAng[15]);
+                if (da->driver == 14)  /* ferris pendulum state */
+                    fprintf(stderr, " master=%d pend=(%d,%d,%d,%d) "
+                            "vel=(%d,%d,%d,%d)",
+                            da->mvMaster, da->mvPend[0], da->mvPend[1],
+                            da->mvPend[2], da->mvPend[3],
+                            da->mvPendVel[0], da->mvPendVel[1],
+                            da->mvPendVel[2], da->mvPendVel[3]);
+                fprintf(stderr, "\n");
+            }
         }
         static int once = 0;
         if (!once) { once = 1;
@@ -8966,6 +9295,18 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
          * converter's buffer-ordered emission, so mask + keep order)   */
         for (int i = 0; i < nItems; i++) {
             const DrawItem *it = &sc->item[i];
+            /* v27.2: cutsceneOnly posed nodes (map7_s02 beans) are NOT
+             * drawn at engine-fresh — the engine adds them ONLY inside
+             * the bag cutscene (WorldObjects_Add lives in case 14 of
+             * the state machine; floorHitCount==16 ends it). Visible
+             * only while the driver is UNGATED and the drop has fired. */
+            if (it->cutsceneOnly) {
+                const Sh1xPropAnim *ca =
+                    (it->animIdx >= 0 && it->animIdx < sc->sh1x.nAnims)
+                        ? &sc->sh1x.anims[it->animIdx] : NULL;
+                int dropLive = ca && !ca->gated && ca->kickPhase >= 1;
+                if (!dropLive) { sh1xItemMask[i] = 0; continue; }
+            }
             /* v24.1 FIX (audit #4): billboard anchor meshes ('BILLBOARDS_g{g}_{j}',
              * extras {ot_base:0, billboard:true}, NO SH1X buffer tag) inherit
              * the PARENT buffer's verdict — engine draws a buffer's anchors
@@ -10037,7 +10378,7 @@ static void live_render(LiveApp *A) {
         snow_sync_live(&A->snow, A->play.t, cp.pos, cp.forward,
                        A->track, A->ovr.useFixed ? &A->ovr : NULL);
     sh_env_sync_live(&A->env, A->play.t, cp.pos, cp.q, 0);
-    sh1x_anims_sync(&A->R.sc->sh1x, A->play.t);
+    sh1x_anims_sync((Sh1x *)&A->R.sc->sh1x, A->play.t);
     render_frame(&A->fb, &A->R, &cp);
 }
 
@@ -11411,8 +11752,19 @@ static int run_window_x11(LiveApp *A) {
 /* ------------------------------------------------------------------ */
 /* realtime dispatcher + headless benchmark                            */
 /* ------------------------------------------------------------------ */
+#if defined(__ANDROID__)
+static int run_window_android(LiveApp *A);   /* defined below (v7.1) */
+#endif
 static int run_realtime(LiveApp *A, int winW, int winH) {
-#if defined(_WIN32)
+#if defined(__ANDROID__)
+    /* v7.1 (audit W-D1 CRITICAL): the v7 sync re-applied the Android
+     * backend hunk but LOST this dispatch (present in v6 @5f092e9) — the
+     * backend was dead code, the engine fell through sdl/x11 (both
+     * unavailable on Android), printed to stderr and exited after one
+     * headless shot: the shipped v1.7.32 APK rendered a BLACK wallpaper.
+     * Restored: ANativeWindow is the ONLY window system on Android. */
+    return run_window_android(A);
+#elif defined(_WIN32)
     return run_window_win32(A, winW, winH);
 #else
     if (run_window_sdl(A, winW, winH)) return 1;
@@ -12543,7 +12895,7 @@ int main(int argc, char **argv) {
                     snow_sync_live(&Ss, P.t, cp.pos, cp.forward, track, NULL);
             }
             sh_env_sync_live(&Es, P.t, cp.pos, cp.q, 0);
-            sh1x_anims_sync(&R.sc->sh1x, P.t);   /* v26.3: driver tick      */
+            sh1x_anims_sync((Sh1x *)&R.sc->sh1x, P.t);   /* v26.3: driver tick      */
             tSim += tickDt;
             haveCp = 1;
         }
@@ -12554,7 +12906,7 @@ int main(int argc, char **argv) {
         }
         if (Vr.active || Vr.returning) cp = r2view_pose(&Vr, &cp);
         sh_env_sync_live(&Es, P.t, cp.pos, cp.q, 0);
-        sh1x_anims_sync(&R.sc->sh1x, P.t);       /* v26.3: driver tick      */
+        sh1x_anims_sync((Sh1x *)&R.sc->sh1x, P.t);       /* v26.3: driver tick      */
         Frame fb2; frame_alloc(&fb2, w, h);
         render_frame(&fb2, &R, &cp);
         /* THE RESTRICTION PROOF (all values from the verbatim pipeline) */
@@ -12677,7 +13029,7 @@ int main(int argc, char **argv) {
                     snow_sync_live(&Ss, P.t, cp.pos, cp.forward, track, NULL);
             }
             sh_env_sync_live(&Es, P.t, cp.pos, cp.q, 0);
-            sh1x_anims_sync(&R.sc->sh1x, P.t);   /* v26.3: driver tick      */
+            sh1x_anims_sync((Sh1x *)&R.sc->sh1x, P.t);   /* v26.3: driver tick      */
             tSim += tickDt;
             haveCp = 1;
         }
@@ -12691,7 +13043,7 @@ int main(int argc, char **argv) {
          * also covers the phase wrap/edge cases where the pose should be
          * re-read from the current phase rather than the stepped one      */
         sh_env_sync_live(&Es, P.t, cp.pos, cp.q, 0);
-        sh1x_anims_sync(&R.sc->sh1x, P.t);       /* v26.3: driver tick      */
+        sh1x_anims_sync((Sh1x *)&R.sc->sh1x, P.t);       /* v26.3: driver tick      */
         render_frame(&fb, &R, &cp);
         char out[1024];
         snprintf(out, sizeof(out), "%s/%s", outdir, shots[i].file);
@@ -12705,6 +13057,15 @@ int main(int argc, char **argv) {
     if (fpDump) fclose(fpDump);
     if (snowDump) fclose(snowDump);
     if (g_lightDump) { fclose(g_lightDump); g_lightDump = NULL; }
+    /* v27.2 (ASAN exit-teardown): the deterministic-shot path returns
+     * without the realtime window — free the shot frame + the live-app
+     * frame buffers it owns (A.fb/A.argb were allocated for the app
+     * session; previously only freed implicitly at process exit). */
+    free(fb.rgb); free(fb.z);
+    free(A.argb);
+    free(A.fb.rgb); free(A.fb.z);
+    free(A.snow.gh);        /* v27.2: the snow ground heightmap      */
+    A.snow.gh = NULL;
     scene_free(&sc);
     camdat_free(&cd);
     return 0;
@@ -12725,10 +13086,8 @@ int main(int argc, char **argv) {
 #include <android/log.h>
 #include <pthread.h>
 
-#define ALOGI(...) __android_log_print(ANDROID_LOG_INFO,  "sh1poc", __VA_ARGS__)
-#define ALOGE(...) __android_log_print(ANDROID_LOG_ERROR, "sh1poc", __VA_ARGS__)
-/* route the engine's stdout chatter (main(), live_save_final, ...) to logcat */
-#define printf(...) ALOGI(__VA_ARGS__)
+/* ALOGI/ALOGE + the printf redirect are declared at the TOP of the file
+ * (v7.1 audit W-D9) so main() and every function routes to logcat. */
 
 static ANativeWindow *g_and_win = NULL;
 static pthread_mutex_t g_and_lock = PTHREAD_MUTEX_INITIALIZER;

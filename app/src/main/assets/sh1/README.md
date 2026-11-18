@@ -21,10 +21,18 @@ a new scene:
 2. Add an authored camdat (CamTrack Editor v13+, `tools/camtrack.html`
    in the PoC repo) as `sh1/<room>_camdat.json`.
 
-3. Point the default scene at it: edit the three argv strings in
-   `app/src/main/cpp/sh1_jni.c` (`HP0003.glb` / `camdat.json`).
+3. **Add every new file to the Java `ASSETS` list** in
+   `app/src/main/java/com/sh1/poc/Sh1WallpaperService.java` — the
+   service only copies files named there from the APK's assets/sh1 to
+   filesDir; a file missing from the list ships in the APK but never
+   reaches the engine (v7.1 audit W-D2: the THRF9FC/FE neighbors sat in
+   the APK unused, so mapLink could never work on device).
 
-4. Commit & push. CI bumps the version minor digit (1.7.30 -> 1.7.31),
+4. Point the default scene at it: edit the two argv path strings in
+   `app/src/main/cpp/sh1_jni.c` (argv[2] `sh1/HP0003.glb` and argv[4]
+   `sh1/camdat.json` — the `--camdat` flag itself stays).
+
+5. Commit & push. CI bumps the version by one level (1.7.30 -> 1.7.31),
    builds and publishes the APK release automatically.
 
 Current contents:

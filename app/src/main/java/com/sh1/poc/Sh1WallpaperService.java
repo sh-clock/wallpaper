@@ -45,7 +45,15 @@ public class Sh1WallpaperService extends WallpaperService {
     }
 
     private static final String[] ASSETS = {
-            "HP0003.glb", "HP0003.IPD", "camdat.json", "THRF9FD.glb"
+            /* v7.1 (audit W-D2): EVERY asset of assets/sh1 — the v7 list
+             * copied only 4 files, so the THRF9FC/FE mapLink neighbors
+             * (3.1 MB) never reached filesDir and mapLink could never
+             * work on device; the SU0203 fan room + authored camdat were
+             * dead weight in the APK. New scenes: add the file here AND
+             * to assets/sh1/ (see sh1/README.md step 2). */
+            "HP0003.glb", "HP0003.IPD", "camdat.json",
+            "THRF9FD.glb", "THRF9FD.IPD", "THRF9FD_camdat.json",
+            "THRF9FC.glb", "THRF9FE.glb", "SU0203.glb", "README.md"
     };
 
     private static volatile boolean sAssetsReady = false;
