@@ -21,19 +21,28 @@ a new scene:
 2. Add an authored camdat (CamTrack Editor v13+, `tools/camtrack.html`
    in the PoC repo) as `sh1/<room>_camdat.json`.
 
-3. **Add every new file to the Java `ASSETS` list** in
-   `app/src/main/java/com/sh1/poc/Sh1WallpaperService.java` — the
-   service only copies files named there from the APK's assets/sh1 to
-   filesDir; a file missing from the list ships in the APK but never
-   reaches the engine (v7.1 audit W-D2: the THRF9FC/FE neighbors sat in
-   the APK unused, so mapLink could never work on device).
+3. **Add the scene to the manifest** — one entry in
+   `app/src/main/assets/sh1/scenes.json`:
 
-4. Point the default scene at it: edit the two argv path strings in
-   `app/src/main/cpp/sh1_jni.c` (argv[2] `sh1/HP0003.glb` and argv[4]
-   `sh1/camdat.json` — the `--camdat` flag itself stays).
+   ```
+   {"glb": "SU0203.glb", "camdat": "SU0203_fan_camdat.json"}
+   ```
 
-5. Commit & push. CI bumps the version by one level (1.7.30 -> 1.7.31),
+   The Java side copies EVERY file under assets/sh1/ into filesDir
+   dynamically (no hardcoded ASSETS list since v8 — the v7.1 list
+   required a Java code change per scene and app updates had to be kept
+   in sync by hand), and the native side (`sh1_jni.c`) reads
+   scenes.json at every wallpaper-process start, rotating through the
+   entries via the persisted index in filesDir/sh1/scene.idx. A missing
+   manifest, a broken entry, or a missing GLB falls back to the HP0003
+   defaults (graceful — the wallpaper never errors out).
+
+4. Commit & push. CI bumps the version by one level (1.7.30 -> 1.7.31),
    builds and publishes the APK release automatically.
+
+The current rotation: HP0003 (hospital reception) -> THRF9FD
+(streets west, the mapLink demo) -> SU0203 (the nightmare-school fan
+room — the FAN_HIDE propAnims spinRng driver runs live).
 
 Current contents:
 - `HP0003.glb` + `HP0003.IPD` — hospital reception (interior; the

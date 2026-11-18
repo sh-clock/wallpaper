@@ -44,33 +44,40 @@ public class Sh1WallpaperService extends WallpaperService {
         return new Sh1Engine();
     }
 
-    private static final String[] ASSETS = {
-            /* v7.1 (audit W-D2): EVERY asset of assets/sh1 — the v7 list
-             * copied only 4 files, so the THRF9FC/FE mapLink neighbors
-             * (3.1 MB) never reached filesDir and mapLink could never
-             * work on device; the SU0203 fan room + authored camdat were
-             * dead weight in the APK. New scenes: add the file here AND
-             * to assets/sh1/ (see sh1/README.md step 2). */
-            "HP0003.glb", "HP0003.IPD", "camdat.json",
-            "THRF9FD.glb", "THRF9FD.IPD", "THRF9FD_camdat.json",
-            "THRF9FC.glb", "THRF9FE.glb", "SU0203.glb", "README.md"
-    };
+    /* v8 (aim 7): the scene list is DYNAMIC — every file under assets/sh1/
+     * is enumerated and copied at first use. Inserting a new scene = drop
+     * the GLB + authored camdat into assets/sh1/ + one entry in scenes.json
+     * (the native side rotates through the manifest, persisted index in
+     * filesDir/sh1/scene.idx). No Java edit needed, ever. (The v7.1 list
+     * was hardcoded 10 names; new assets required a Java code change and
+     * app updates needed the list kept in sync by hand.) */
+    private static String[] assetList(Sh1WallpaperService svc) {
+        try {
+            String[] names = svc.getAssets().list("sh1");
+            if (names != null && names.length > 0) return names;
+        } catch (IOException e) {
+            throw new RuntimeException("asset listing failed", e);
+        }
+        return new String[0];
+    }
 
     private static volatile boolean sAssetsReady = false;
     private static final AtomicInteger sGen = new AtomicInteger(0);
     private static volatile boolean sEngineStarted = false;
 
-    /** copy the bundled SH1 data files into app-private storage (one time) */
+    /** copy the bundled SH1 data files into app-private storage.
+     *  Re-runs whenever any file of assets/sh1 is missing in filesDir
+     *  (an app update adding assets re-copies just the new files). */
     private static void copyAssetsIfNeeded(Sh1WallpaperService svc) {
-        if (sAssetsReady) return;
         synchronized (Sh1WallpaperService.class) {
             if (sAssetsReady) return;
             File dst = new File(svc.getFilesDir(), "sh1");
+            String[] names = assetList(svc);
             boolean missing = false;
-            for (String f : ASSETS) if (!new File(dst, f).exists()) { missing = true; break; }
-            if (!missing) { sAssetsReady = true; return; }
+            for (String f : names) if (!new File(dst, f).exists()) { missing = true; break; }
+            if (!missing && names.length > 0) { sAssetsReady = true; return; }
             dst.mkdirs();
-            for (String f : ASSETS) {
+            for (String f : names) {
                 File out = new File(dst, f);
                 if (out.exists()) continue;
                 try (InputStream in = svc.getAssets().open("sh1/" + f);

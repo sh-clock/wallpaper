@@ -85,6 +85,89 @@ static char *path_join(const char *dir, const char *name) {
     return s;
 }
 
+/* --- v8 scene manifest (aim 7: easy scene insertion) ---------------- */
+/* scenes.json (copied to filesDir/sh1 by the Java side) drives the scene
+ * list; the engine rotates through it at every wallpaper-process start
+ * (persisted index in filesDir/sh1/scene.idx). Insertion of a new scene
+ * = GLB + camdat in assets/sh1/ + one manifest entry — no code edits.
+ * Missing manifest / unparseable / missing glb -> the HP0003 defaults
+ * (graceful fallback, the pre-v8 behavior). */
+typedef struct {
+    char glb[96];    /* filename inside sh1/                */
+    char camdat[96]; /* filename inside sh1/                */
+} Sh1Scene;
+
+static char *read_small_file(const char *path, long *len_out) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (len < 0 || len > 262144) { fclose(f); return NULL; }
+    char *buf = (char *)malloc((size_t)len + 1);
+    if (!buf) { fclose(f); return NULL; }
+    if (fread(buf, 1, (size_t)len, f) != (size_t)len) {
+        free(buf); fclose(f); return NULL;
+    }
+    fclose(f);
+    buf[len] = 0;
+    *len_out = len;
+    return buf;
+}
+
+/* extract the string value of the JSON key "key" after occurrence #n
+ * (a minimal fixed-shape parser — scenes.json is engine-authored JSON,
+ * ASCII, no escapes in the names). The search string INCLUDES the JSON
+ * quotes so it can only match a real key, never a substring of a VALUE
+ * (e.g. "HP0003.glb" contains the letters glb but never "glb" quoted).
+ * Returns the malloc'd value or NULL. */
+static char *json_string_value(const char *json, const char *key, int occurrence) {
+    char quoted[64];
+    snprintf(quoted, sizeof(quoted), "\"%s\"", key);
+    size_t klen = strlen(quoted);
+    const char *p = json;
+    for (int n = 0; n <= occurrence; n++) {
+        p = strstr(p, quoted);
+        if (!p) return NULL;
+        p += klen;
+    }
+    p = strchr(p, ':');
+    if (!p) return NULL;
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != '"') return NULL;
+    p++;
+    const char *e = strchr(p, '"');
+    if (!e) return NULL;
+    size_t vlen = (size_t)(e - p);
+    if (vlen >= 96) return NULL;
+    char *out = (char *)malloc(vlen + 1);
+    if (!out) return NULL;
+    memcpy(out, p, vlen);
+    out[vlen] = 0;
+    return out;
+}
+
+static int sh1_scenes_load(const char *sh1dir, Sh1Scene *scenes, int max) {
+    long len = 0;
+    char path[600];
+    snprintf(path, sizeof(path), "%s/scenes.json", sh1dir);
+    char *js = read_small_file(path, &len);
+    if (!js) return 0;
+    int n = 0;
+    while (n < max) {
+        char *g = json_string_value(js, "glb", n);
+        char *c = json_string_value(js, "camdat", n);
+        if (!g || !c) { free(g); free(c); break; }
+        snprintf(scenes[n].glb, sizeof(scenes[n].glb), "%s", g);
+        snprintf(scenes[n].camdat, sizeof(scenes[n].camdat), "%s", c);
+        free(g); free(c);
+        n++;
+    }
+    free(js);
+    return n;
+}
+
 /* --- per-engine surface bindings ------------------------------------ */
 
 #define SH1_MAX_BIND 4
@@ -165,7 +248,47 @@ SH1_JNI_FN(start)(JNIEnv *env, jclass clz, jstring filesDir) {
     /* argv mirroring the desktop realtime invocation, minus the HUD:
      *   fog_poc --glb <glb> --camdat <camdat> --input <dir> --window
      *           --fps 30 --no-hud
-     * Engine-native 320x224 raster and PSX-wobble are the main() defaults. */
+     * Engine-native 320x224 raster and PSX-wobble are the main() defaults.
+     * v8: the scene comes from the scenes.json manifest (rotating, the
+     * persisted index in sh1/scene.idx); every entry is validated to
+     * exist in filesDir/sh1 before use, else the next entry is tried,
+     * else the HP0003 defaults (graceful fallback). */
+    char sh1dir[600];
+    snprintf(sh1dir, sizeof(sh1dir), "%s/sh1", g_dir);
+    Sh1Scene scenes[32];
+    int nscenes = sh1_scenes_load(sh1dir, scenes, 32);
+    int chosen = -1;
+    if (nscenes > 0) {
+        long ilen = 0;
+        char ipath[600];
+        snprintf(ipath, sizeof(ipath), "%s/scene.idx", sh1dir);
+        char *ibuf = read_small_file(ipath, &ilen);
+        int idx = ibuf ? atoi(ibuf) : 0;
+        free(ibuf);
+        /* pick the idx-th entry that actually exists on disk */
+        for (int t = 0; t < nscenes; t++) {
+            int cand = (idx + t) % nscenes;
+            char gp[700], cp[700];
+            snprintf(gp, sizeof(gp), "%s/%s", sh1dir, scenes[cand].glb);
+            snprintf(cp, sizeof(cp), "%s/%s", sh1dir, scenes[cand].camdat);
+            FILE *fg = fopen(gp, "rb");
+            FILE *fc = fopen(cp, "rb");
+            if (fg) fclose(fg);
+            if (fc) fclose(fc);
+            if (fg && fc) { chosen = cand; break; }
+        }
+        /* persist the NEXT index (rotation across process restarts) */
+        FILE *iw = fopen(ipath, "w");
+        if (iw) {
+            fprintf(iw, "%d\n", chosen >= 0 ? (chosen + 1) % nscenes : 1);
+            fclose(iw);
+        }
+    }
+    const char *glb_name  = chosen >= 0 ? scenes[chosen].glb    : "HP0003.glb";
+    const char *cama_name = chosen >= 0 ? scenes[chosen].camdat : "camdat.json";
+    ALOGI("scene manifest: %d entries, picked %s + %s",
+          nscenes, glb_name, cama_name);
+
     MainArgs *ma = (MainArgs *)malloc(sizeof(MainArgs));
     if (!ma) return;
     ma->argc = 11;
@@ -173,9 +296,9 @@ SH1_JNI_FN(start)(JNIEnv *env, jclass clz, jstring filesDir) {
     if (!ma->argv) { free(ma); return; }
     ma->argv[0]  = strdup("fog_poc");
     ma->argv[1]  = strdup("--glb");
-    ma->argv[2]  = path_join(g_dir, "sh1/HP0003.glb");
+    ma->argv[2]  = path_join(sh1dir, glb_name);
     ma->argv[3]  = strdup("--camdat");
-    ma->argv[4]  = path_join(g_dir, "sh1/camdat.json");
+    ma->argv[4]  = path_join(sh1dir, cama_name);
     ma->argv[5]  = strdup("--input");
     ma->argv[6]  = path_join(g_dir, "sh1");
     ma->argv[7]  = strdup("--window");

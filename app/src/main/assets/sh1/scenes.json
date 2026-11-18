@@ -1,0 +1,8 @@
+{
+ "comment": "Scene manifest (aim 7: easy scene insertion). Add a GLB + authored camdat to assets/sh1/, then one entry here. The engine rotates through the list at every wallpaper-process start (persisted index in filesDir/sh1/scene.idx); CI bumps the version + rebuilds on every asset change. Entries: glb/camdat are filenames inside sh1/.",
+ "scenes": [
+  {"glb": "HP0003.glb",  "camdat": "camdat.json"},
+  {"glb": "THRF9FD.glb", "camdat": "THRF9FD_camdat.json"},
+  {"glb": "SU0203.glb",  "camdat": "SU0203_fan_camdat.json"}
+ ]
+}
