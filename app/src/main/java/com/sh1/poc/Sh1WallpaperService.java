@@ -66,27 +66,53 @@ public class Sh1WallpaperService extends WallpaperService {
     private static volatile boolean sEngineStarted = false;
 
     /** copy the bundled SH1 data files into app-private storage.
-     *  Re-runs whenever any file of assets/sh1 is missing in filesDir
-     *  (an app update adding assets re-copies just the new files). */
+     *  v8.1 (audit C-M3): copies go to a temp file + ATOMIC rename (an
+     *  interrupted copy used to leave a permanently-truncated GLB that
+     *  the existence-only check then treated as complete — a black
+     *  wallpaper forever). A completed copy is stamped .ok; only fully
+     *  stamped files are skipped, so MODIFIED assets re-copy on app
+     *  updates (the v8 existence-only check skipped them: stale scenes
+     *  forever). */
     private static void copyAssetsIfNeeded(Sh1WallpaperService svc) {
         synchronized (Sh1WallpaperService.class) {
             if (sAssetsReady) return;
             File dst = new File(svc.getFilesDir(), "sh1");
             String[] names = assetList(svc);
             boolean missing = false;
-            for (String f : names) if (!new File(dst, f).exists()) { missing = true; break; }
+            for (String f : names) {
+                if (f.endsWith(".ok")) continue;
+                File ok = new File(dst, f + ".ok");
+                if (!ok.exists()) { missing = true; break; }
+            }
             if (!missing && names.length > 0) { sAssetsReady = true; return; }
             dst.mkdirs();
             for (String f : names) {
+                if (f.endsWith(".ok")) continue;
                 File out = new File(dst, f);
-                if (out.exists()) continue;
+                File tmp = new File(dst, f + ".tmp");
+                File ok = new File(dst, f + ".ok");
+                if (ok.exists()) continue;   /* fully copied earlier */
                 try (InputStream in = svc.getAssets().open("sh1/" + f);
-                     OutputStream os = new FileOutputStream(out)) {
+                     OutputStream os = new FileOutputStream(tmp)) {
                     byte[] buf = new byte[64 * 1024];
                     int n;
                     while ((n = in.read(buf)) > 0) os.write(buf, 0, n);
                 } catch (IOException e) {
+                    tmp.delete();
                     throw new RuntimeException("asset copy failed: " + f, e);
+                }
+                /* atomic: a half-written file can never be observed
+                 * (Linux rename replaces an existing target — the
+                 * pre-delete is belt-and-braces for other kernels) */
+                out.delete();
+                if (!tmp.renameTo(out)) {
+                    tmp.delete();
+                    throw new RuntimeException("asset rename failed: " + f);
+                }
+                try {
+                    ok.createNewFile();     /* completion stamp */
+                } catch (IOException e) {
+                    throw new RuntimeException("stamp failed: " + f, e);
                 }
             }
             sAssetsReady = true;

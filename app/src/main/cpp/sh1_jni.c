@@ -265,6 +265,12 @@ SH1_JNI_FN(start)(JNIEnv *env, jclass clz, jstring filesDir) {
         char *ibuf = read_small_file(ipath, &ilen);
         int idx = ibuf ? atoi(ibuf) : 0;
         free(ibuf);
+        /* v8.1 (audit C-M2): normalize the persisted index into range —
+         * a hand-edited/negative/corrupt scene.idx must never index OOB.
+         * (The old code indexed scenes[idx] directly: idx=-1 read the
+         * stack BEFORE the array — proven UB in the audit harness.) */
+        idx = idx % nscenes;
+        if (idx < 0) idx += nscenes;
         /* pick the idx-th entry that actually exists on disk */
         for (int t = 0; t < nscenes; t++) {
             int cand = (idx + t) % nscenes;
