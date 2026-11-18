@@ -8168,8 +8168,14 @@ static void sh1x_anim_pose(const Sh1x *sx, const Sh1xPropAnim *a, int inst,
         *posReplaceMask = 2;
         break;
     }
-    case 13:  /* carouselSpin: hub rot.vy = master angle */
-        rotDeg[1] = (float)a->mvMaster * R2D;
+    case 13:  /* carouselSpin: rot.vy = master + the per-object offset.
+                 * S20-late FIX: the v27 pose REPLACED rotDeg[1] — dropping
+                 * the ripper's rot0 offsets (MGR_STR_ +11.25, the fence
+                 * spokes +90+i*45, map6_s04_2.c:3662-3693
+                 * Math_SetSVectorFastSum(&rot, 0, D_800ED5B6+off, 0)) —
+                 * all 8 fence spokes overlapped at ONE angle. rot0[1] is
+                 * the authored offset: ADD it. */
+        rotDeg[1] = a->rot0[1] + (float)a->mvMaster * R2D;
         break;
     case 14: { /* ferrisWheel — map6_s04_2.c:3814-3845 VERBATIM:
                  * arm angle a = (master >> 12) + (-739 + i*307) Q12_ANGLE
