@@ -14,12 +14,14 @@ permissions:
 
 jobs:
   # ---- v7 (task 7): asset-change version bump -------------------------------
-  # Every push to main that adds/modifies app/src/main/assets/** bumps the
-  # minor version (1.7.30 -> 1.7.31) in version.properties, commits with
+  # Every push to main that adds/modifies app/src/main/assets/** OR the
+  # engine/code (v10.2: cpp/**, java/**, AndroidManifest.xml, gradle) bumps
+  # the minor version (1.7.30 -> 1.7.31) in version.properties, commits with
   # [skip ci], and pushes BOTH the commit and the tag to main. NOTE: a
   # GITHUB_TOKEN push cannot re-trigger workflows (anti-recursion rule),
   # so the build job below runs AFTER the bump (needs:) with ref: main and
-  # publishes the release itself. Pushes without asset changes do not bump.
+  # publishes the release itself. Pushes without releasable changes do not
+  # bump.
   bump:
     # v7.1 (audit W-D4): push events fire for TAG pushes too — the bump
     # must run ONLY on branch-main pushes (a PAT tag push used to run the
@@ -51,7 +53,12 @@ jobs:
           else
             git fetch --depth=1 origin "$BEFORE" || BEFORE=$(git rev-parse HEAD^)
           fi
-          CHANGED=$(git diff --name-only "$BEFORE" HEAD -- app/src/main/assets/ || true)
+          # v10.2: engine/code changes release too (not just asset drops)
+          # — the v32 engine sync would otherwise build but never release.
+          CHANGED=$(git diff --name-only "$BEFORE" HEAD -- \
+            app/src/main/assets/ app/src/main/cpp/ \
+            app/src/main/java/ app/src/main/AndroidManifest.xml \
+            app/build.gradle build.gradle || true)
           if [ -z "$CHANGED" ]; then
             echo "no asset changes - no bump"
             echo "did=0" >> "$GITHUB_OUTPUT"

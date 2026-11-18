@@ -1,5 +1,5 @@
 {
- "comment": "Scene manifest (aim 7: easy scene insertion). Add a GLB + authored camdat to assets/sh1/, then one entry here. The engine rotates through the list at every wallpaper-process start (persisted index in filesDir/sh1/scene.idx); CI bumps the version + rebuilds on every asset change. v31 engine: lens flare + water + TV state machine + SITAI walker + fanArray/16 fixes + swanstation-verbatim modulate (all 6-agent audit fleet findings fixed).",
+ "comment": "Scene manifest (aim 7: easy scene insertion). Add a GLB + authored camdat to assets/sh1/, then one entry here. The engine rotates through the list at every wallpaper-process start (persisted index in filesDir/sh1/scene.idx); CI bumps the version + rebuilds on every asset change. v32.2 engine: all special-case drivers live (slideDoor/fallOnce/stoneChoreo/binSpin/scrollBelt + the water FX: DR_WAVE live-tile scroll, ripple mesh/sprites, waterfall) + animsDemo per scene (the demo-gated drivers play) + mapLink neighbor merging where neighbor GLBs coexist.",
  "scenes": [
   {
    "glb": "HP0003.glb",
@@ -12,6 +12,78 @@
   {
    "glb": "SU0203.glb",
    "camdat": "SU0203_fan_camdat.json"
+  },
+  {
+   "glb": "SPU0100.glb",
+   "camdat": "SPU0100_camdat.json"
+  },
+  {
+   "glb": "THRF906.glb",
+   "camdat": "THRF906_camdat.json"
+  },
+  {
+   "glb": "SCFE00.glb",
+   "camdat": "SCFE00_camdat.json"
+  },
+  {
+   "glb": "SUFE00.glb",
+   "camdat": "SUFE00_camdat.json"
+  },
+  {
+   "glb": "SU00FF.glb",
+   "camdat": "SU00FF_camdat.json"
+  },
+  {
+   "glb": "APU00FF.glb",
+   "camdat": "APU00FF_camdat.json"
+  },
+  {
+   "glb": "APUFFFE.glb",
+   "camdat": "APUFFFE_camdat.json"
+  },
+  {
+   "glb": "DRU0100.glb",
+   "camdat": "DRU0100_camdat.json"
+  },
+  {
+   "glb": "APU0002.glb",
+   "camdat": "APU0002_camdat.json"
+  },
+  {
+   "glb": "HP0100.glb",
+   "camdat": "HP0100_camdat.json"
+  },
+  {
+   "glb": "ERFCFC.glb",
+   "camdat": "ERFCFC_camdat.json"
+  },
+  {
+   "glb": "ER03FD.glb",
+   "camdat": "ER03FD_camdat.json"
+  },
+  {
+   "glb": "ER02FC.glb",
+   "camdat": "ER02FC_camdat.json"
+  },
+  {
+   "glb": "THRF9FD.glb",
+   "camdat": "THRF9FD_doors_camdat.json"
+  },
+  {
+   "glb": "SUFFFE.glb",
+   "camdat": "SUFFFE_camdat.json"
+  },
+  {
+   "glb": "SPU03FD.glb",
+   "camdat": "SPU03FD_camdat.json"
+  },
+  {
+   "glb": "DRFD00.glb",
+   "camdat": "DRFD00_camdat.json"
+  },
+  {
+   "glb": "SPU0301.glb",
+   "camdat": "SPU0301_camdat.json"
   }
  ]
 }

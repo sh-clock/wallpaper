@@ -64,7 +64,10 @@
  *      (Particle_EnvironmentSet at load — the editor's setBootWeather,
  *      applied unconditionally incl. recipe 2), lensFlare, flashlightOn,
  *      psxWobble (--modern when false), dither, particles (--nosnow when
- *      false), engine (--nofog when false). Present-field semantics mirror
+ *      false), engine (--nofog when false), animsDemo (--anims-demo when
+ *      true: the cutscene/event-gated drivers play — the wallpaper's
+ *      demo scenes set it per scene; absent leaves the CLI default).
+ *      Present-field semantics mirror
  *      the editor's sanitizeEnv whitelist verbatim (strict booleans,
  *      clamps 0..20 / 0..8 / -1..6 / 0..5). Priority: CLI flags > camdat
  *      env > camdat legacy flags > engine defaults — the editor's own
@@ -139,6 +142,10 @@
  * windows (clut rows (192,5/6/7) NTSC, tpage 44/76); extracted by
  * tools/extract_flare_tim.py from the SAME engine file. */
 #include "flare_tim_data.h"
+/* v32 (S18): DR_WAVE.TIM — the sewer water tile (page 13, clut (224,0));
+ * the func_8008E5B4 scroll source (left 64x64) + the static right-half
+ * tiles; extracted by tools/extract_dr_wave_tim.py. */
+#include "dr_wave_data.h"
 /* the engine's VERBATIM sine LUT (g_SineTable from libkmath.s) — v8:
  * Math_Sin/Math_Cos are RAW 4096-entry lookups (no interpolation); needed
  * for the weather-transition sine driver (Particle_SystemUpdate) and the
@@ -1292,6 +1299,23 @@ typedef struct {
     int seeded;                     /* gravityScatter: per-inst state seeded  */
     int isCabin;                    /* ferrisWheel cabin (FWBOX parity set)   */
     int pendSlot[5];                /* ferris arm i pendulum slot (4 aliased) */
+    /* ---- v32 (S18): the deferred driver families (A_SWEEP §4b) ---- */
+    int slideIdx;                   /* slideDoor: g_WorldObject_Dr[i] index  */
+    int slideVelRaw;                /* slideDoor live vel (raw Q12 m/s)      */
+    int fallArmed;                  /* fallOnce: the D_800E05A8 timer armed  */
+    int fallTorque;                 /* fallOnce D_800E05AC (raw q3.12)       */
+    int fallVel;                    /* fallOnce D_800E05AE (raw Q12 m/s)     */
+    int stoneStep;                  /* stoneChoreo: sysStateSteps[1] state   */
+    int stoneData;                  /* stoneChoreo: sysStateStepData[0] raw   */
+    int stoneVel;                   /* stoneChoreo D_800E168E (raw Q12)       */
+    int binAng;                     /* binSpin D_800F482C (raw q3.12)         */
+    /* waterRipple particles (map5_s00.c:20-48 VERBATIM): x/z raw Q12,
+     * t 0..4095 (field_C.s_2.field_0), sel 0..2 (field_C.s_1.field_2)  */
+    int wrT[16], wrSel[16];
+    int wrX[16], wrZ[16];
+    /* waterfall droplets (water.c:20-107 logic): alive, x/y/z raw Q12,
+     * vy velocity, emitter idx 0..1 (map1_s02.c:1488-1526 VERBATIM)     */
+    int wfAlive[16], wfX[16], wfY[16], wfZ[16], wfVy[16], wfEm[16];
 } Sh1xPropAnim;
 typedef struct {
     char tag[8];
@@ -1338,6 +1362,9 @@ static void sh1x_free(Sh1x *sx) {
 /* v27: prop-anim runtime globals ------------------------------------- */
 static int   g_animsDemo = 0;          /* --anims-demo: event gates SET  */
 static float g_sh1xLightFlicker = 1.0f;/* lightFlicker live multiplier   */
+static int g_sh1xBeltScroll;      /* v32: scrollBelt D_800F48A4 (raw Q12) */
+static unsigned char g_waterTileRGB[32][32][3]; /* v32: the live DR_WAVE tile */
+static void fx_water_tile_update(int ctr);   /* fwd: called by fx_pass   */
 
 static int sh_sin_q12(int angle) {
     /* v27.2 (B-13): the ENGINE's own LUT — kSineTable is the verbatim
@@ -1525,6 +1552,8 @@ static void sh1x_load(Sh1x *sx, const JValue *json) {
         else if (!strcmp(drv, "fallOnce")) a->driver = 18;
         else if (!strcmp(drv, "binSpin")) a->driver = 19;
         else if (!strcmp(drv, "scrollBelt")) a->driver = 20;
+        else if (!strcmp(drv, "waterRipple")) a->driver = 21; /* map5_s00 */
+        else if (!strcmp(drv, "particles")) a->driver = 22;  /* waterfall */
         else if (!strcmp(drv, "cutscene"))  a->driver = 7;  /* idle default */
         else continue;                    /* unknown driver: not played */
         const JValue *p = jarr(e, "pos");
@@ -1591,6 +1620,23 @@ static void sh1x_load(Sh1x *sx, const JValue *json) {
          * D_800ED8B0[i], NOT one shared master) */
         a->fanSplit = jint(e, "spinSplit", 7);
         for (int q = 0; q < 16; q++) a->fanAng[q] = 0;
+        /* v32 (S18): slideDoor verbatim params (catalog "speed"/"accel"
+         * — sharedFunc_800D15F0_3_s01.h:341-353 / map7_s01_2.c:2081-2105) */
+        if (a->driver == 16) {
+            a->rate = (float)jnum(e, "speed", 0.35);
+            a->kick = (float)jnum(e, "accel", 0.8);
+        }
+        /* v32 (S18): slideDoor per-door index (g_WorldObject_Dr order,
+         * sharedFunc_800D15F0_3_s01.h:341-353: vz += dt*(i&1 ? +v : -v)) */
+        a->slideIdx = jint(e, "slideIdx", 0);
+        a->slideVelRaw = 0; a->fallArmed = 0; a->fallTorque = 0;
+        a->fallVel = 0; a->stoneStep = 0; a->stoneData = 0;
+        a->stoneVel = 0; a->binAng = 0;
+        for (int q = 0; q < 16; q++) {
+            a->wrT[q] = 0; a->wrSel[q] = 0; a->wrX[q] = 0; a->wrZ[q] = 0;
+            a->wfAlive[q] = 0; a->wfX[q] = 0; a->wfY[q] = 0;
+            a->wfZ[q] = 0; a->wfVy[q] = 0; a->wfEm[q] = 0;
+        }
         /* v27.2: gate polarity + cutscene-only (audit D1/C-D4) */
         a->eventGateAlt = jint(e, "eventGateAlt", 0);
         a->cutsceneOnly = jintb(e, "cutsceneOnly", 0);
@@ -1696,6 +1742,19 @@ static void sh1x_load(Sh1x *sx, const JValue *json) {
         /* v27.2 (B-4): translate/MOVACHES cur[2] starts at the authored
          * PLACEMENT z (60.0667) — the shelf sits static at engine-fresh. */
         if (a->driver == 3) a->cur[2] = a->pos[2];
+        /* v32 (S18): the movement drivers start at the authored pose —
+         * slideDoor z = resetZ (sharedFunc_800D15F0_3_s01.h:385-391),
+         * fallOnce vy = the fence base, stoneChoreo y/z = the ledge pose
+         * (map7_s01_2.c:2192 STONE1_H -139.5,-1.35,-140.6 rot (0,90,0))
+         * + rotZ slot cur[0] = rot0[2], binSpin vx = rot0[0], the belt
+         * base z = pos[2] (g_WorldObject_UnkPos (100,0,-140)). */
+        if (a->driver == 16) a->cur[2] = a->pos[2];
+        if (a->driver == 18) a->cur[1] = a->pos[1];
+        if (a->driver == 10) { a->cur[0] = a->rot0[2];
+                               a->cur[1] = a->pos[1];
+                               a->cur[2] = a->pos[2]; }
+        if (a->driver == 19) a->cur[0] = a->rot0[0];
+        if (a->driver == 20) a->cur[2] = a->pos[2];
         a->rawVy = (int)(a->rot0[1] * 4096.0f / 360.0f);
         a->rawVel = 0;
         /* v27: the dampedSwing demo start = the post-event pose (the
@@ -2477,6 +2536,7 @@ typedef struct {
     int envDither;              /* -1 absent; else 0/1                   */
     int envParticles;           /* -1 absent; else 0/1 (0 = --nosnow)    */
     int envEngine;              /* -1 absent; else 0/1 (0 = --nofog)     */
+    int envAnimsDemo;           /* -1 absent; else 0/1 (1 = --anims-demo) */
 } Camdat;
 
 static int camdat_parse_loop(const char *s, int def) {
@@ -2747,6 +2807,7 @@ static int camdat_load(Camdat *cd, const char *path, const char *glbName) {
     cd->envDither = -1;
     cd->envParticles = -1;
     cd->envEngine = -1;
+    cd->envAnimsDemo = -1;
     long len = 0;
     uint8_t *data = read_whole_file(path, &len);
     if (!data) {
@@ -2830,6 +2891,12 @@ static int camdat_load(Camdat *cd, const char *path, const char *glbName) {
             cd->envDither       = jbool(env, "dither", -1);
             cd->envParticles    = jbool(env, "particles", -1);
             cd->envEngine       = jbool(env, "engine", -1);
+            /* v32.2: animsDemo — the demo-gated drivers (cutscene/event-
+             * driven: carousel, elevators, stone, bin, belt, door swing,
+             * waterfall, fence) play per scene. STRICT boolean; absent
+             * leaves the CLI default (0). The wallpaper's special-case
+             * scenes set it; the PoC CLI keeps --anims-demo precedence. */
+            cd->envAnimsDemo    = jbool(env, "animsDemo", -1);
         }
     }
 
@@ -8030,6 +8097,35 @@ static void sh1x_anim_pose(const Sh1x *sx, const Sh1xPropAnim *a, int inst,
         posEng[2] = (float)(a->rwVz + a->rwVzBaseQ12) / 4096.0f;
         *posReplaceMask = 4;
         break;
+    case 16:  /* slideDoor: vz slides (sharedFunc_800D15F0_3_s01.h:341-353) */
+        posEng[2] = a->cur[2];
+        *posReplaceMask = 4;
+        break;
+    case 18:  /* fallOnce: rot.vx tilts to 90deg + pos.vy falls (engine
+               * y-down; the apply side maps to glTF) — map4_s03.c:1708-1718 */
+        rotDeg[0] = a->cur[0];
+        posEng[1] = a->cur[1];
+        *posReplaceMask = 2;
+        break;
+    case 10:  /* stoneChoreo: rotZ cur[0] + y cur[1] + z cur[2] (the
+               * levitating stone; map7_s01_2.c:1545-1596) */
+        rotDeg[2] = a->cur[0];
+        posEng[1] = a->cur[1];
+        posEng[2] = a->cur[2];
+        *posReplaceMask = 6;
+        break;
+    case 19:  /* binSpin: rot.vx = D_800F482C (map7_s03_3.c:8238-8245) */
+        rotDeg[0] = a->cur[0];
+        break;
+    case 20: { /* scrollBelt: 3 segment copies vz = base - scroll, -20,
+               * +20 (map7_s03_3.c:8331-8344; inst = the segment index)   */
+        int i = inst > 0 ? inst : 0;
+        if (i > 2) i = 2;
+        float off = (i == 0) ? 0.0f : (i == 1) ? -20.0f : 20.0f;
+        posEng[2] = a->pos[2] - (float)g_sh1xBeltScroll / 4096.0f + off;
+        *posReplaceMask = 4;
+        break;
+    }
     default:
         break;
     }
@@ -8555,6 +8651,14 @@ static void sh1x_anims_tick(Sh1x *sx, double dt) {
         if (a->gated) {
             if (a->driver == 11)
                 g_sh1xLightFlicker = 1.0f;  /* fresh: Q12(1.0) identity */
+            /* v32 (S18): the waterfall despawns when the gate closes
+             * (map1_s02.c:1560-1563 — leaving chunk (-1,-2) runs
+             * sharedFunc_800CBD58_1_s02; the tick's gate-continue skips
+             * gated anims, so the clear lives HERE) */
+            if (a->driver == 22 && a->seeded) {
+                for (int q = 0; q < 16; q++) a->wfAlive[q] = 0;
+                a->seeded = 0;
+            }
             continue;        /* engine: the update loop is gated */
         }
         if (a->sharedLeader >= 0) continue;  /* follower: leader's state */
@@ -8915,6 +9019,226 @@ static void sh1x_anims_tick(Sh1x *sx, double dt) {
                         (a->rwVz + a->rwVzBaseQ12) / 4096.0);
             break;
         }
+        case 16: { /* slideDoor — sharedFunc_800D15F0_3_s01.h:341-353 VERBATIM
+                    * (map3 hospital elevators, map7_s01/s02 rides):
+                    * sharedData_800D4D0C_3_s01.vx = MIN(vx + dt*Q12(0.8),
+                    * Q12(0.35)); g_WorldObject_Dr[i].position.vz +=
+                    * Q12_MULT_PRECISE(dt, (i & 1) ? vx : -vx). The map7_s01
+                    * local variant (:2081-2105) ramps dt*Q12(0.25) clamped
+                    * Q12(0.1) — per-entry accel/speed. v27 shipped this
+                    * driver mapped but with NO tick case (A_SWEEP §4b-1:
+                    * 36 catalog entries sat frozen); engine-fresh they
+                    * still rest at resetZ (the slide runs only in the
+                    * elevator-arrival cutscene states 14-16 — the demo
+                    * gate below stands in for the state machine).       */
+            if (g_animsDemo) {
+                int accelQ = (int)(a->kick * 4096.0f);
+                int speedQ = (int)(a->rate * 4096.0f);
+                a->slideVelRaw += (int)(((int64_t)dtRaw * accelQ) >> 12);
+                if (a->slideVelRaw > speedQ) a->slideVelRaw = speedQ;
+                int add = (int)(((int64_t)dtRaw * a->slideVelRaw) >> 12);
+                a->cur[2] += (float)(((a->slideIdx & 1) ? add : -add)
+                                     / 4096.0);
+            }
+            break;
+        }
+        case 18: { /* fallOnce — map4_s03.c:1688-1735 VERBATIM (FENCE_HI
+                    * falls after EventFlag_320): first armed frame does
+                    * D_800E05AE += Q12(1.0); then timer += dt;
+                    * var = ratan2(Q12_ANGLE(360), FP_FROM(g_GravitySpeed*
+                    * Math_Cos(rot.vx), 12)) with g_GravitySpeed = 1336
+                    * raw (game_main.c Q12_MULT(526,10419)); damping
+                    * var_a0 = MAX(0, Q12(1) - timer*2); torque =
+                    * MULT_PRECISE(var_a0, torque + var); rot.vx +=
+                    * MULT_PRECISE(dt, torque); fallVel = MIN(Q12(15),
+                    * fallVel + g + (g>>4)); vy += MULT_PRECISE(dt,
+                    * fallVel); rot.vx clamped Q12_ANGLE(90). v27 shipped
+                    * driver 18 with NO tick case (A_SWEEP §4b-3).      */
+            if (!a->fallArmed) {
+                if (!g_animsDemo) break;   /* engine: fires on flag 320 */
+                a->fallArmed = 1;
+                a->fallVel += 4096;                     /* Q12(1.0f)   */
+            }
+            a->mvTimer += (float)dt;   /* D_800E05A8 raw Q12 accumulator */
+            {
+                int rotVx = (int)(a->cur[0] * (4096.0f / 360.0f));
+                int cosV = sh_math_cos(rotVx);
+                int gx = (int)(((int64_t)1336 * cosV) >> 12);
+                int var = fx_q12_angle(atan2f(4096.0f, (float)gx)
+                                      * (180.0f / (float)M_PI));
+                int varA0 = 4096 - (int)(a->mvTimer * 2.0f * 4096.0f);
+                if (varA0 < 0) varA0 = 0;
+                a->fallTorque = (int)(((int64_t)varA0 *
+                                       (a->fallTorque + var)) >> 12);
+                rotVx += (int)(((int64_t)dtRaw * a->fallTorque) >> 12);
+                if (rotVx > 1024) rotVx = 1024;          /* Q12_ANGLE(90) */
+                a->cur[0] = (float)rotVx * (360.0f / 4096.0f);
+            }
+            a->fallVel += 1336 + (1336 >> 4);            /* MIN(Q12(15),..) */
+            if (a->fallVel > 61440) a->fallVel = 61440;
+            a->cur[1] += (float)(((int64_t)dtRaw * a->fallVel) >> 12)
+                         / 4096.0f;
+            break;
+        }
+        case 10: { /* stoneChoreo — map7_s01_2.c:1516-1596 VERBATIM (the
+                    * levitating stone, 5 sub-states of cutscene case 13):
+                    * 1) slide vz = (stepData*Q12(0.1))/Q12(2) - Q12(140.6),
+                    * stepData += dt up to Q12(2.0) (model swaps to
+n                    * STONE3_H — NOT ported: one GLB model per entry);
+                    * 2) rise vel += g>>1, vy += dt*vel to the -1.05 m
+                    * cap (y-down: UP); 3) wobble 0.5s: rotZ +=
+                    * dt*Q12_ANGLE(-25), vy = MULT(cos, Q12(0.15)) -
+                    * (Q12(1.2)-1), vz = MULT(sin, Q12(-0.15)) -
+                    * Q12(140.5); 4) tumble: vel += g, rotZ += dt*
+                    * Q12_ANGLE(-120), vy += MULT(vel, dt), vz += dt*
+                    * Q12(0.3) until vy >= 0; 5) rest (Q12(-139.5),
+                    * Q12(-0.05), Q12(-140.0)) rotZ Q12(-0.25). v27 shipped
+                    * driver 10 with NO tick case (A_SWEEP §4b-2).        */
+            if (!g_animsDemo) break;   /* engine: cutscene case 13 only */
+            switch (a->stoneStep) {
+            case 0:
+                a->stoneStep = 1;                     /* sfx 1647 kick  */
+                break;
+            case 1: {
+                a->stoneData += dtRaw;
+                if (a->stoneData > 8192) a->stoneData = 8192; /* Q12(2.0) */
+                a->cur[2] = (float)(((a->stoneData * 409) / 8192) - 575897)
+                             / 4096.0f;   /* Q12(0.1)/Q12(2) - Q12(140.6) */
+                if (a->stoneData >= 8192) a->stoneStep = 2;
+                break;
+            }
+            case 2: {
+                a->stoneVel += 1336 >> 1;             /* D_800E168E += g>>1 */
+                int vyQ = (int)(a->cur[1] * 4096.0f);
+                if (vyQ < -4300) {   /* vy < Q12(-1.05): the stone RISES */
+                    vyQ += (int)(((int64_t)dtRaw * a->stoneVel) >> 12);
+                    if (vyQ > -4300) {
+                        vyQ = -4300;               /* Q12(-1.05) clamp    */
+                        a->stoneStep = 3;           /* sfx 1648          */
+                        a->stoneData = 0;
+                        a->stoneVel = 0;
+                    }
+                    a->cur[1] = (float)vyQ / 4096.0f;
+                }
+                break;
+            }
+            case 3: {
+                int rz = (int)(a->cur[0] * (4096.0f / 360.0f));
+                rz += (int)(((int64_t)dtRaw * -284) >> 12);
+                /* dt*Q12_ANGLE(-25): -25*4096/360 = -284 raw (truncated) */
+                rz &= 0xFFF;
+                a->cur[0] = (float)rz * (360.0f / 4096.0f);
+                a->cur[1] = (float)(((sh_math_cos(rz) * 614) >> 12) - 4914)
+                             / 4096.0f;
+                a->cur[2] = (float)(((sh_math_sin(rz) * -614) >> 12) - 575488)
+                             / 4096.0f;
+                a->stoneData += dtRaw;
+                if (a->stoneData > 2048) {              /* Q12(0.5)       */
+                    a->stoneStep = 4;
+                    a->stoneData = 0;
+                }
+                break;
+            }
+            case 4: {
+                a->stoneVel += 1336;
+                int rz = (int)(a->cur[0] * (4096.0f / 360.0f));
+                rz += (int)(((int64_t)dtRaw * -1365) >> 12);
+                /* dt*Q12_ANGLE(-120) = -1365 raw */
+                rz &= 0xFFF;
+                a->cur[0] = (float)rz * (360.0f / 4096.0f);
+                int vyQ = (int)(a->cur[1] * 4096.0f);
+                vyQ += (int)(((int64_t)a->stoneVel * dtRaw) >> 12);
+                a->cur[1] = (float)vyQ / 4096.0f;
+                a->cur[2] += (float)(((int64_t)dtRaw * 1228) >> 12) / 4096.0f;
+                if (vyQ > 0) a->stoneStep = 5;         /* hit the floor  */
+                break;
+            }
+            case 5:
+                a->cur[0] = -90.0f;  /* Q12(-0.25) = -1024 raw = -90deg */
+                a->cur[1] = -0.05f; a->cur[2] = -140.0f;
+                a->stoneStep = 0;                      /* sfx 1649, loop */
+                break;
+            }
+            break;
+        }
+        case 19: { /* binSpin — map7_s03_3.c:8238-8245 VERBATIM (the
+                    * ending bin): rot.vx = D_800F482C each frame;
+                    * D_800F482C -= Q12_DIV(dt, Q12(3.6)) =
+                    * (dtRaw<<12)/14745 (100 deg/s). Runs only while
+                    * g_Cutscene_UpdateBin (step 21) — the demo stands
+                    * in; v27 shipped the mapping with NO tick case and
+                    * the catalog said "cutscene" (A_SWEEP §4b-6).      */
+            if (!g_animsDemo) break;
+            if (!a->fallArmed) {       /* cutscene step 21 init (6297):  */
+                a->fallArmed = 1;      /* D_800F482C = Q12_ANGLE(-167.6) */
+                a->binAng = -1906;    /* = -1906 raw                    */
+            }
+            a->binAng -= (int)(((int64_t)dtRaw << 12) / 14745);
+            if (a->binAng < -32768) a->binAng += 65536; /* SVECTOR vy s16 */
+            a->cur[0] = (float)a->binAng * (360.0f / 4096.0f);
+            break;
+        }
+        case 20: { /* scrollBelt — map7_s03_3.c:8296-8355 VERBATIM (the
+                    * finale conveyor): D_800F48A4 += MULT_PRECISE(dt,
+                    * Q12(2.67)); > Q12(20) -= Q12(20); 3 segment copies
+                    * vz = base - scroll, -20, +20 (all three objects
+                    * REAL/URA/UNDER ride the SAME g_WorldObject_UnkPos
+                    * (100,0,-140); the D_800F4818/19/1A flags pick which
+                    * version draws — the demo drives the scroll).      */
+            if (!g_animsDemo) break;
+            g_sh1xBeltScroll += (int)(((int64_t)dtRaw * 10936) >> 12);
+            if (g_sh1xBeltScroll > 81920) g_sh1xBeltScroll -= 81920;
+            break;
+        }
+        case 21:   /* waterRipple (map5_s00.c:20-48): the spawn + the
+                    * per-draw t walk + the QUAD paint all live in
+                    * sh1x_water_fx_draw (the engine runs them inside the
+                    * draw func_800CB25C, gated on the PLAYER position —
+                    * the PoC camera stands in; see the FX pass).
+                    * v32.2: BREAK (the v32 fall-through into case 22 set
+                    * seeded=1 on the RIPPLE anim — the waterfall tick —
+                    * so the ripple spawn never ran and t stayed 0).   */
+            break;
+        case 22: { /* particles/<waterfall> (water.c:20-107 logic): the
+                    * 10 recycling droplets (field_74) from the 2 VERBATIM
+                    * emitters (map1_s02.c:1488-1526: (-16.4,0.1,-51.2)
+                    * spread 1.6m @90deg / (-14.8,0.1,-51.2) @270deg —
+                    * scatter along the emitter angle: x + sin(ang)*s /
+                    * z + cos(ang)*s, water.c:38-45). The band interp of
+                    * sharedFunc_800CBDA8_1_s02 (:110-231) is PSX-scratchpad
+                    * GTE code — ported as: spawn at emitter + scatter, fall
+                    * vy += g*dt, recycle ~8m below (documented deviation). */
+            if (a->seeded) {
+                for (int q = 0; q < 10; q++) {
+                    if (!a->wfAlive[q]) {
+                        int em = (int)(sh_rng_next() & 1);
+                        int spread = (int)(sh_rng_next() % 6553); /*Q12(1.6)*/
+                        a->wfEm[q] = em;
+                        /* emitter 0 @90deg: x + spread; emitter 1 @270deg:
+                         * x - spread (sin(90)=1, sin(270)=-1; cos = 0)   */
+                        a->wfX[q] = (em ? -60620 : -67174)
+                                    + (em ? -spread : spread);
+                        a->wfY[q] = 409;                  /* Q12(0.1)     */
+                        a->wfZ[q] = -209715;              /* Q12(-51.2)  */
+                        a->wfVy[q] = 0;
+                        a->wfAlive[q] = 1;
+                    } else {
+                        /* fall: vel capped Q12(6.0) (water.c:334-337),
+                         * vy += dt*vel; recycle at the band end
+                         * field_28+field_64 = Q12(1.6)+Q12(0.5) below    */
+                        a->wfVy[q] += 1336;               /* g raw        */
+                        if (a->wfVy[q] > 24576) a->wfVy[q] = 24576;
+                        a->wfY[q] += (int)(((int64_t)dtRaw *
+                                            a->wfVy[q]) >> 12);
+                        if (a->wfY[q] > 409 + 8601)       /* band end     */
+                            a->wfAlive[q] = 0;
+                    }
+                }
+            } else {
+                a->seeded = 1;            /* sharedFunc_800CBC98 spawn */
+            }
+            break;
+        }
         case 7:   /* cutscene: idle (engine-true default)                  */
         default:
             break;
@@ -9139,14 +9463,16 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
             if (!wz->enabled) continue;
             if (ex >= wz->minX && ex < wz->maxX && ez >= wz->minZ && ez < wz->maxZ) {
                 /* inside: draw the wave tiles + glint + caustics.
-                 * The DR_WAVE.TIM tile pixels are NOT locally available —
-                 * func_8008E5B4 (the two scrolling 32x32 ripple quads,
-                 * tpage 45, CLUT (224,0), UV phase (ctr>>1)&0x1F and
-                 * ((ctr+1)>>2)&0x1F) stays a DOCUMENTED DEVIATION: the
-                 * counter math ticks here; the tile paint awaits the
-                 * texture. The glint quad (func_8008E794) + the caustic
-                 * ring (func_8008EA68) below are geometry-only: VERBATIM. */
+                 * v32 (S18): DR_WAVE.TIM is NOW locally available — the
+                 * func_8008E5B4 scroll (the two 32x32 quads into the
+                 * live water tile, UV phases (ctr>>1)&0x1F and
+                 * ((ctr+1)>>2)&0x1F, tpage 45 CLUT (224,0)) is ported:
+                 * fx_water_tile_update below; the counter increments
+                 * per non-zero dt (lens_flare.c:554-557). The glint quad
+                 * (func_8008E794) + the caustic ring (func_8008EA68)
+                 * below are geometry-only: VERBATIM. */
                 g_flaresys.counter++;       /* D_800AFDAC++ per non-zero dt */
+                fx_water_tile_update(g_flaresys.counter);
                 float lx = (float)g_fxLightPos[0] * (1.0f / 4096.0f);
                 float ly = (float)g_fxLightPos[1] * (1.0f / 4096.0f);
                 float lz = (float)g_fxLightPos[2] * (1.0f / 4096.0f);
@@ -9550,6 +9876,323 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
     (void)visF;
     #undef FX_TO_PX
     #undef FX_TO_PY
+}
+
+/* ==================================================================== */
+/* v32 (S18): THE WATER FX — func_8008E5B4 (the DR_WAVE live-tile scroll */
+/* — now implementable: DR_WAVE.TIM IS locally available) + the map5_s00 */
+/* waterRipple mesh/sprites (func_800CB25C) + the map1_s02 waterfall     */
+/* droplets (water.c). Engine refs VERBATIM: lens_flare.c:530-608;       */
+/* map5_s00.c:20-231; map1_s02.c:1488-1526; particles/water.c:20-107.    */
+/* -------------------------------------------------------------------- */
+
+/* func_8008E5B4 VERBATIM (lens_flare.c:530-608): the two 32x32 quads
+ * (tpage FIELD 45 — TPX 13 (x 832), ABR bits 5-6 = 01 = ADDITIVE,
+ * clut WATER_CLUT (224,0) = DR_WAVE row 0) re-drawn every frame into
+ * the 32x32 live water tile (the write area D_800AFDA4 {832,224,32,32}):
+ *   poly[0] OPAQUE: window (u 0..31, v (ctr>>1)&0x1F .. +31), prim
+ *   (128,128,128) = the identity modulation (t5*128>>7 = t5);
+ *   poly[1] SEMI: window (u ((ctr+1)>>2)&0x1F .. +31, v 8..39),
+ *   ADDITIVE over poly[0] (B5+F5 clamped 31 — PSX ABR mode 1).
+ * ctr = D_800AFDAC, ++ per non-zero dt while the light is inside a water
+ * zone (the fx_pass water-shimmer branch advances g_flaresys.counter).
+ * Sampled from the embedded DR_WAVE left 64x64 (the scroll source).
+ * v32.1 (audit V32-C): the v32 blend was AVERAGE — WRONG: setSemiTrans
+ * only sets the enable bit (libgpu.h:253-254); the ABR mode lives in
+ * the TPAGE field bits 5-6 (getTPage, libgpu.h:259-261) and 45 = mode 1
+ * = ADDITIVE. Draw order poly[0] then poly[1]-on-top stands (AddPrim
+ * head-insert chain). */
+static void fx_water_tile_update(int ctr) {
+    int vA = (ctr >> 1) & 0x1F;          /* poly[0] v scroll   */
+    int uB = ((ctr + 1) >> 2) & 0x1F;    /* poly[1] u scroll  */
+    for (int y = 0; y < 32; y++) {
+        for (int x = 0; x < 32; x++) {
+            /* poly[0]: opaque copy (clut row 0 = the WATER_CLUT ramp)  */
+            unsigned iA = g_drWaveIdx[vA + y][x];
+            unsigned short cA = g_drWaveClut[0][iA];
+            int rA = cA & 31, gA = (cA >> 5) & 31, bA = (cA >> 10) & 31;
+            /* poly[1]: ADDITIVE over poly[0] (v 8..39 window), 5-bit   */
+            unsigned iB = g_drWaveIdx[8 + y][uB + x];
+            unsigned short cB = g_drWaveClut[0][iB];
+            int rB = cB & 31, gB = (cB >> 5) & 31, bB = (cB >> 10) & 31;
+            int r5 = rA + rB; if (r5 > 31) r5 = 31;
+            int g5 = gA + gB; if (g5 > 31) g5 = 31;
+            int b5 = bA + bB; if (b5 > 31) b5 = 31;
+            g_waterTileRGB[y][x][0] = (unsigned char)((r5 << 3) | (r5 >> 2));
+            g_waterTileRGB[y][x][1] = (unsigned char)((g5 << 3) | (g5 >> 2));
+            g_waterTileRGB[y][x][2] = (unsigned char)((b5 << 3) | (b5 >> 2));
+        }
+    }
+}
+
+/* the static sel tiles: the DR_WAVE right-half content tiles (u 64..95 /
+ * u 96..127 at v 0..31). HONESTY NOTE (audit V32-C): the engine's
+ * ripple/mesh read window (u 224..255, v 160..255) sits on TPAGE-FIELD
+ * pages 11/13-col x~704-832 while func_8008E5B4 writes page col 13
+ * (832,224) — the write does NOT feed the read rows on hardware; the
+ * three sel rows are populated by the map-load VRAM uploads whose exact
+ * content is NOT on disc. The PoC renders sel 0/1 = the DR_WAVE content
+ * tiles and sel 2 = the func_8008E5B4 animated tile as a VISIBLE
+ * STAND-IN (a documented deviation — NOT the hardware VRAM topology,
+ * chosen so the water-shimmer scroll is observable in the PoC). */
+static void fx_water_static_tile(int sel, unsigned char out[32][32][3]) {
+    int ux = (sel == 0) ? 64 : 96;       /* right-half content tiles */
+    for (int y = 0; y < 32; y++)
+        for (int x = 0; x < 32; x++) {
+            unsigned idx = g_drWaveIdx[y][ux + x];
+            unsigned short c = g_drWaveClut[0][idx];
+            out[y][x][0] = (unsigned char)((c & 31) << 3);
+            out[y][x][1] = (unsigned char)(((c >> 5) & 31) << 3);
+            out[y][x][2] = (unsigned char)(((c >> 10) & 31) << 3);
+        }
+}
+
+/* the water quad rasterizer: a world-space POLY_FT4 sampling a 32x32 RGB
+ * tile through an affine UV map. The prim color modulation = the snow
+ * rule (F5 = t5*prim8>>7 — the verified BG_ETC particle path); the FB
+ * blend = the engine's TPAGE ABR bits (getTPage libgpu.h:259-261):
+ * mode 1 ADDITIVE (B5+F5 clamp 31 — the MESH tpage 43 and the DROPLET
+ * tpage 45) / mode 2 SUBTRACTIVE (B5-F5 clamp 0 — the SPRITE tpage 75).
+ * v32.1 (audit V32-C): v32 used average everywhere — WRONG. */
+static void fx_blit_water_quad(Frame *fb, const int sx[4], const int sy[4],
+                               const unsigned char tile[32][32][3],
+                               int u0, int v0, int u1, int v1,
+                               int primR, int primG, int primB, int abr) {
+    int mnx = sx[0], mxx = sx[0], mny = sy[0], mxy = sy[0];
+    for (int i = 1; i < 4; i++) {
+        if (sx[i] < mnx) mnx = sx[i];
+        if (sx[i] > mxx) mxx = sx[i];
+        if (sy[i] < mny) mny = sy[i];
+        if (sy[i] > mxy) mxy = sy[i];
+    }
+    if (mxx < 0 || mnx >= (int)fb->w || mxy < 0 || mny >= (int)fb->h) return;
+    if (mnx < 0) mnx = 0;
+    if (mny < 0) mny = 0;
+    if (mxx >= (int)fb->w) mxx = (int)fb->w - 1;
+    if (mxy >= (int)fb->h) mxy = (int)fb->h - 1;
+    /* affine UV: (u0,v0)->corner0, (u1,v0)->corner1, (u0,v1)->corner2  */
+    double du = (double)(u1 - u0) / (double)(sx[1] - sx[0] + 0.0001);
+    double dv = (double)(v1 - v0) / (double)(sy[2] - sy[0] + 0.0001);
+    for (int py = mny; py <= mxy; py++) {
+        for (int px = mnx; px <= mxx; px++) {
+            double ax = px + 0.5, ay = py + 0.5;
+            int inside = 0;
+            for (int t = 0; t < 2 && !inside; t++) {
+                double bx = sx[1 + t], by = sy[1 + t];
+                double cx = sx[2 + t], cy = sy[2 + t];
+                double d1 = (bx - ax) * (sy[0] - ay) - (sx[0] - ax) * (by - ay);
+                double d2 = (cx - bx) * (sy[0 + t] - by) - (sx[0 + t] - bx) * (cy - by);
+                double d3 = (sx[0] - cx) * (sy[1 + t] - cy) - (sx[1 + t] - cx) * (sy[0] - cy);
+                int neg = (d1 < 0) || (d2 < 0) || (d3 < 0);
+                int pos = (d1 > 0) || (d2 > 0) || (d3 > 0);
+                if (!(neg && pos)) inside = 1;
+            }
+            if (!inside) continue;
+            int u = u0 + (int)((ax - sx[0]) * du);
+            int v = v0 + (int)((ay - sy[0]) * dv);
+            if (u < 0 || u > 31 || v < 0 || v > 31) continue;
+            /* flat FT4 modulation (the snow rule), then the ABR blend */
+            int fr = (tile[v][u][0] >> 3) * primR >> 7;
+            int fg = (tile[v][u][1] >> 3) * primG >> 7;
+            int fbv = (tile[v][u][2] >> 3) * primB >> 7;
+            if (fr > 31) fr = 31;
+            if (fg > 31) fg = 31;
+            if (fbv > 31) fbv = 31;
+            size_t pi = (size_t)py * fb->w + px;
+            uint8_t *p = fb->rgb + pi * 3;
+            int orr, ogg, obb;
+            if (abr == 2) {         /* subtractive B5-F5 (sprite tpage 75) */
+                orr = (p[0] >> 3) - fr; if (orr < 0) orr = 0;
+                ogg = (p[1] >> 3) - fg; if (ogg < 0) ogg = 0;
+                obb = (p[2] >> 3) - fbv; if (obb < 0) obb = 0;
+            } else {                /* additive B5+F5 clamp 31 (mesh/drop)  */
+                orr = (p[0] >> 3) + fr; if (orr > 31) orr = 31;
+                ogg = (p[1] >> 3) + fg; if (ogg > 31) ogg = 31;
+                obb = (p[2] >> 3) + fbv; if (obb > 31) obb = 31;
+            }
+            p[0] = (uint8_t)((orr << 3) | (orr >> 2));
+            p[1] = (uint8_t)((ogg << 3) | (ogg >> 2));
+            p[2] = (uint8_t)((obb << 3) | (obb >> 2));
+        }
+    }
+}
+
+/* the water FX draw pass — the map5_s00 waterRipple (mesh + 12 ripple
+ * sprites, func_800CB25C VERBATIM math) + the map1_s02 waterfall
+ * droplets. GATE (map5_s00.c:72-84): player.vx > Q12(-80) -> off,
+ * player.vz < Q12(0) -> off, flashlightAllowed && darkness -> off —
+ * the PoC camera stands in for the player (no player entity; the
+ * engine-frame coordinates via the glTF axis map: engine z = -glTF z). */
+static void sh1x_water_fx_draw(Frame *fb, const Renderer *R,
+                               const CamPose *cam) {
+    /* the anims' live state (wrT walk, seeded flags) is runtime state —
+     * the same mutation sh1x_anims_tick performs through Sh1x*; R's
+     * const covers the render inputs, the scene anim state is mutable  */
+    Sh1x *sx = (Sh1x *)&R->sc->sh1x;
+    if (!sx || !R->env) return;
+    int drew = 0;
+    for (int i = 0; i < sx->nAnims; i++) {
+        Sh1xPropAnim *a = &sx->anims[i];
+        if (a->driver == 21) {  /* waterRipple — map5_s00.c:20-231 */
+            if (drew) continue;  /* one entry per room GLB            */
+            drew = 1;
+            /* the player gate (camera proxy; engine coords)           */
+            float camX = cam->pos.x;
+            float camZeng = -cam->pos.z;
+            if (camX > -80.0f) continue;
+            if (camZeng < 0.0f) continue;
+            /* flashlightAllowed && darkness — the PoC proxy = the env
+             * Spot light mode (the darkness-with-flashlight state)     */
+            if (R->env->field_0 == SHENUM_1) continue;
+            /* spawn ONCE (func_800CB0D8, Map_WorldObjectsInit)        */
+            if (!a->seeded) {
+                a->seeded = 1;
+                for (int q = 0; q < 12; q++) {
+                    a->wrX[q] = -379904 + (int)(sh_rng_next() % 6144);
+                    /* Rng(Q12(-92.75), Q12(-91.25)-1) = the 1.5m box   */
+                    a->wrZ[q] = 30106 + (int)(sh_rng_next() % 6144);
+                    /* Rng(Q12(7.35), Q12(8.85)-1)                      */
+                    a->wrT[q] = (int)(sh_rng_next() % 4096);
+                    a->wrSel[q] = (int)(sh_rng_next() % 3);
+                }
+            }
+            /* the per-draw t walk (func_800CB25C:89-94): t += Rng(-32,
+             * 31); CLAMP_MIN_THEN_LOW(t, 0, 0xFFF) = MAX(MIN(t,4095),0)*/
+            for (int q = 0; q < 12; q++) {
+                a->wrT[q] += (int)(sh_rng_next() & 63) - 32;
+                if (a->wrT[q] > 4095) a->wrT[q] = 4095;
+                if (a->wrT[q] < 0) a->wrT[q] = 0;
+            }
+            /* the 5x5 mesh (func_800CB25C:166-231): grid x -93.5 +
+             * col*0.75, z 9.6 - row*0.75, y 0.5 (engine); 4x4 quads,
+             * per-quad UV (u 224+8j .. 231+8j, v 160+sel*32+8i .. +7);
+             * brightness = !(probe attenuation < 129) * 8 (the cone-LUT
+             * probe func_80055D78 on (-92.0, 0.5, 8.1) — approximated
+             * LIT: documented deviation); semi ABR-1 avg.            */
+            int sel = a->wrSel[0];
+            unsigned char tile[32][32][3];
+            if (sel == 2) memcpy(tile, g_waterTileRGB, sizeof(tile));
+            else fx_water_static_tile(sel, tile);
+            int brt = 8;
+            mat4 view = mat4_view_from_quat(cam->pos, cam->q);
+            for (int mi = 0; mi < 4; mi++) {
+                for (int mj = 0; mj < 4; mj++) {
+                    int sxq[4], syq[4], vis = 1;
+                    /* grid corners (engine coords -> glTF)             */
+                    float wx[4] = { -93.5f + mj * 0.75f, -93.5f + (mj + 1) * 0.75f,
+                                    -93.5f + mj * 0.75f, -93.5f + (mj + 1) * 0.75f };
+                    float wzE[4] = { 9.6f - mi * 0.75f, 9.6f - mi * 0.75f,
+                                     9.6f - (mi + 1) * 0.75f, 9.6f - (mi + 1) * 0.75f };
+                    for (int k = 0; k < 4; k++) {
+                        /* engine (x, y-down 0.5, z) -> glTF (x, -y, -z) */
+                        float gx = wx[k], gy = -0.5f, gz = -wzE[k];
+                        float px = view.m[0] * gx + view.m[4] * gy + view.m[8] * gz + view.m[12];
+                        float py = view.m[1] * gx + view.m[5] * gy + view.m[9] * gz + view.m[13];
+                        float pz = view.m[2] * gx + view.m[6] * gy + view.m[10] * gz + view.m[14];
+                        float d = -pz;
+                        if (d <= 0.05f) { vis = 0; break; }
+                        float iv = 240.0f / d;
+                        sxq[k] = (int)(px * iv) + (int)(fb->w / 2);
+                        syq[k] = (int)(py * iv) + (int)(fb->h / 2);
+                    }
+                    if (!vis) continue;
+                    fx_blit_water_quad(fb, sxq, syq, tile,
+                                       8 * mj, 8 * mi, 8 * mj + 7, 8 * mi + 7,
+                                       brt, brt, 0, 1);  /* mesh: tpage 43 = ADD */
+                }
+            }
+            /* the 12 ripple sprites (func_800CB25C:96-164): quad at
+             * (x-s, y, z+s)/(x+s, y, z+s)/(x-s, y, z-s)/(x+s, y, z-s),
+             * half-size s = Q12_MULT_PRECISE(t, Q12(1.5)) engine m;
+             * UV the full 32x32 window; brightness = MIN(MAX((1-t)*32,
+             * 0), 16); the sprite tpage blend = semi ABR-1.           */
+            for (int q = 0; q < 12; q++) {
+                int st = a->wrSel[q];
+                unsigned char rtile[32][32][3];
+                if (st == 2) memcpy(rtile, g_waterTileRGB, sizeof(rtile));
+                else fx_water_static_tile(st, rtile);
+                float sM = (float)a->wrT[q] * 1.5f / 4096.0f;
+                float ex = (float)a->wrX[q] / 4096.0f;
+                float ez = (float)a->wrZ[q] / 4096.0f;
+                if (sM <= 0.0f) continue;
+                int sxq[4], syq[4], vis = 1;
+                float wx[4] = { ex - sM, ex + sM, ex - sM, ex + sM };
+                float wzE[4] = { ez + sM, ez + sM, ez - sM, ez - sM };
+                for (int k = 0; k < 4; k++) {
+                    float gx = wx[k], gy = -0.5f, gz = -wzE[k];
+                    float px = view.m[0] * gx + view.m[4] * gy + view.m[8] * gz + view.m[12];
+                    float py = view.m[1] * gx + view.m[5] * gy + view.m[9] * gz + view.m[13];
+                    float pz = view.m[2] * gx + view.m[6] * gy + view.m[10] * gz + view.m[14];
+                    float d = -pz;
+                    if (d <= 0.05f) { vis = 0; break; }
+                    float iv = 240.0f / d;
+                    sxq[k] = (int)(px * iv) + (int)(fb->w / 2);
+                    syq[k] = (int)(py * iv) + (int)(fb->h / 2);
+                }
+                if (!vis) continue;
+                int b = ((4096 - a->wrT[q]) * 32) >> 12;
+                if (b < 0) b = 0;
+                if (b > 16) b = 16;
+                fx_blit_water_quad(fb, sxq, syq, rtile, 0, 0, 31, 31,
+                                   b, b, b, 2);  /* sprite: tpage 75 = SUB */
+            }
+            if (getenv("FOGPOC_WATERDBG"))
+                fprintf(stderr, "WATERDBG sel=%d t[]=", sel);
+                for (int q = 0; q < 12; q++)
+                    fprintf(stderr, "%s%d", q ? "," : "", a->wrT[q]);
+                fprintf(stderr, " tileRGB(0,0)=(%d,%d,%d)\n",
+                        g_waterTileRGB[0][0][0],
+                        g_waterTileRGB[0][0][1], g_waterTileRGB[0][0][2]);
+        }
+        else if (a->driver == 22) {  /* the waterfall droplets          */
+            if (!a->seeded) continue;
+            mat4 view = mat4_view_from_quat(cam->pos, cam->q);
+            /* the engine droplet (sharedFunc_800CBDA8_1_s02): a textured
+             * FT4 sampling the DR_WAVE right-half tile (u 64..95, the
+             * u0/u1 sums 0x40/0x5F at water.c:444-449) with tpage field
+             * 45 = ADDITIVE, size/brightness interpolated over the fall
+             * band (field_174..180 scratchpad GTE). PoC: 0.5 m quads,
+             * brightness fading with the fall progress (documented
+             * approximation of the band interpolation).               */
+            static unsigned char dropTile[32][32][3];
+            static int dropTileInit = 0;
+            if (!dropTileInit) {
+                fx_water_static_tile(0, dropTile);
+                dropTileInit = 1;
+            }
+            for (int q = 0; q < 10; q++) {
+                if (!a->wfAlive[q]) continue;
+                float gx = (float)a->wfX[q] / 4096.0f;
+                float gy = -(float)a->wfY[q] / 4096.0f;  /* y-down flip */
+                float gz = -(float)a->wfZ[q] / 4096.0f;
+                float prog = (float)(a->wfY[q] - 409) / 8601.0f;
+                if (prog < 0.0f) prog = 0.0f;
+                int brt = (int)(180.0f * (1.0f - 0.6f * prog)) + 20;
+                int sxq[4], syq[4], vis = 1;
+                float sM = 0.25f;               /* half-size ~0.5 m    */
+                float wx[4] = { gx - sM, gx + sM, gx - sM, gx + sM };
+                float wy[4] = { gy - sM, gy + sM, gy - sM, gy + sM };
+                float wz[4] = { gz + sM, gz + sM, gz - sM, gz - sM };
+                for (int k = 0; k < 4; k++) {
+                    float px = view.m[0] * wx[k] + view.m[4] * wy[k]
+                             + view.m[8] * wz[k] + view.m[12];
+                    float py = view.m[1] * wx[k] + view.m[5] * wy[k]
+                             + view.m[9] * wz[k] + view.m[13];
+                    float pz = view.m[2] * wx[k] + view.m[6] * wy[k]
+                             + view.m[10] * wz[k] + view.m[14];
+                    float d = -pz;
+                    if (d <= 0.05f) { vis = 0; break; }
+                    float iv = 240.0f / d;
+                    sxq[k] = (int)(px * iv) + (int)(fb->w / 2);
+                    syq[k] = (int)(py * iv) + (int)(fb->h / 2);
+                }
+                if (!vis) continue;
+                fx_blit_water_quad(fb, sxq, syq, dropTile, 0, 0, 31, 31,
+                                   brt, brt, brt, 1);  /* tpage 45 = ADD */
+            }
+        }
+    }
+    (void)sx;
 }
 
 /* v18 diagnostics — FOGPOC_LIGHTDUMP (globals declared above utils) */
@@ -10354,6 +10997,11 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
      * drawn here as well (the PoC OT is depth-sorted only for meshes).
      * All gated by the GLB's SH1X v3 fields (absent = off).            */
     fx_pass(fb, R, cam);
+    /* v32 (S18): the water FX pass (the map5_s00 ripple mesh/sprites +
+     * the map1_s02 waterfall droplets) — drawn after the flare pass,
+     * before the brightness overlay (the engine draws the water
+     * particles in the env-effect dispatch, over geometry). */
+    sh1x_water_fx_draw(fb, R, cam);
     if (getenv("FOGPOC_FXDBG"))
         fprintf(stderr, "[fx] field_0=%d lensFlareInt=%d lightModeGate=%d "
                 "fi=%d spotInt=%d nowRate=%d tgt=%d sync=%d\n",
@@ -13273,12 +13921,12 @@ int main(int argc, char **argv) {
     if (cd.hasEnv) {
         printf("camdat %s: model %s (fogon=%d nighton=%d flashlighton=%d)\n"
                "  v2 env: pair {%d,%d} weatherTarget %d bootWeather %d lensFlare %d "
-               "flashlight %d psx %d dither %d particles %d engine %d\n",
+               "flashlight %d psx %d dither %d particles %d engine %d animsDemo %d\n",
                camdatPath, cd.modelFile, cd.fogon, cd.nighton, cd.flashlighton,
                cd.envPair0, cd.envPair1,
                cd.envWeatherTarget, cd.envBootWeather, cd.envLensFlare,
                cd.envFlashlightOn, cd.envPsxWobble, cd.envDither,
-               cd.envParticles, cd.envEngine);
+               cd.envParticles, cd.envEngine, cd.envAnimsDemo);
     } else {
         printf("camdat %s: model %s (fogon=%d nighton=%d flashlighton=%d), ",
                camdatPath, cd.modelFile, cd.fogon, cd.nighton, cd.flashlighton);
@@ -13330,6 +13978,11 @@ int main(int argc, char **argv) {
             lensFlareType = cd.envLensFlare;
         if (bootWeatherTarget < 0 && cd.envWeatherTarget >= 0)
             bootWeatherTarget = cd.envWeatherTarget;     /* resolved below  */
+        /* v32.2: animsDemo folds like the other env booleans — CLI
+         * --anims-demo wins (no off-flag to distinguish, so the fold
+         * only applies when the CLI left it at the default 0). */
+        if (g_animsDemo == 0 && cd.envAnimsDemo >= 0)
+            g_animsDemo = cd.envAnimsDemo ? 1 : 0;
     }
 
     /* ---- v4 audit mode: dump the flashlight math primitives over a

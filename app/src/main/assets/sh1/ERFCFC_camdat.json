@@ -1,0 +1,56 @@
+{
+ "format": "camdat",
+ "version": 1,
+ "generatedBy": "sh1 v32.2 scene set",
+ "models": [
+  {
+   "file": "ERFCFC.glb",
+   "fogon": false,
+   "nighton": false,
+   "flashlighton": false,
+   "env": {
+    "pair": [
+     2,
+     2
+    ],
+    "weatherTarget": -1,
+    "bootWeather": -1,
+    "lensFlare": 0,
+    "flashlightOn": false,
+    "psxWobble": true,
+    "dither": true,
+    "particles": false,
+    "engine": true,
+    "animsDemo": true
+   },
+   "tracks": [
+    {
+     "id": "stone",
+     "name": "stone ambient",
+     "type": "line",
+     "enabled": true,
+     "fovDeg": 55,
+     "loopMode": "pingPong",
+     "start": [
+      -136.0,
+      2.5,
+      136.0
+     ],
+     "end": [
+      -136.716,
+      2.5,
+      135.455
+     ],
+     "speedMS": 0.25,
+     "lookMode": "point",
+     "lookAt": [
+      -139.5,
+      1.4,
+      140.6
+     ],
+     "durationSec": 60.0
+    }
+   ]
+  }
+ ]
+}

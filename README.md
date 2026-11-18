@@ -11,11 +11,33 @@ tick lockstep) via the NDK — no OpenGL, no game engine, no Java renderer:
 > **This project's **CODE** is licenced under the GPL but any included assets **ARE NOT**. Assets are copyrighted by Konami. Using any assets for commercial use is **strictly prohibited** and must be removed immediately** — see
 > [Konami's copyright notice](https://eu-support.konami.com/hc/en-gb/articles/9648771731479-Copyrights-Career-Opportunities-Goodies).
 
-The bundled sample scene is the **HP0003 hospital corridor** (interior day
-environment — the engine runs no weather particles indoors), with the
-camera drifting along a CamTrack corridor track. Build your own scenes
+The bundled scenes (v10, the v32.2 engine): the **HP0003 hospital
+corridor** (interior day), the **THRF9FD night streets** (with mapLink
+neighbors THRF9FC/FE) and the **SU0203 nightmare-school fan room**, plus
+the v32 special-case set — **18 more scenes** covering every animated
+special case in the game: the hospital 16-fan ceiling array, the
+wheelchair wheels, the rattling reception/locker doors, the boiler
+spinners, the ferris wheel, the balloon floaters, the corpse walker, the
+carousel, the hospital elevator doors, the levitating stone, the spinning
+bin, the scroll belt, the chained door swing, the waterfall, the fence
+fall, the water ripples and the TV room. The camera drifts along an
+authored CamTrack in each scene; the engine rotates through the manifest
+at every wallpaper restart. Build your own scenes
 from your own copy of the game with the
 [PoC repo's tools](https://github.com/sh-clock/PoC) (see its TOOLS.md).
+
+## Adding a scene (the aim-7 protocol)
+
+1. Drop `YOURROOM.glb` + `YOURROOM_camdat.json` into
+   `app/src/main/assets/sh1/` (rip with the PoC `tools/ipd2gltf.py`,
+   author the camdat with the PoC `tools/camtrack.html`).
+2. Add one entry to `app/src/main/assets/sh1/scenes.json`:
+   `{"glb": "YOURROOM.glb", "camdat": "YOURROOM_camdat.json"}`.
+3. Push to main — CI bumps the version by one minor level (e.g.
+   1.7.36 -> 1.7.37), rebuilds and publishes both APKs as a Release.
+   No Java edits required; the camdat's `models[].env` object carries the
+   per-scene environment (fog pair, weather, lens flare, flashlight,
+   `animsDemo` to play the cutscene/event-gated drivers).
 
 ## Build
 

@@ -1,0 +1,56 @@
+{
+ "format": "camdat",
+ "version": 1,
+ "generatedBy": "sh1 v32.2 scene set",
+ "models": [
+  {
+   "file": "SPU0100.glb",
+   "fogon": false,
+   "nighton": false,
+   "flashlighton": false,
+   "env": {
+    "pair": [
+     2,
+     2
+    ],
+    "weatherTarget": -1,
+    "bootWeather": -1,
+    "lensFlare": 0,
+    "flashlightOn": false,
+    "psxWobble": true,
+    "dither": true,
+    "particles": false,
+    "engine": true,
+    "animsDemo": false
+   },
+   "tracks": [
+    {
+     "id": "fan_array",
+     "name": "fan_array ambient",
+     "type": "line",
+     "enabled": true,
+     "fovDeg": 55,
+     "loopMode": "pingPong",
+     "start": [
+      53.2,
+      1.6,
+      -30.0
+     ],
+     "end": [
+      54.1,
+      1.6,
+      -30.0
+     ],
+     "speedMS": 0.25,
+     "lookMode": "point",
+     "lookAt": [
+      53.2,
+      2.4,
+      -32.5
+     ],
+     "durationSec": 60.0
+    }
+   ]
+  }
+ ]
+}
