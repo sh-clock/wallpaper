@@ -2,11 +2,14 @@ package com.sh1.poc;
 
 import android.service.wallpaper.WallpaperService;
 import android.view.SurfaceHolder;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.security.MessageDigest;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -78,20 +81,29 @@ public class Sh1WallpaperService extends WallpaperService {
             if (sAssetsReady) return;
             File dst = new File(svc.getFilesDir(), "sh1");
             String[] names = assetList(svc);
-            boolean missing = false;
-            for (String f : names) {
-                if (f.endsWith(".ok")) continue;
-                File ok = new File(dst, f + ".ok");
-                if (!ok.exists()) { missing = true; break; }
-            }
-            if (!missing && names.length > 0) { sAssetsReady = true; return; }
             dst.mkdirs();
             for (String f : names) {
                 if (f.endsWith(".ok")) continue;
-                File out = new File(dst, f);
-                File tmp = new File(dst, f + ".tmp");
+                /* v10.1 (audit A-D1 CRITICAL): the .ok stamp now carries
+                 * the asset's SHA-256 — an EXISTING stamp whose hash no
+                 * longer matches the APK asset means the asset CHANGED
+                 * (an app update re-shipping scenes.json/scenes) and is
+                 * RE-COPIED. The v8/v10 existence-only stamp skipped
+                 * modified assets forever: updating users kept the stale
+                 * 3-entry scenes.json and the 18 new scenes never ran.
+                 * Stamps written by older versions (empty .ok files)
+                 * migrate automatically (empty != hash -> re-copy).     */
+                String want;
+                try (InputStream in = svc.getAssets().open("sh1/" + f)) {
+                    want = sha256Hex(in);
+                } catch (IOException e) {
+                    throw new RuntimeException("asset read failed: " + f, e);
+                }
                 File ok = new File(dst, f + ".ok");
-                if (ok.exists()) continue;   /* fully copied earlier */
+                File out = new File(dst, f);
+                String have = readTextIfSmall(ok);   /* null when absent */
+                if (want.equals(have)) continue;      /* identical — keep */
+                File tmp = new File(dst, f + ".tmp");
                 try (InputStream in = svc.getAssets().open("sh1/" + f);
                      OutputStream os = new FileOutputStream(tmp)) {
                     byte[] buf = new byte[64 * 1024];
@@ -109,13 +121,47 @@ public class Sh1WallpaperService extends WallpaperService {
                     tmp.delete();
                     throw new RuntimeException("asset rename failed: " + f);
                 }
+                /* the content stamp: written AFTER the rename, so an
+                 * interrupted stamp write re-copies next boot (safe) */
                 try {
-                    ok.createNewFile();     /* completion stamp */
+                    FileOutputStream fs = new FileOutputStream(ok);
+                    fs.write(want.getBytes("UTF-8"));
+                    fs.close();
                 } catch (IOException e) {
                     throw new RuntimeException("stamp failed: " + f, e);
                 }
             }
+            /* stale outputs from an older asset set (removed from the
+             * APK) are left in place: the manifest only references
+             * shipped names, so they are inert. */
             sAssetsReady = true;
+        }
+    }
+
+    private static String sha256Hex(InputStream in) throws IOException {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] buf = new byte[64 * 1024];
+            int n;
+            while ((n = in.read(buf)) > 0) md.update(buf, 0, n);
+            StringBuilder sb = new StringBuilder();
+            for (byte b : md.digest()) sb.append(String.format("%02x", b));
+            return sb.toString();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 unavailable", e);
+        }
+    }
+
+    private static String readTextIfSmall(File f) {
+        if (!f.exists()) return null;
+        try (InputStream in = new FileInputStream(f)) {
+            ByteArrayOutputStream bo = new ByteArrayOutputStream();
+            byte[] buf = new byte[64];
+            int n;
+            while ((n = in.read(buf)) > 0 && bo.size() < 256) bo.write(buf, 0, n);
+            return bo.toString("UTF-8").trim();
+        } catch (IOException e) {
+            return null;              /* unreadable stamp -> re-copy */
         }
     }
 

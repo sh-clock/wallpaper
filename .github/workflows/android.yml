@@ -2,7 +2,10 @@ name: android-ci
 
 on:
   push:
-    branches: [main]
+    branches: [main]    # v10.3 comment CORRECTION (audit A): the earlier
+                        # 'corrupted glob ain]' claim was WRONG — the file
+                        # was always [main] on GitHub (a terminal rendering
+                        # artifact ate the '[m' sequence). Kept explicit.
     tags: ['v*']     # manual PAT tags rebuild + release on demand
   pull_request:
   workflow_dispatch:
@@ -11,6 +14,15 @@ permissions:
   contents: write   # the bump job commits version.properties + pushes the
                     # version tag; the build publishes APKs as RELEASE
                     # ASSETS (free, unlike workflow artifacts)
+
+# v10.3 (audit C-B1): serialize same-ref pushes — two pushes inside ~2
+# min both bump at their own SHA and collide on the same v1.7.x tag
+# (the second's git push fails -> its build runs (if: always()) but
+# releases NOTHING). The queue re-checks out main after the first bump
+# landed and bumps the NEXT minor. cancel-in-progress FALSE on purpose.
+concurrency:
+  group: android-ci-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   # ---- v7 (task 7): asset-change version bump -------------------------------
@@ -53,12 +65,15 @@ jobs:
           else
             git fetch --depth=1 origin "$BEFORE" || BEFORE=$(git rev-parse HEAD^)
           fi
-          # v10.2: engine/code changes release too (not just asset drops)
-          # — the v32 engine sync would otherwise build but never release.
+          # v10.3: engine/code changes release too (not just asset drops)
+          # — the v32 engine sync would otherwise build but never release;
+          # res/** + settings.gradle + gradle.properties join the set
+          # (audit A-M: a res-only change must release too).
           CHANGED=$(git diff --name-only "$BEFORE" HEAD -- \
-            app/src/main/assets/ app/src/main/cpp/ \
-            app/src/main/java/ app/src/main/AndroidManifest.xml \
-            app/build.gradle build.gradle || true)
+            app/src/main/assets/ app/src/main/cpp/ app/src/main/java/ \
+            app/src/main/res/ app/src/main/AndroidManifest.xml \
+            app/build.gradle build.gradle settings.gradle \
+            gradle.properties || true)
           if [ -z "$CHANGED" ]; then
             echo "no asset changes - no bump"
             echo "did=0" >> "$GITHUB_OUTPUT"

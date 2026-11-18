@@ -7033,20 +7033,15 @@ static int fx_flare_target_rate(int light_eff_pow, int scr_z, int scr_ang_z) {
     return fx_min(ret, 6144);                   /* MIN(tgt, Q12(1.5)) */
 }
 
-/* ---- sprite blit: SemiTrans mode-1 (50% average) on the PoC fb ------
- * engine: POLY_FT4 setSemiTrans(1) — GPU ABR mode 1 avg blend: out =
- * (dst5 + texel5*prim>>7... wait — mode 1 is (B+F)/2 per channel 5-bit.
- * The snow path already implements ABR1 as B+F additive (tpage 44 bits
- * 5-6 = ABR 1?) — CHECK: snow_blit_flake uses B + F saturating. The
- * flare polys are ALSO tpage 44 with setSemiTrans(1): ABR bits come
- * from tpage 44 = bits 5-6 of the tpage VALUE 44>>5 = 1. mode 1 on the
- * real GPU = B/2 + F/2. The snow header documents the engine's snow as
- * additive — that was verified against DuckStation for snow (tpage 44
- * ABR1 code). The flare sprites use the SAME primitive class; to keep
- * ONE consistent engine-exact blend path (and match the verified snow
- * baseline) the flare blit uses the SAME additive rule as snow flakes
- * (snow_blit_flake: or5 = (dst>>3) + f, saturate, expand). If a future
- * pixel audit proves avg-blend instead, this ONE function changes.   */
+/* ---- sprite blit: setSemiTrans(1) + the tpage ABR bits -------------
+ * engine: POLY_FT4 setSemiTrans(1) + tpage 44 — setSemiTrans only SETS
+ * THE SEMI-FLAG (libgpu.h:253-254); the BLEND MODE is tpage bits 5-6:
+ * 44>>5&3 = 01 = ADDITIVE (1.0xB + 1.0xF, saturating 5-bit per
+ * channel). The snow/rain/flare sprites (tpage 44) and the DR_WAVE
+ * tiles (tpage 45, same bits) all blend B+F — v32.2 relabel of the
+ * v31 'mode-1 average' comments (the audit V32-C follow-up): the
+ * visuals were pixel-verified before AND after; the change is comment-
+ * only for the sprites (the code already did B+F).                      */
 static void fx_blit_sprite_quad(
     Frame *fb, int x0, int y0, int x1, int y1, int x2, int y2, int x3, int y3,
     const unsigned char *idx_plane, int sw, int sh,
@@ -7117,10 +7112,15 @@ static void fx_blit_sprite_quad(
 /* v31 (M4): Gouraud triangle paint — the engine POLY_G3/G4 primitive
  * (func_8008EA68's caustic ring): the GTE interpolates the u8 corner
  * colors linearly per screen pixel; the GPU truncates each channel to
- * 5 bits on write. semi=1: ABR-1 average (B5+F5)>>1 (the ring's semi
- * G4/G3 pair, tpage ABR bits from the trailing SetDrawTPage(..,32) =
- * 32>>5 = mode 1); semi=0: opaque REPLACE. Engine quad split = GPU
- * tris (v0,v1,v2)+(v1,v2,v3). Colors are the engine's u8 tuples.     */
+ * 5 bits on write. semi=1: tpage 32 (the trailing SetDrawTPage(..,32),
+ * decomp lens_flare.c:821-823) — 32>>5&3 = 01 = ADDITIVE, and the OT
+ * order proves it applies to the ring: the DR_TPAGE is AddPrim'd to the
+ * SAME spD4 bucket AFTER the ring prims = drawn FIRST (OTs draw in
+ * reverse insertion order), so the ring's semi G4/G3 pair renders with
+ * ABR 01 = B+F saturating 5-bit (v32.2 fix — was (B5+F5)>>1, a full mode
+ * wrong; pixel re-verified after the change). semi=0: opaque REPLACE.
+ * Engine quad split = GPU tris (v0,v1,v2)+(v1,v2,v3). Colors are the
+ * engine's u8 tuples.                                              */
 static void fx_blit_gouraud_tri(Frame *fb, int x0, int y0, const int c0[3],
                                 int x1, int y1, const int c1[3],
                                 int x2, int y2, const int c2[3], int semi) {
@@ -7164,7 +7164,7 @@ static void fx_blit_gouraud_tri(Frame *fb, int x0, int y0, const int c0[3],
                 int f5 = ci >> 3;
                 if (semi) {
                     int b5 = p[ch] >> 3;
-                    int o5 = (b5 + f5) >> 1;
+                    int o5 = b5 + f5;          /* tpage 32 ABR 01: ADDITIVE */
                     if (o5 > 31) o5 = 31;
                     p[ch] = (uint8_t)((o5 << 3) | (o5 >> 2));
                 } else {
@@ -10068,7 +10068,8 @@ static void sh1x_water_fx_draw(Frame *fb, const Renderer *R,
              * per-quad UV (u 224+8j .. 231+8j, v 160+sel*32+8i .. +7);
              * brightness = !(probe attenuation < 129) * 8 (the cone-LUT
              * probe func_80055D78 on (-92.0, 0.5, 8.1) — approximated
-             * LIT: documented deviation); semi ABR-1 avg.            */
+             * LIT: documented deviation); mesh quads tpage 43 bits 5-6 =
+             * 01 = ADDITIVE (B+F saturating — v32.2 relabel).          */
             int sel = a->wrSel[0];
             unsigned char tile[32][32][3];
             if (sel == 2) memcpy(tile, g_waterTileRGB, sizeof(tile));
@@ -10098,14 +10099,18 @@ static void sh1x_water_fx_draw(Frame *fb, const Renderer *R,
                     if (!vis) continue;
                     fx_blit_water_quad(fb, sxq, syq, tile,
                                        8 * mj, 8 * mi, 8 * mj + 7, 8 * mi + 7,
-                                       brt, brt, 0, 1);  /* mesh: tpage 43 = ADD */
+                                       brt, 0, 0, 1);  /* mesh: tpage 43 = ADD;
+                                       prim color (field_160, 0, 0) r-only —
+                                       map5_s00.c:223-224 (v32.3 audit fix:
+                                       g channel was brt) */
                 }
             }
             /* the 12 ripple sprites (func_800CB25C:96-164): quad at
              * (x-s, y, z+s)/(x+s, y, z+s)/(x-s, y, z-s)/(x+s, y, z-s),
              * half-size s = Q12_MULT_PRECISE(t, Q12(1.5)) engine m;
              * UV the full 32x32 window; brightness = MIN(MAX((1-t)*32,
-             * 0), 16); the sprite tpage blend = semi ABR-1.           */
+             * 0), 16); the sprite tpage 75 bits 5-6 = 10 = SUBTRACTIVE
+             * (B5-F5 clamp 0 — v32.2 relabel of the stale 'ABR-1').    */
             for (int q = 0; q < 12; q++) {
                 int st = a->wrSel[q];
                 unsigned char rtile[32][32][3];
@@ -10136,13 +10141,14 @@ static void sh1x_water_fx_draw(Frame *fb, const Renderer *R,
                 fx_blit_water_quad(fb, sxq, syq, rtile, 0, 0, 31, 31,
                                    b, b, b, 2);  /* sprite: tpage 75 = SUB */
             }
-            if (getenv("FOGPOC_WATERDBG"))
+            if (getenv("FOGPOC_WATERDBG")) {
                 fprintf(stderr, "WATERDBG sel=%d t[]=", sel);
                 for (int q = 0; q < 12; q++)
                     fprintf(stderr, "%s%d", q ? "," : "", a->wrT[q]);
                 fprintf(stderr, " tileRGB(0,0)=(%d,%d,%d)\n",
                         g_waterTileRGB[0][0][0],
                         g_waterTileRGB[0][0][1], g_waterTileRGB[0][0][2]);
+            }
         }
         else if (a->driver == 22) {  /* the waterfall droplets          */
             if (!a->seeded) continue;
@@ -10265,6 +10271,10 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
                             da->mvPend[2], da->mvPend[3],
                             da->mvPendVel[0], da->mvPendVel[1],
                             da->mvPendVel[2], da->mvPendVel[3]);
+                if (da->driver == 4 || da->driver == 5 || da->driver == 8)
+                    /* v32.2 debug: the raw swing-family live state */
+                    fprintf(stderr, " rawVy=%d rawVel=%d",
+                            da->rawVy, da->rawVel);
                 fprintf(stderr, "\n");
             }
         }
