@@ -635,3 +635,41 @@ What the rename touches and why it is safe:
 Identity: applicationId com.fog.sh.wallpaper (versionCode 67,
 versionName 10.7, label "Fog Wallpaper"), arm64-v8a only, 16 KB
 page-aligned, signed with the project keystore.
+
+---
+
+## v11.0 addendum — THE CORRECT-SOURCE RESET (the v10_7 base + the v34 PoC engine + the 44-scene corpus)
+
+The repo this addendum ships into was reset: the prior repo content was
+an extremely broken alpha build (a custom com.sh1.poc shell), replaced
+entirely by the correct fog-wallpaper-v10_7 source zip (this file's own
+v5–v10.7 history is that source's genuine engineering log — kept
+verbatim). The v11.0 transplant on top of that base:
+
+* **Engine**: `cpp/fog_poc.c` is the v34 PoC engine (14913 lines ->
+  15680 after the graft): EXTRAs-authoritative animations (the camdat
+  env `animsDemo` no longer gates playback — the GLB's own SH1X propAnims
+  are the authority), the waterLive semi-trans-additive water floor
+  (RP_ADD_TEX, field_E=45) and the tick-discipline water scroll. The
+  v10_7 Android glue grafted as additive `#ifdef __ANDROID__` blocks:
+  the printf->logcat redirect at the file top (the W-D9 placement), the
+  sh1_android_* seam block + run_window_android before the
+  platform-backends #endif, the run_realtime `#elif __ANDROID__`
+  dispatch, the `--hw` parse and the `#ifdef SH1_HW_RENDER` end include.
+  TWO documented adaptations: `live_apply_env_transition` ->
+  `live_apply_preset` (the v34 lineage never carried the v9-F20
+  gradual-blend driver; the Auto Mode boundary lands as an instant
+  Gfx_MapEnvSet — the JNI/Java surface unchanged), and the ALOGI/printf
+  defines moved to the top. Desktop behavior proven BYTE-IDENTICAL to
+  the PoC binary (md5-equal deterministic shots, THRF9FD + SU0203 v33).
+* **Scenes**: ONE camdat.json enumerates 44 rooms (41 v33 GLBs +
+  HP0003/THRF9FC/THRF9FE), env derived VERBATIM from each GLB's
+  SH1X.env, bounds scraped from the engine's own Box3.setFromObject,
+  47 tracks (3 user-authored fixed + 17 prior-repo ambient lines + the
+  v10_7 THRF9FD lines + 25 conservative cell-center fixed). The prior
+  repo's per-scene *_camdat.json files + scenes.json manifest are gone.
+* **Java**: `copyAssetsIfNeeded` enumerates assets/sh1 dynamically —
+  adding a scene is a GLB drop + a camdat entry (aim 7).
+* **Versioning**: version.properties at the repo root; CI bumps ONE
+  minor per asset change (1.7.40 -> 1.7.41 ...); no more v11–v27 jumps —
+  the lineage continues forward from the prior repo's 1.7.40.
