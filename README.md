@@ -49,8 +49,53 @@ wallpaper.
    can be authored in the camtrack editor (or derived: the editor reads
    the GLB's SH1X.env and proposes the room-original defaults).
 3. Commit and push to `main`. CI detects the asset change, builds both
-   APKs, bumps the version ONE minor level (10.7 → 10.8) and publishes
-   the release — no other step is needed.
+   APKs and publishes the release — no other step is needed.
+
+## Versioning (the 1.0.0 scheme)
+
+The version lives in `version.properties` and the CI bump job is its only
+writer. Starting from **1.0.0**:
+
+* an **asset-only** change (scenes under `app/src/main/assets/`) bumps the
+  PATCH level — 1.0.0 → 1.0.1 → 1.0.2 …
+* a change that also touches the **engine/native/shell/gradle** code bumps
+  the MINOR level — 1.0.0 → 1.1.0 …
+* `versionCode` increments by 1 on every bump; the tag is `v<name>`.
+
+The old series (v1.7.x / v10.x / v11) are retired.
+
+## Release signing
+
+The release APK is signed with the key from the repo secrets when they are
+set, falling back to the committed shared **test** key (`sh1.keystore`,
+password `sh1wall`) until then. To use your own key:
+
+1. Generate a keypair locally (never commit it):
+
+   ```sh
+   keytool -genkeypair -v \
+     -keystore sh1-release.keystore \
+     -alias sh1release -keyalg RSA -keysize 4096 -validity 10000 \
+     -storetype PKCS12
+   ```
+
+   (Answer the dname prompts — CN/O/L/C — and set BOTH passwords. Keep the
+   `.keystore` file and its passwords safe: a Play-Store-style upgrade
+   signature requires the SAME key forever.)
+
+2. Add the four repo secrets (repo → Settings → Secrets and variables →
+   Actions → New repository secret):
+
+   | Secret | Value |
+   |---|---|
+   | `WALLPAPER_KEYSTORE_BASE64` | `base64 -w0 sh1-release.keystore` output |
+   | `WALLPAPER_KEYSTORE_PASSWORD` | the keystore password |
+   | `WALLPAPER_KEY_ALIAS` | `sh1release` |
+   | `WALLPAPER_KEY_PASSWORD` | the key password |
+
+3. Done — the next CI release build signs with your key (the base64 is
+   decoded at build time; the key itself never enters the repo or any
+   artifact).
 
 Users can also import their own GLBs + camdats on-device (BYOA) without a
 rebuild — the scene picker is dynamic (the camdat's `models[]` drives it).

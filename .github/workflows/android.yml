@@ -19,17 +19,19 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # ---- asset-change version bump (aim 7) ------------------------------------
+  # ---- version bump (aim 7, THE 1.0.0 SCHEME) --------------------------------
   # Every push to main that adds/modifies app/src/main/assets/** (a new
-  # scene GLB + its camdat.json models[] entry) OR the engine/native code
-  # OR the app shell bumps the version ONE minor level (10.7 -> 10.8 ->
-  # 10.9 ...; versionCode 67 -> 68 -> 69 ...) in version.properties,
-  # commits with [skip ci], and pushes BOTH the commit and the tag to
-  # main. ONE canonical linear series — the old repo's competing
-  # v1.7.x / v11.0.x tags are RETIRED with the reset. A GITHUB_TOKEN push
-  # cannot re-trigger workflows (anti-recursion), so the build job below
-  # runs AFTER the bump (needs:) with ref: main and publishes the release
-  # itself. Pushes without releasable changes do not bump.
+  # scene GLB + its camdat.json models[] entry) bumps the version ONE PATCH
+  # level (1.0.0 -> 1.0.1 -> 1.0.2 ...). A push that ALSO touches the
+  # engine/native code, the Java shell, the resources, the manifest or the
+  # gradle wiring bumps ONE MINOR level instead (1.0.0 -> 1.1.0).
+  # versionCode +1 every bump. The bump commits with [skip ci] and pushes
+  # BOTH the commit and the tag to main. ONE canonical linear series —
+  # the old v1.7.x / v10.x / v11 tags are RETIRED with the reset. A
+  # GITHUB_TOKEN push cannot re-trigger workflows (anti-recursion), so the
+  # build job below runs AFTER the bump (needs:) with ref: main and
+  # publishes the release itself. Pushes without releasable changes do
+  # not bump.
   bump:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -42,7 +44,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Detect asset changes and bump the version (ONE minor level)
+      - name: Detect changes and bump the version (asset=PATCH, code=MINOR)
         id: bump
         run: |
           set -e
@@ -52,38 +54,52 @@ jobs:
           else
             git fetch --depth=1 origin "$BEFORE" || BEFORE=$(git rev-parse HEAD^)
           fi
-          # the releasable set: the scene corpus (GLBs + camdat.json — a
-          # new scene = an asset drop), the engine/native code, the Java
-          # shell, the resources, the manifest, the gradle wiring and
-          # version.properties itself.
-          CHANGED=$(git diff --name-only "$BEFORE" HEAD -- \
-            app/src/main/assets/ app/src/main/cpp/ app/src/main/java/ \
+          # the releasable set — split by bump class:
+          #   ASSET set  = the scene corpus (GLBs + camdat.json)  -> PATCH
+          #   CODE set   = engine/native/shell/res/gradle wiring -> MINOR
+          ASSET=$(git diff --name-only "$BEFORE" HEAD -- \
+            app/src/main/assets/ || true)
+          CODE=$(git diff --name-only "$BEFORE" HEAD -- \
+            app/src/main/cpp/ app/src/main/java/ \
             app/src/main/res/ app/src/main/AndroidManifest.xml \
             app/build.gradle build.gradle settings.gradle \
-            gradle.properties gradle/ version.properties || true)
-          if [ -z "$CHANGED" ]; then
+            gradle.properties gradle/ || true)
+          if [ -z "$ASSET" ] && [ -z "$CODE" ]; then
             echo "no asset changes - no bump"
             echo "did=0" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           echo "assets changed:"
-          echo "$CHANGED"
+          echo "$ASSET"
+          echo "code changed:"
+          echo "$CODE"
           NAME=$(grep '^versionName=' version.properties | cut -d= -f2)
           MAJ=$(echo "$NAME" | cut -d. -f1)
           MIN=$(echo "$NAME" | cut -d. -f2)
-          NEWMIN=$((MIN + 1))
-          NEWNAME="$MAJ.$NEWMIN"
+          PAT=$(echo "$NAME" | cut -d. -f3)
+          PAT=${PAT:-0}
+          if [ -n "$CODE" ]; then
+            # code/engine change -> ONE MINOR level (1.0.0 -> 1.1.0)
+            NEWMIN=$((MIN + 1))
+            NEWNAME="$MAJ.$NEWMIN.0"
+            KIND="minor"
+          else
+            # asset-only change -> ONE PATCH level (1.0.0 -> 1.0.1)
+            NEWPAT=$((PAT + 1))
+            NEWNAME="$MAJ.$MIN.$NEWPAT"
+            KIND="patch"
+          fi
           NEWCODE=$(( $(grep '^versionCode=' version.properties | cut -d= -f2) + 1 ))
           printf 'versionName=%s\nversionCode=%s\n' "$NEWNAME" "$NEWCODE" > version.properties
           git config user.name  "sh1-release-bot"
           git config user.email "sh1-release-bot@users.noreply.github.com"
           git add version.properties
-          git commit -m "bump version to $NEWNAME (asset change) [skip ci]"
+          git commit -m "bump version to $NEWNAME ($KIND change) [skip ci]"
           git tag "v$NEWNAME"
           git push origin main "v$NEWNAME"
           echo "did=1" >> "$GITHUB_OUTPUT"
           echo "version=$NEWNAME" >> "$GITHUB_OUTPUT"
-          echo "new version: $NEWNAME"
+          echo "new version: $NEWNAME ($KIND)"
 
   # ---- build + smoke + release ---------------------------------------------
   build:
@@ -109,7 +125,14 @@ jobs:
       - name: Build debug APK
         run: ./gradlew assembleDebug --no-daemon --stacktrace
 
-      - name: Build release APK (signed with the committed sh1.keystore)
+      - name: Build release APK (signed with the GitHub-secrets key; falls
+               back to the committed shared test keystore when the secrets
+               are unset — see README 'Release signing')
+        env:
+          WALLPAPER_KEYSTORE_BASE64:   ${{ secrets.WALLPAPER_KEYSTORE_BASE64 }}
+          WALLPAPER_KEYSTORE_PASSWORD: ${{ secrets.WALLPAPER_KEYSTORE_PASSWORD }}
+          WALLPAPER_KEY_ALIAS:         ${{ secrets.WALLPAPER_KEY_ALIAS }}
+          WALLPAPER_KEY_PASSWORD:      ${{ secrets.WALLPAPER_KEY_PASSWORD }}
         run: ./gradlew assembleRelease --no-daemon --stacktrace
 
       - name: Smoke test — verify the APKs exist, are zips and contain the native lib + the scene corpus

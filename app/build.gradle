@@ -46,14 +46,15 @@ android {
         // the arm64-only build already excludes all pre-23 devices
         minSdk 23
         targetSdk 35
-        // aim 7: the version lives in /version.properties — the CI's asset-
-        // change bump job is the ONLY writer (one minor level per releasable
-        // change: 10.7 -> 10.8 -> 10.9 ...; versionCode +1 each). No more
-        // competing v11/v1.7.x series.
+        // aim 7: the version lives in /version.properties — the CI's bump
+        // job is the ONLY writer. THE 1.0.0 SCHEME (the user directive):
+        //   asset-only change  -> PATCH  1.0.0 -> 1.0.1
+        //   code/engine change -> MINOR  1.0.0 -> 1.1.0
+        // versionCode +1 each. No more v10.x / v1.7.x / v11 series.
         def vprops = new Properties()
         file('../version.properties').withInputStream { vprops.load(it) }
-        versionCode Integer.parseInt(vprops.getProperty('versionCode', '67'))
-        versionName vprops.getProperty('versionName', '10.7')
+        versionCode Integer.parseInt(vprops.getProperty('versionCode', '1'))
+        versionName vprops.getProperty('versionName', '1.0.0')
         ndk {
             // SH1 engine: arm64 devices only (software rasterizer, one .so)
             abiFilters 'arm64-v8a'
@@ -95,13 +96,31 @@ android {
     }
 
     signingConfigs {
-        sh1 {
-            def ks = rootProject.file('sh1.keystore')
-            if (ks.exists()) {
-                storeFile ks
-                storePassword 'sh1wall'
-                keyAlias 'sh1'
-                keyPassword 'sh1wall'
+        // THE RELEASE KEY — GitHub secrets first (the user's own key:
+        // WALLPAPER_KEYSTORE_BASE64 + WALLPAPER_KEYSTORE_PASSWORD +
+        // WALLPAPER_KEY_ALIAS + WALLPAPER_KEY_PASSWORD; see README
+        // 'Release signing'). Falls back to the committed shared test
+        // key sh1.keystore (test builds only), then the debug key.
+        release {
+            def b64 = System.getenv('WALLPAPER_KEYSTORE_BASE64')
+            def ksPass = System.getenv('WALLPAPER_KEYSTORE_PASSWORD')
+            def kAlias = System.getenv('WALLPAPER_KEY_ALIAS')
+            def kPass  = System.getenv('WALLPAPER_KEY_PASSWORD')
+            if (b64 && ksPass && kAlias && kPass) {
+                def ksFile = new File(buildDir, 'release.keystore')
+                ksFile.bytes = Base64.getDecoder().decode(b64.replaceAll('\\s', ''))
+                storeFile ksFile
+                storePassword ksPass
+                keyAlias kAlias
+                keyPassword kPass
+            } else {
+                def ks = rootProject.file('sh1.keystore')
+                if (ks.exists()) {
+                    storeFile ks
+                    storePassword 'sh1wall'
+                    keyAlias 'sh1'
+                    keyPassword 'sh1wall'
+                }
             }
         }
     }
@@ -119,9 +138,11 @@ android {
                 }
             }
             debuggable false
-            // committed personal keystore if present, else debug-signed
-            signingConfig rootProject.file('sh1.keystore').exists()
-                    ? signingConfigs.sh1 : signingConfigs.debug
+            // the secrets-key if provided, the committed test keystore if
+            // present, else debug-signed (local builds without secrets)
+            signingConfig (System.getenv('WALLPAPER_KEYSTORE_BASE64')
+                          || rootProject.file('sh1.keystore').exists())
+                    ? signingConfigs.release : signingConfigs.debug
         }
     }
 
