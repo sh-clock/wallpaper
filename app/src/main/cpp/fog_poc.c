@@ -1462,6 +1462,19 @@ typedef struct {
                                      * dark-room flashlight-ON signature    */
     char envSrc[80];
     TvPaint tvp;                     /* v36: the tvPaint EXTRAs (map4_s03)  */
+    /* v37: SH1X.waterFloor — the ROOM's first fullPage texture slot's CLUT
+     * row 0 (16 entries, raw 15-bit). The DWAVE floor redirect
+     * (func_8008E4EC, lens_flare.c:497-502, img0 {tPage{0,13}} all-zero
+     * -> Material_FsImageApply materials.c:130-160: field_E=45 4bpp page
+     * 13 x 832 ABR-1 additive, field_10=0 -> CLUT (0,0)) makes the floor
+     * quads read the live tile AS 4bpp NIBBLES through THIS palette —
+     * the slot-0 palette = the room's first fullPage material's TIM
+     * (WorldMap_TexturesInit map.c:137-190: slot i's CLUT strip at
+     * (16*i, 0); Texture_Get materials.c:178-222 assigns slots in PLM
+     * material-table order; LmFilter_IsHalfPage map.c:1226-1241 = the
+     * 'H'-name-suffix split). */
+    int hasWaterFloorClut;
+    unsigned short waterFloorClut[16];
 } Sh1x;
 
 static void sh1x_free(Sh1x *sx) {
@@ -1489,6 +1502,11 @@ static int   g_animsForced = -1;       /* CLI: --anims-demo / --no-anims */
 static float g_sh1xLightFlicker = 1.0f;/* lightFlicker live multiplier   */
 static int g_sh1xBeltScroll;      /* v32: scrollBelt D_800F48A4 (raw Q12) */
 static unsigned char g_waterTileRGB[32][32][3]; /* v32: the live DR_WAVE tile */
+static unsigned short g_waterTile15[32][32];  /* v37: the same composite as RAW
+                                          * 15-bit VRAM halfwords (STP<<15=0) —
+                                          * the source the ENGINE floor reads
+                                          * as 4bpp nibbles (Material_FsImage
+                                          * Apply field_10=0 CLUT (0,0)) */
 static void fx_water_tile_update(int ctr);   /* fwd: called by fx_pass   */
 static int g_waterTileEverUpdated;             /* fwd: first-composite gate */
 
@@ -1659,6 +1677,21 @@ static void sh1x_load(Sh1x *sx, const JValue *json) {
         sx->waterZones[sx->nWaterZones].minZ = (float)jnum(z, "minZ", 0.0);
         sx->waterZones[sx->nWaterZones].maxZ = (float)jnum(z, "maxZ", 0.0);
         sx->nWaterZones++;
+    }
+    /* v37: SH1X.waterFloor — see the Sh1x struct comment. clut15 = the
+     * 16 RAW u16 5:5:5 entries of the room's slot-0 CLUT row 0 (the
+     * emitter's rip-side derivation is cited there). Absent (older GLB)
+     * = the legacy 32x32 RGB live-tile floor path. */
+    const JValue *wfl = jget(sh, "waterFloor");
+    if (wfl && wfl->type == JV_OBJ) {
+        const JValue *cl = jarr(wfl, "clut15");
+        if (jcount(cl) >= 16) {
+            sx->hasWaterFloorClut = 1;
+            for (int k = 0; k < 16; k++) {
+                const JValue *cv = jat(cl, k);
+                if (cv) sx->waterFloorClut[k] = (unsigned short)((int)cv->num & 0x7FFF);
+            }
+        }
     }
     const JValue *ml = jget(sh, "mapLink");
     if (ml && ml->type == JV_OBJ) {
@@ -7385,6 +7418,23 @@ static void raster_tri(Frame *fb, const RVert *vA, const RVert *vB, const RVert 
              * UNCONDITIONAL (last-drawn covering quad wins, exactly like
              * the engine's OT paint-over); it never gates visibility.   */
             if (pass == RP_OPAQUE) fb->z[pi] = z;   /* flake-occlusion ref */
+            if (pass == RP_ADD_TEX && ta < 128) {
+                /* v37: the STP-CLEAR texel of a semi-trans prim — the PS1
+                 * rule (DuckStation gpu_sw_rasterizer): the ABR blend
+                 * applies ONLY to texels whose STP bit is SET; STP-clear
+                 * texels write OPAQUE. The engine water floor's room-CLUT
+                 * palette mixes both classes (the DRG04 row is all STP-set
+                 * 0x8421-style; DRUG03's rows mix 0x0001/0x0421 with
+                 * 0x0842) — the opaque texels REPLACE the background with
+                 * the modulated color, the STP-set ones add onto it.
+                 * fx_water_floor_rgba encodes the class in the alpha: 127
+                 * = opaque, 255 = additive, 0 = hole (handled above). */
+                int r = (((tr >> 3) * vr) >> 4) + orr;
+                int g = (((tg >> 3) * vg) >> 4) + og;
+                int b = (((tb >> 3) * vb) >> 4) + ob;
+                fb_put(fb, x, y, r, g, b, quantize, dither);
+                continue;
+            }
             if (pass == RP_ADD_TEX) {
                 /* v34 WATER: the runtime DWAVE material rewrite (func_8008E4EC
                  * -> Lm_MaterialFsImageApply1(..., blendMode=1) ->
@@ -7634,7 +7684,13 @@ static void fx_blit_sprite_quad(
  * engine's u8 tuples.                                              */
 static void fx_blit_gouraud_tri(Frame *fb, int x0, int y0, const int c0[3],
                                 int x1, int y1, const int c1[3],
-                                int x2, int y2, const int c2[3], int semi) {
+                                int x2, int y2, const int c2[3], int semi,
+                                float depthM) {
+    /* v37 (W1-5): depthM = the prim's OT bucket depth in meters (<0 = no
+     * gate); the engine OT-sorts these prims (bucket 641/639 — they are
+     * occluded by any NEARER opaque geometry); the painter walk leaves
+     * fb->z = the nearest opaque quad's depth per pixel. */
+    (void)0;
     int mnx = x0, mxx = x0, mny = y0, mxy = y0;
     if (x1 < mnx) mnx = x1;
     if (x1 > mxx) mxx = x1;
@@ -7665,6 +7721,8 @@ static void fx_blit_gouraud_tri(Frame *fb, int x0, int y0, const int c0[3],
             if (tot == 0) continue;
             double w0 = e0 / tot, w1 = e1 / tot, w2 = e2 / tot;
             size_t pi = (size_t)yy * fb->w + xx;
+            if (depthM > 0.0f && fb->z && fb->z[pi] < depthM)
+                continue;               /* occluded by nearer opaque geometry */
             uint8_t *p = fb->rgb + pi * 3;
             /* per-channel u8 interpolation -> 5-bit store               */
             for (int ch = 0; ch < 3; ch++) {
@@ -9866,6 +9924,59 @@ static void sh1x_anims_sync(Sh1x *sx, double t) {
     sh1x_anims_tick(sx, dt);
 }
 
+/* v37 (W1-2/W1-3/W1-5/W1-15): the WATER GLINT — func_8008E794 VERBATIM
+ * (lens_flare.c:610-681). A TEXTURED POLY_FT4: tpage 45 = 4bpp page 13
+ * (x 832) with ABR bits 5-6 = mode 1 = B+F ADDITIVE, CLUT
+ * getClut(WATER_CLUT_X, WATER_CLUT_Y+1) = the DR_WAVE row 1, UVs u 64..127
+ * v 0..31 V-FLIPPED (u0=64,v0=31 / u1=64,v1=0 / u2=127,v2=31 / u3=127,v3=0),
+ * quad = ±24 x ±48 ENGINE px around the projected mirrored-light point,
+ * prim color r=sin>>6 g=(sin*7)>>9 b=(sin*5)>>9, OT bucket 641
+ * (lens_flare.c:678) = zQ8 5000 -> 19.53 m — covered by any NEARER
+ * opaque geometry. The blend: the PS1 semi-trans mode-1 FT4 =
+ * F5 = T5*C8 >> 7 (DuckStation (texture_color * vertex_color) >> 7)
+ * then dst5 = B5 + F5 (clamped 31). (The v32 port was an untextured
+ * AVERAGE-blend quad — half-strength and up to 5x over-bright at full
+ * sin; wrong texture, wrong blend, no depth gate.) Screen extents: ±24
+ * in the 320-wide frame, ±48 in the 224-high frame (W1-15). */
+static void fx_water_glint_blit(Frame *fb, int px0, int py0,
+                                int r0, int g0, int b0) {
+    float scaleX = (float)fb->w / 320.0f;
+    float scaleY = (float)fb->h / 224.0f;
+    int x0 = (int)(fb->w / 2) + (int)((px0 - 24) * scaleX);
+    int x1 = (int)(fb->w / 2) + (int)((px0 + 24) * scaleX);
+    int y0 = (int)(fb->h / 2) + (int)((py0 - 48) * scaleY);
+    int y1 = (int)(fb->h / 2) + (int)((py0 + 48) * scaleY);
+    if (x1 <= x0 || y1 <= y0) return;
+    int bx0 = x0 < 0 ? 0 : x0, bx1 = x1 > (int)fb->w ? (int)fb->w : x1;
+    int by0 = y0 < 0 ? 0 : y0, by1 = y1 > (int)fb->h ? (int)fb->h : y1;
+    for (int yy = by0; yy < by1; yy++)
+        for (int xx = bx0; xx < bx1; xx++) {
+            size_t pi = (size_t)yy * fb->w + xx;
+            /* OT bucket 641 = zQ8 5000 -> 19.53125 m: occluded wherever
+             * the painter walk left NEARER opaque geometry (fb->z)      */
+            if (fb->z && fb->z[pi] < 19.53125f) continue;
+            /* affine sprite UVs: x -> u 64..127, y -> v 31..0 (flipped)   */
+            double fu = (double)(xx - x0) / (double)(x1 - x0);
+            double fv = (double)(yy - y0) / (double)(y1 - y0);
+            int tu = 64 + (int)(fu * 63.0);
+            int tv = 31 - (int)(fv * 31.0);
+            if (tu < 64 || tu > 127 || tv < 0 || tv > 31) continue;
+            unsigned idx = (unsigned)((g_drWaveIdx[tv][tu >> 1] >>
+                                       ((tu & 1) * 4)) & 0xF);
+            unsigned short tc = g_drWaveClut[1][idx];
+            uint8_t *p = fb->rgb + pi * 3;
+            int Fr = ((int)(tc & 31u) * r0) >> 7;
+            int Fg = (int)(((tc >> 5) & 31u) * g0) >> 7;
+            int Fb = (int)(((tc >> 10) & 31u) * b0) >> 7;
+            int rr5 = (p[0] >> 3) + Fr; if (rr5 > 31) rr5 = 31;
+            int gg5 = (p[1] >> 3) + Fg; if (gg5 > 31) gg5 = 31;
+            int bb5 = (p[2] >> 3) + Fb; if (bb5 > 31) bb5 = 31;
+            p[0] = (uint8_t)((rr5 << 3) | (rr5 >> 2));
+            p[1] = (uint8_t)((gg5 << 3) | (gg5 >> 2));
+            p[2] = (uint8_t)((bb5 << 3) | (bb5 >> 2));
+        }
+}
+
 /* ==================================================================== */
 /* v26 fx_pass — the SH1X v3 FX paint (flare + shimmer + anims).        */
 /* Engine references (VERBATIM, silent-hill-decomp):
@@ -10111,45 +10222,27 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
                 float vy = view.m[1] * gx + view.m[5] * gy + view.m[9] * gz + view.m[13];
                 float vz = view.m[2] * gx + view.m[6] * gy + view.m[10] * gz + view.m[14];
                 float d = -vz;
+                /* v37: the glint COMPUTE ONLY — the PAINT runs AFTER the
+                 * caustic ring below (W1-13: within OT bucket 641 the
+                 * engine's AddPrim chain has the glint at the HEAD =
+                 * drawn LAST = ON TOP of the ring pair). */
+                int glintOn = 0, glintPx = 0, glintPy = 0;
+                int glintR = 0, glintG = 0, glintB = 0;
                 if (d > 0.5f) {
-                    /* the engine glint quad: ±24 x ±48 px around the
-                     * projected point (x±24, y∓48) — screen-centered    */
+                    /* the engine glint projection: the mirrored point     */
                     float invd = 240.0f / d;
-                    int px0 = (int)(vx * invd), py0 = (int)(vy * invd);
-                    int qx[4] = { px0 - 24, px0 + 24, px0 - 24, px0 + 24 };
-                    int qy[4] = { py0 - 48, py0 - 48, py0 + 48, py0 + 48 };
+                    glintPx = (int)(vx * invd);
+                    glintPy = (int)(vy * invd);
                     /* brightness: sin(clamp(angle-40°,<=90°)) — the
                      * angle is scr_l_ang_z; r=sin>>6 g=(sin*7)>>9 b=(sin*5)>>9 */
                     int ang0 = g_flaresys.scrLAngZ - fx_q12_angle(40.0f);
                     if (ang0 > fx_q12_angle(90.0f)) ang0 = fx_q12_angle(90.0f);
                     int sinA = sh_math_sin(ang0);
                     if (sinA < 0) sinA = 0;
-                    int r = sinA >> 6, g = (sinA * 7) >> 9, b = (sinA * 5) >> 9;
-                    /* clamped u8 colors, SemiTrans avg-1 blend quad     */
-                    int x0 = (fb->w / 2) + qx[0] * scale;
-                    int x1 = (fb->w / 2) + qx[1] * scale;
-                    int y0 = (fb->h / 2) + qy[0] * scale;
-                    int y1 = (fb->h / 2) + qy[2] * scale;
-                    if (x1 > x0 && y1 > y0 && x1 > 0 && y1 > 0 &&
-                        x0 < (int)fb->w && y0 < (int)fb->h) {
-                        int a0 = x0 < 0 ? 0 : x0, a1 = x1 > fb->w ? fb->w : x1;
-                        int b0 = y0 < 0 ? 0 : y0, b1 = y1 > fb->h ? fb->h : y1;
-                        for (int yy = b0; yy < b1; yy++)
-                            for (int xx = a0; xx < a1; xx++) {
-                                size_t pi = (size_t)yy * fb->w + xx;
-                                uint8_t *p = fb->rgb + pi * 3;
-                                /* SemiTrans mode-1 avg (B+F)/2, 5-bit     */
-                                int rr = ((p[0] >> 3) + r) >> 1;
-                                int gg = ((p[1] >> 3) + g) >> 1;
-                                int bb = ((p[2] >> 3) + b) >> 1;
-                                if (rr > 31) rr = 31;
-                                if (gg > 31) gg = 31;
-                                if (bb > 31) bb = 31;
-                                p[0] = (uint8_t)((rr << 3) | (rr >> 2));
-                                p[1] = (uint8_t)((gg << 3) | (gg >> 2));
-                                p[2] = (uint8_t)((bb << 3) | (bb >> 2));
-                            }
-                    }
+                    glintR = sinA >> 6;
+                    glintG = (sinA * 7) >> 9;
+                    glintB = (sinA * 5) >> 9;
+                    glintOn = 1;
                 }   /* engine glint gate only (func_8008E794:635) */
                 /* func_8008EA68 (lens_flare.c:690-823) — the caustic
                  * ring, VERBATIM geometry: 8 segments of 45deg in the
@@ -10277,32 +10370,50 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
                             const int g3s1[3] = { 4, 8, 4 };     /* P0 */
                             const int g3s2[3] = { 4, 8, 4 };     /* P1 */
                             /* g3[0] OPAQUE (C,P0,P1) (24,22,12) — UNDER */
+                            /* v37 (W1-5): both ring pairs depth-gated at
+                             * their OT buckets — opaque pair 641 (zQ8 5000
+                             * = 19.53125 m), semi pair 639 (zQ8 4984 =
+                             * 19.46875 m): covered by NEARER opaque
+                             * geometry exactly like the engine's OT walk. */
                             if (cVis)
                                 fx_blit_gouraud_tri(fb, cScx, cScy, g3o0,
                                                    sxp[0], syp[0], g4o1,
-                                                   sxp[1], syp[1], g4o1, 0);
+                                                   sxp[1], syp[1], g4o1, 0,
+                                                   19.53125f);
                             /* g4[0] OPAQUE (20,18,12)/(20,18,12)/(4,4,4)/(4,4,4) */
                             fx_blit_gouraud_tri(fb, sxp[0], syp[0], g4o0,
                                                sxp[1], syp[1], g4o1,
-                                               sxp[2], syp[2], g4o2, 0);
+                                               sxp[2], syp[2], g4o2, 0,
+                                               19.53125f);
                             fx_blit_gouraud_tri(fb, sxp[1], syp[1], g4o1,
                                                sxp[2], syp[2], g4o2,
-                                               sxp[3], syp[3], g4o3, 0);
+                                               sxp[3], syp[3], g4o3, 0,
+                                               19.53125f);
                             /* g3[1] SEMI (C,P0,P1) (8,8,4)/(4,8,4)/(4,8,4) — UNDER */
                             if (cVis)
                                 fx_blit_gouraud_tri(fb, cScx, cScy, g3s0,
                                                    sxp[0], syp[0], g3s1,
-                                                   sxp[1], syp[1], g3s2, 1);
+                                                   sxp[1], syp[1], g3s2, 1,
+                                                   19.46875f);
                             /* g4[1] SEMI (4,8,4)/(4,8,4)/(0,0,0)/(0,0,0) */
                             fx_blit_gouraud_tri(fb, sxp[0], syp[0], g4s0,
                                                sxp[1], syp[1], g4s1,
-                                               sxp[2], syp[2], g4s2, 1);
+                                               sxp[2], syp[2], g4s2, 1,
+                                               19.46875f);
                             fx_blit_gouraud_tri(fb, sxp[1], syp[1], g4s1,
                                                sxp[2], syp[2], g4s2,
-                                               sxp[3], syp[3], g4s3, 1);
+                                               sxp[3], syp[3], g4s3, 1,
+                                               19.46875f);
                         }
                     }
                 }
+                /* v37 (W1-13): the GLINT paints ON TOP of the ring (both
+                 * ride bucket 641; the engine inserts the glint FIRST =
+                 * chain head = drawn LAST). Textured additive tpage-45
+                 * blit (see fx_water_glint_blit). */
+                if (glintOn)
+                    fx_water_glint_blit(fb, glintPx, glintPy,
+                                        glintR, glintG, glintB);
                 break;      /* first matching zone wins (engine returns it) */
             }
         }
@@ -10522,10 +10633,9 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
  * composite fx_water_tile_update writes (RGB + opaque alpha). */
 static unsigned char g_waterLiveRGBA[32 * 32 * 4];
 static void fx_water_live_rgba(void) {
-    /* lazy first composite: before the first in-zone tick the RGB canvas
-     * is pristine zeros — composite ctr=0 (the engine's first frame) so
-     * the water floor never renders black before the flashlight enters
-     * the zone (the scroll itself stays gated exactly like the engine). */
+    /* legacy v33 view (pre-waterFloor GLBs): the 32x32 composite as an RGB
+     * texture sampled 1:1 — SUPERSEDED by fx_water_floor_rgba (v37) when
+     * the GLB carries SH1X.waterFloor; kept so old GLBs render as before. */
     if (!g_waterTileEverUpdated)
         fx_water_tile_update(0);
     for (int y = 0; y < 32; y++)
@@ -10533,6 +10643,38 @@ static void fx_water_live_rgba(void) {
             unsigned char *d = g_waterLiveRGBA + ((size_t)y * 32 + x) * 4;
             const unsigned char *s = g_waterTileRGB[y][x];
             d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = 255;
+        }
+}
+
+/* v37: THE ENGINE FLOOR VIEW (W1-6 fixed). The engine's DWAVE material
+ * after the redirect is 4bpp on page 13 (x 832) with CLUT (0,0) — the
+ * ROOM's slot-0 palette — and the floor quads' page-texel UVs sit at
+ * v 224..255 (the func_8008E5B4 write window D_800AFDA4 {832,224,32,32}),
+ * so each 15-bit live-tile halfword is read as FOUR 4bpp texels:
+ *   texel(u, row) = clut[(tile15[row][u>>2] >> (4*(u&3))) & 0xF]
+ * (u = 0..127 = the 32-halfword patch's 128 texels; row = 0..31). The
+ * palette comes from the GLB's SH1X.waterFloor.clut15 (verbatim slot-0
+ * CLUT row). Texel classes (a semi-trans prim, DuckStation
+ * gpu_sw_rasterizer): STP set + color != 0 -> alpha 255 (the ABR-1
+ * additive blend); STP CLEAR -> alpha 127 (an OPAQUE write — the room
+ * palettes MIX these, e.g. DRUG03's rows); 0x0000 -> alpha 0 (the hole). */
+static unsigned char g_waterFloorTex[32 * 128 * 4];
+static void fx_water_floor_rgba(const Sh1x *sx) {
+    if (!sx || !sx->hasWaterFloorClut) return;
+    if (!g_waterTileEverUpdated)
+        fx_water_tile_update(0);
+    for (int row = 0; row < 32; row++)
+        for (int col = 0; col < 128; col++) {
+            unsigned nib = (unsigned)((g_waterTile15[row][col >> 2] >>
+                                       (4 * (col & 3))) & 0xF);
+            unsigned short c = sx->waterFloorClut[nib];
+            unsigned r = c & 31u, g = (c >> 5) & 31u, b = (c >> 10) & 31u;
+            unsigned char *d = g_waterFloorTex + ((size_t)row * 128 + col) * 4;
+            d[0] = (unsigned char)((r << 3) | (r >> 2));
+            d[1] = (unsigned char)((g << 3) | (g >> 2));
+            d[2] = (unsigned char)((b << 3) | (b >> 2));
+            d[3] = (c & 0x8000u) ? ((c & 0x7FFFu) ? 255 : 0)
+                                 : (c ? 127 : 0);
         }
 }
 
@@ -10615,6 +10757,8 @@ static void fx_water_tile_update(int ctr) {
             int r5 = rA + rB; if (r5 > 31) r5 = 31;
             int g5 = gA + gB; if (g5 > 31) g5 = 31;
             int b5 = bA + bB; if (b5 > 31) b5 = 31;
+            g_waterTile15[y][x] = (unsigned short)((r5 & 31) | ((g5 & 31) << 5) |
+                                                   ((b5 & 31) << 10));
             g_waterTileRGB[y][x][0] = (unsigned char)((r5 << 3) | (r5 >> 2));
             g_waterTileRGB[y][x][1] = (unsigned char)((g5 << 3) | (g5 >> 2));
             g_waterTileRGB[y][x][2] = (unsigned char)((b5 << 3) | (b5 >> 2));
@@ -10654,7 +10798,12 @@ static void fx_water_static_tile(int sel, unsigned char out[32][32][3]) {
 static void fx_blit_water_quad(Frame *fb, const int sx[4], const int sy[4],
                                const unsigned char tile[32][32][3],
                                int u0, int v0, int u1, int v1,
-                               int primR, int primG, int primB, int abr) {
+                               int primR, int primG, int primB, int abr,
+                               float depthM) {
+    /* v37 (W1-5): depthM = the prim's own projected depth in meters (<0 =
+     * no gate). The engine OT-inserts every water prim at its own bucket
+     * ((zQ8+128)>>3, map5_s00.c:166) — occluded by nearer opaque
+     * geometry; fb->z carries the painter walk's nearest opaque depth. */
     int mnx = sx[0], mxx = sx[0], mny = sy[0], mxy = sy[0];
     for (int i = 1; i < 4; i++) {
         if (sx[i] < mnx) mnx = sx[i];
@@ -10688,6 +10837,9 @@ static void fx_blit_water_quad(Frame *fb, const int sx[4], const int sy[4],
             int u = u0 + (int)((ax - sx[0]) * du);
             int v = v0 + (int)((ay - sy[0]) * dv);
             if (u < 0 || u > 31 || v < 0 || v > 31) continue;
+            size_t pi = (size_t)py * fb->w + px;
+            if (depthM > 0.0f && fb->z && fb->z[pi] < depthM)
+                continue;               /* occluded by nearer opaque geometry */
             /* flat FT4 modulation (the snow rule), then the ABR blend */
             int fr = (tile[v][u][0] >> 3) * primR >> 7;
             int fg = (tile[v][u][1] >> 3) * primG >> 7;
@@ -10695,7 +10847,6 @@ static void fx_blit_water_quad(Frame *fb, const int sx[4], const int sy[4],
             if (fr > 31) fr = 31;
             if (fg > 31) fg = 31;
             if (fbv > 31) fbv = 31;
-            size_t pi = (size_t)py * fb->w + px;
             uint8_t *p = fb->rgb + pi * 3;
             int orr, ogg, obb;
             if (abr == 2) {         /* subtractive B5-F5 (sprite tpage 75) */
@@ -10738,44 +10889,47 @@ static void sh1x_water_fx_draw(Frame *fb, const Renderer *R,
             float camZeng = -cam->pos.z;
             if (camX > -80.0f) continue;
             if (camZeng < 0.0f) continue;
-            /* flashlightAllowed && darkness — the PoC proxy = the env
-             * Spot light mode (the darkness-with-flashlight state)     */
-            if (R->env->field_0 == SHENUM_1) continue;
-            /* spawn ONCE (func_800CB0D8, Map_WorldObjectsInit)        */
-            if (!a->seeded) {
-                a->seeded = 1;
-                for (int q = 0; q < 12; q++) {
-                    a->wrX[q] = -379904 + (int)(sh_rng_next() % 6144);
-                    /* Rng(Q12(-92.75), Q12(-91.25)-1) = the 1.5m box   */
-                    a->wrZ[q] = 30106 + (int)(sh_rng_next() % 6144);
-                    /* Rng(Q12(7.35), Q12(8.85)-1)                      */
-                    a->wrT[q] = (int)(sh_rng_next() % 4096);
-                    a->wrSel[q] = (int)(sh_rng_next() % 3);
-                }
-            }
-            /* the per-draw t walk (func_800CB25C:89-94): t += Rng(-32,
-             * 31); CLAMP_MIN_THEN_LOW(t, 0, 0xFFF) = MAX(MIN(t,4095),0)*/
-            for (int q = 0; q < 12; q++) {
-                a->wrT[q] += (int)(sh_rng_next() & 63) - 32;
-                if (a->wrT[q] > 4095) a->wrT[q] = 4095;
-                if (a->wrT[q] < 0) a->wrT[q] = 0;
-            }
+            /* v37 (W1-1 FIXED — map5_s00.c:89-92 VERBATIM): skip ONLY when
+             * WorldEnv_IsFlashlightAllowed() && WorldEnv_IsInDarkness() —
+             * both read the CURRENT BLENDED preset flags (effects.h:41-58,
+             * g_SysWork.worldEnv.current.params.flags). With the sewer
+             * pair {6,3}: flashlight ON -> current = preset 3
+             * (FLASHLIGHT|BRIGHTNESS|LENSFLARE, NO Dark) -> NOT in
+             * darkness -> the ripples DRAW; flashlight OFF -> preset 6
+             * (DARKENV|FLASHLIGHT) -> skip. (The v32 gate on the Spot
+             * light mode was exactly INVERTED — the ripple shimmer was
+             * missing precisely in the flashlight-ON reference state.) */
+            if ((R->env->cur.effectsInfo.flags[0] & SHENV_FLAG_FLASHLIGHT) &&
+                (R->env->cur.effectsInfo.flags[0] & SHENV_FLAG_DARKENV))
+                continue;
+            /* v37 (W1-4): the spawn + the per-GAME-FRAME t walk now run
+             * in the TICK discipline (sh1x_water_ripple_tick — the same
+             * fix class as the v34 scroll counter: map5_s00.c:94-99 walks
+             * per game frame; the old render-pass walk froze between
+             * shot frames). The draw only READS the state; unseeded =
+             * not drawn (engine-true: field_B == 0 until the init tick). */
+            if (!a->seeded) continue;
             /* the 5x5 mesh (func_800CB25C:166-231): grid x -93.5 +
              * col*0.75, z 9.6 - row*0.75, y 0.5 (engine); 4x4 quads,
              * per-quad UV (u 224+8j .. 231+8j, v 160+sel*32+8i .. +7);
-             * brightness = !(probe attenuation < 129) * 8 (the cone-LUT
-             * probe func_80055D78 on (-92.0, 0.5, 8.1) — approximated
-             * LIT: documented deviation); mesh quads tpage 43 bits 5-6 =
+             * v37 (W1-7): brightness = !(func_80055D78(Q12(-92.0),
+             * Q12(0.5), Q12(8.1)) < 129) * 8 — the VERBATIM light probe
+             * (map5_s00.c:197) via sh_light_query_pos (the exact
+             * func_80055D78 port); the old hardcoded `8' was the
+             * documented approximation. mesh quads tpage 43 bits 5-6 =
              * 01 = ADDITIVE (B+F saturating — v32.2 relabel).          */
             int sel = a->wrSel[0];
             unsigned char tile[32][32][3];
             if (sel == 2) memcpy(tile, g_waterTileRGB, sizeof(tile));
             else fx_water_static_tile(sel, tile);
-            int brt = 8;
+            int brt = (sh_light_query_pos(R->env, -376832, 2048, 33177) < 129)
+                      ? 0 : 8;   /* Q12(-92.0)= -376832, Q12(0.5)=2048,
+                                   Q12(8.1)=33177 (truncating TO_FIXED) */
             mat4 view = mat4_view_from_quat(cam->pos, cam->q);
             for (int mi = 0; mi < 4; mi++) {
                 for (int mj = 0; mj < 4; mj++) {
                     int sxq[4], syq[4], vis = 1;
+                    float dsum = 0.0f;
                     /* grid corners (engine coords -> glTF)             */
                     float wx[4] = { -93.5f + mj * 0.75f, -93.5f + (mj + 1) * 0.75f,
                                     -93.5f + mj * 0.75f, -93.5f + (mj + 1) * 0.75f };
@@ -10789,17 +10943,20 @@ static void sh1x_water_fx_draw(Frame *fb, const Renderer *R,
                         float pz = view.m[2] * gx + view.m[6] * gy + view.m[10] * gz + view.m[14];
                         float d = -pz;
                         if (d <= 0.05f) { vis = 0; break; }
+                        dsum += d;
                         float iv = 240.0f / d;
                         sxq[k] = (int)(px * iv) + (int)(fb->w / 2);
                         syq[k] = (int)(py * iv) + (int)(fb->h / 2);
                     }
                     if (!vis) continue;
+                    /* v37 (W1-5): the engine OT bucket ((zQ8+128)>>3,
+                     * map5_s00.c:166) — occluded by nearer opaque geometry */
                     fx_blit_water_quad(fb, sxq, syq, tile,
                                        8 * mj, 8 * mi, 8 * mj + 7, 8 * mi + 7,
-                                       brt, 0, 0, 1);  /* mesh: tpage 43 = ADD;
-                                       prim color (field_160, 0, 0) r-only —
-                                       map5_s00.c:223-224 (v32.3 audit fix:
-                                       g channel was brt) */
+                                       brt, 0, 0, 1, dsum * 0.25f);
+                                       /* mesh: tpage 43 = ADD; prim color
+                                       (field_160, 0, 0) r-only — map5_s00.c:
+                                       223-224 (v32.3 audit fix: g was brt) */
                 }
             }
             /* the 12 ripple sprites (func_800CB25C:96-164): quad at
@@ -10807,7 +10964,10 @@ static void sh1x_water_fx_draw(Frame *fb, const Renderer *R,
              * half-size s = Q12_MULT_PRECISE(t, Q12(1.5)) engine m;
              * UV the full 32x32 window; brightness = MIN(MAX((1-t)*32,
              * 0), 16); the sprite tpage 75 bits 5-6 = 10 = SUBTRACTIVE
-             * (B5-F5 clamp 0 — v32.2 relabel of the stale 'ABR-1').    */
+             * (B5-F5 clamp 0 — v32.2 relabel of the stale 'ABR-1').
+             * v37 (W1-11): the engine's screen culls — |x3|>200 |y3|>160
+             * (field_144, the last-projected corner), z<=0 and the OT
+             * bucket bound (map5_s00.c:135-143).                        */
             for (int q = 0; q < 12; q++) {
                 int st = a->wrSel[q];
                 unsigned char rtile[32][32][3];
@@ -10818,6 +10978,8 @@ static void sh1x_water_fx_draw(Frame *fb, const Renderer *R,
                 float ez = (float)a->wrZ[q] / 4096.0f;
                 if (sM <= 0.0f) continue;
                 int sxq[4], syq[4], vis = 1;
+                int pxi3 = 0, pyi3 = 0;
+                float dsum = 0.0f;
                 float wx[4] = { ex - sM, ex + sM, ex - sM, ex + sM };
                 float wzE[4] = { ez + sM, ez + sM, ez - sM, ez - sM };
                 for (int k = 0; k < 4; k++) {
@@ -10827,16 +10989,28 @@ static void sh1x_water_fx_draw(Frame *fb, const Renderer *R,
                     float pz = view.m[2] * gx + view.m[6] * gy + view.m[10] * gz + view.m[14];
                     float d = -pz;
                     if (d <= 0.05f) { vis = 0; break; }
+                    dsum += d;
                     float iv = 240.0f / d;
                     sxq[k] = (int)(px * iv) + (int)(fb->w / 2);
                     syq[k] = (int)(py * iv) + (int)(fb->h / 2);
+                    if (k == 3) {
+                        pxi3 = (int)(px * iv);
+                        pyi3 = (int)(py * iv);
+                    }
                 }
                 if (!vis) continue;
+                if (pxi3 > 200 || pxi3 < -200 || pyi3 > 160 || pyi3 < -160)
+                    continue;      /* map5_s00.c:140-143                  */
+                {   /* the OT bucket bound (field_148.vx>>3 >= OT size)  */
+                    float avgZQ8 = dsum * 0.25f * 256.0f;
+                    if (((int)avgZQ8 + 128) >> 3 >= 1024) continue;
+                }
                 int b = ((4096 - a->wrT[q]) * 32) >> 12;
                 if (b < 0) b = 0;
                 if (b > 16) b = 16;
                 fx_blit_water_quad(fb, sxq, syq, rtile, 0, 0, 31, 31,
-                                   b, b, b, 2);  /* sprite: tpage 75 = SUB */
+                                   b, b, b, 2, dsum * 0.25f);  /* sprite:
+                                   tpage 75 = SUB, OT bucket (z+128)>>3 */
             }
             if (getenv("FOGPOC_WATERDBG")) {
                 fprintf(stderr, "WATERDBG sel=%d t[]=", sel);
@@ -10891,11 +11065,59 @@ static void sh1x_water_fx_draw(Frame *fb, const Renderer *R,
                 }
                 if (!vis) continue;
                 fx_blit_water_quad(fb, sxq, syq, dropTile, 0, 0, 31, 31,
-                                   brt, brt, brt, 1);  /* tpage 45 = ADD */
+                                   brt, brt, brt, 1, -1.0f);  /* tpage 45 =
+                                   ADD; droplet bucket = its own z
+                                   (water.c) — gate left off: the droplet
+                                   OT formula not yet decomp-verified */
             }
         }
     }
     (void)sx;
+}
+
+/* v37 (W1-4): the water-ripple per-GAME-FRAME tick — the spawn
+ * (func_800CB0D8 / Map_WorldObjectsInit, ONCE) + the t random-walk
+ * (map5_s00.c:94-99: t += Rng_GenerateUInt(-32, 31), CLAMP 0..4095 per
+ * GAME FRAME while the system draws — i.e. gated by the player position
+ * AND the flashlight-darkness gate, exactly like the draw). Runs from the
+ * same tick sites as fx_water_scroll_sync (the 30Hz discipline); the v32
+ * render-pass walk froze between shot frames (the same defect class
+ * the v34 scroll-counter fix resolved). W1-8: the Z spawn base =
+ * Q12(7.35) = 30105 (the truncating TO_FIXED), not 30106. */
+static void sh1x_water_ripple_tick(Sh1x *sx, const ShEnv *env,
+                                    const CamPose *cam) {
+    if (!sx || !env || !cam) return;
+    for (int i = 0; i < sx->nAnims; i++) {
+        Sh1xPropAnim *a = &sx->anims[i];
+        if (a->driver != 21) continue;
+        /* the player gate (camera proxy; engine coords) — map5_s00.c:79-87 */
+        float camX = cam->pos.x;
+        float camZeng = -cam->pos.z;
+        if (camX > -80.0f) return;
+        if (camZeng < 0.0f) return;
+        /* the flashlight-darkness gate — map5_s00.c:89-92 (see the draw) */
+        if ((env->cur.effectsInfo.flags[0] & SHENV_FLAG_FLASHLIGHT) &&
+            (env->cur.effectsInfo.flags[0] & SHENV_FLAG_DARKENV))
+            return;
+        if (!a->seeded) {
+            a->seeded = 1;
+            for (int q = 0; q < 12; q++) {
+                a->wrX[q] = -379904 + (int)(sh_rng_next() % 6144);
+                /* Rng(Q12(-92.75), Q12(-91.25)-1) = the 1.5m box         */
+                a->wrZ[q] = 30105 + (int)(sh_rng_next() % 6144);
+                /* Rng(Q12(7.35), Q12(8.85)-1); Q12(7.35) = 30105          */
+                a->wrT[q] = (int)(sh_rng_next() % 4096);
+                a->wrSel[q] = (int)(sh_rng_next() % 3);
+            }
+        }
+        /* the per-frame t walk (func_800CB25C:94-99)                    */
+        for (int q = 0; q < 12; q++) {
+            a->wrT[q] += (int)(sh_rng_next() & 63) - 32;
+            if (a->wrT[q] > 4095) a->wrT[q] = 4095;
+            if (a->wrT[q] < 0) a->wrT[q] = 0;
+        }
+        return;   /* one waterRipple entry per room GLB                    */
+    }
 }
 
 /* v18 diagnostics — FOGPOC_LIGHTDUMP (globals declared above utils) */
@@ -11939,22 +12161,33 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
         if (t->w <= 0) continue;
         const uint8_t *tex = sc->texBlob + t->off;
         int tw = t->w, th = t->h;
+        int waterFloorEngine = 0;
         if (m->waterLive) {
             /* v33 (S20): the LIVE DR_WAVE tile — the engine's material
              * redirect (func_8008E4EC rewrites the DWAVE material to
              * tpage 13 x=832 at every chunk load) makes the water-floor
              * prims sample the region func_8008E5B4 rewrites per frame
-             * (the 32x32 two-quad composite at (832,224)). Sample the
-             * ANIMATED tile instead of the static art; u/v wrap mod 32
-             * (the sewer floor prims wrap v 4x — the tiled surface).
-             * v34: the redirect ALSO sets field_E = 45 (semi-trans
-             * ABR-1 ADDITIVE — Material_FsImageApply with blendMode=1,
-             * img0 tPage {0,13}) — the floor draws B+F over the scene
-             * (see the RP_ADD_TEX pass in raster_tri), NOT the ripper's
-             * static alphaMode BLEND hole path. */
-            fx_water_live_rgba();
-            tex = g_waterLiveRGBA;
-            tw = th = 32;
+             * (the 32x32 two-quad composite at (832,224)).
+             * v37 (W1-6): the ENGINE consumption is 4bpp NIBBLES through
+             * the ROOM's CLUT (0,0) — Material_FsImageApply's field_E=45
+             * (4bpp, ABR-1 ADDITIVE) + field_10=0 with the img0 window
+             * (u,v)=(0,0): the floor quads' PAGE-texel UVs (u 0..62,
+             * v 224..255) read the live patch as 4 texels per 15-bit
+             * halfword. fx_water_floor_rgba builds that 128x32 pattern;
+             * the UV remap below maps u_norm*256 = page_u onto pattern
+             * columns (u'=u*2) and v_norm*64-224 onto pattern rows
+             * (v'=v*2-7). GLBs without SH1X.waterFloor keep the legacy
+             * v33 RGB view. */
+            if (R->sc->sh1x.hasWaterFloorClut) {
+                fx_water_floor_rgba(&R->sc->sh1x);
+                tex = g_waterFloorTex;
+                tw = 128; th = 32;
+                waterFloorEngine = 1;
+            } else {
+                fx_water_live_rgba();
+                tex = g_waterLiveRGBA;
+                tw = th = 32;
+            }
         }
         /* v34: waterLive forces the ADDITIVE semi-trans pass (the runtime
          * field_E=45 rewrite); everything else follows the ripper's
@@ -11979,8 +12212,27 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
              * with the SAME engine formula as opaque prims (see raster_tri)
              * + the additive fog veil ON TOP (engine semi-trans G4 after the
              * textured quad in draw order). Holes stay truly transparent. */
-            raster_tri(fb, a, b, c, tex, tw, th, quadPass, &R->opts,
-                       R->opts.ps1, R->dither, R->enginePixScale, R->enginePixScaleY);
+            if (waterFloorEngine) {
+                /* v37: the page-texel UV remap — the converter normalized
+                 * the quads' PAGE texel coords by the DR_WAVE image's
+                 * 256x64 (u_norm = u_page/256, v_norm = v_page/64), and
+                 * the floor samples the 128x32 pattern at (u_page,
+                 * v_page-224): u' = u_norm*256/128 = u*2, v' =
+                 * (v_norm*64-224)/32 = v*2-7. Both stay inside the pattern
+                 * (u 0..62 < 128; v 224..255 -> rows 0..31) — no wrap, the
+                 * GPU reads the page rows directly. */
+                RVert ra = *a, rb = *b, rc = *c;
+                ra.u = a->u * 2.0f;  ra.v = a->v * 2.0f - 7.0f;
+                rb.u = b->u * 2.0f;  rb.v = b->v * 2.0f - 7.0f;
+                rc.u = c->u * 2.0f;  rc.v = c->v * 2.0f - 7.0f;
+                raster_tri(fb, &ra, &rb, &rc, tex, tw, th, quadPass,
+                           &R->opts, R->opts.ps1, R->dither,
+                           R->enginePixScale, R->enginePixScaleY);
+            } else {
+                raster_tri(fb, a, b, c, tex, tw, th, quadPass, &R->opts,
+                           R->opts.ps1, R->dither, R->enginePixScale,
+                           R->enginePixScaleY);
+            }
         }
     }
 
@@ -12882,6 +13134,7 @@ static void live_render(LiveApp *A) {
     sh_env_sync_live(&A->env, A->play.t, cp.pos, cp.q, 0);
     sh1x_anims_sync((Sh1x *)&A->R.sc->sh1x, A->play.t);
     fx_water_scroll_sync(&A->R.sc->sh1x, &A->env, &cp); /* v34: scroll per tick */
+    sh1x_water_ripple_tick((Sh1x *)&A->R.sc->sh1x, &A->env, &cp); /* v37: the ripple walk per tick */
     render_frame(&A->fb, &A->R, &cp);
 }
 
@@ -16406,6 +16659,7 @@ int main(int argc, char **argv) {
             sh_env_sync_live(&Es, P.t, cp.pos, cp.q, 0);
             sh1x_anims_sync((Sh1x *)&R.sc->sh1x, P.t);   /* v26.3: driver tick      */
             fx_water_scroll_sync(&R.sc->sh1x, &Es, &cp); /* v34: scroll per tick */
+            sh1x_water_ripple_tick((Sh1x *)&R.sc->sh1x, &Es, &cp); /* v37: ripple walk per tick */
             tSim += tickDt;
             haveCp = 1;
         }
@@ -16541,6 +16795,7 @@ int main(int argc, char **argv) {
             sh_env_sync_live(&Es, P.t, cp.pos, cp.q, 0);
             sh1x_anims_sync((Sh1x *)&R.sc->sh1x, P.t);   /* v26.3: driver tick      */
             fx_water_scroll_sync(&R.sc->sh1x, &Es, &cp); /* v34: scroll per tick */
+            sh1x_water_ripple_tick((Sh1x *)&R.sc->sh1x, &Es, &cp); /* v37: ripple walk per tick */
             tSim += tickDt;
             haveCp = 1;
         }
