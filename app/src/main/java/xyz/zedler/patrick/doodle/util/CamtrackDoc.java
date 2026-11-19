@@ -347,6 +347,7 @@ public final class CamtrackDoc {
     public boolean nighton;
     public boolean flashlighton;
     public Env env;                // null when absent
+    public Light light;            // v13.5 (T7 task 3): null when absent
     public final List<Track> tracks = new ArrayList<>();
 
     Model(String file) {
@@ -454,6 +455,7 @@ public final class CamtrackDoc {
       String addedAt = CamtrackJson.jstr(m, "addedAt", null);
       entry.addedAt = addedAt != null ? addedAt : isoNow();
       entry.env = parseEnv(CamtrackJson.jget(m, "env"));
+      entry.light = parseLight(CamtrackJson.jget(m, "light"));
       entry.fogon = CamtrackJson.jbool(m, "fogon", false);
       entry.nighton = CamtrackJson.jbool(m, "nighton", false);
       entry.flashlighton = CamtrackJson.jbool(m, "flashlighton", false);
@@ -480,6 +482,93 @@ public final class CamtrackDoc {
       doc.models.add(entry);
     }
     return doc;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* v13.5 (T7 — task 3): the USER PROGRAMMABLE LIGHT (models[].light)    */
+
+  /** the light block — the authored 6-DOF flashlight (all fields optional) */
+  public static final class Light {
+    public Boolean on;            // Game_TurnFlashlightOn boot toggle
+    public String follow;         // "camera" (anchor) | "world" (free pose)
+    public double[] pos;          // meters, world (follow world)
+    public double[] rot;          // degrees (pitch, yaw, roll — the AIM)
+    public double[] offset;       // meters, camera-local (follow camera)
+    public Double ahead;          // meters forward along the beam (>= 0)
+
+    /** true when no field is authored (light: null in the doc) */
+    public boolean isEmpty() {
+      return on == null && follow == null && pos == null && rot == null
+          && offset == null && ahead == null;
+    }
+  }
+
+  /** sanitizeLight() port — the export whitelist + clamps (the engine's
+   *  models[].light parse semantics: strict types, per-field presence)   */
+  static Light parseLight(Object raw) {
+    Map<String, Object> l = CamtrackJson.asObj(raw);
+    if (l == null) {
+      return null;
+    }
+    Light light = new Light();
+    if (CamtrackJson.isBool(CamtrackJson.jget(l, "on"))) {
+      light.on = (Boolean) CamtrackJson.jget(l, "on");
+    }
+    String follow = CamtrackJson.jstr(l, "follow", null);
+    if ("world".equals(follow) || "camera".equals(follow)) {
+      light.follow = follow;
+    }
+    List<Object> pos = CamtrackJson.asArr(CamtrackJson.jget(l, "pos"));
+    if (pos != null && pos.size() >= 3 && CamtrackJson.isNum(pos.get(0))
+        && CamtrackJson.isNum(pos.get(1)) && CamtrackJson.isNum(pos.get(2))) {
+      light.pos = new double[]{(Double) pos.get(0), (Double) pos.get(1), (Double) pos.get(2)};
+    }
+    List<Object> rot = CamtrackJson.asArr(CamtrackJson.jget(l, "rot"));
+    if (rot != null && rot.size() >= 3 && CamtrackJson.isNum(rot.get(0))
+        && CamtrackJson.isNum(rot.get(1)) && CamtrackJson.isNum(rot.get(2))) {
+      light.rot = new double[]{(Double) rot.get(0), (Double) rot.get(1), (Double) rot.get(2)};
+    }
+    List<Object> off = CamtrackJson.asArr(CamtrackJson.jget(l, "offset"));
+    if (off != null && off.size() >= 3 && CamtrackJson.isNum(off.get(0))
+        && CamtrackJson.isNum(off.get(1)) && CamtrackJson.isNum(off.get(2))) {
+      light.offset = new double[]{(Double) off.get(0), (Double) off.get(1), (Double) off.get(2)};
+    }
+    if (CamtrackJson.isNum(CamtrackJson.jget(l, "ahead"))) {
+      light.ahead = Math.max(0.0, (Double) CamtrackJson.jget(l, "ahead"));
+    }
+    return light.isEmpty() ? null : light;
+  }
+
+  /** lightMap() — the serializer (key order fixed, same whitelist) */
+  private static Map<String, Object> lightMap(Light l) {
+    Map<String, Object> out = new java.util.LinkedHashMap<>();
+    if (l.on != null) {
+      out.put("on", l.on);
+    }
+    if (l.follow != null) {
+      out.put("follow", l.follow);
+    }
+    if (l.pos != null) {
+      out.put("pos", vecList(l.pos));
+    }
+    if (l.rot != null) {
+      out.put("rot", vecList(l.rot));
+    }
+    if (l.offset != null) {
+      out.put("offset", vecList(l.offset));
+    }
+    if (l.ahead != null) {
+      out.put("ahead", l.ahead);
+    }
+    return out;
+  }
+
+  private static List<Object> vecList(double[] v) {
+    List<Object> out = new ArrayList<>();
+    out.add(v[0]);
+    out.add(v[1]);
+    out.add(v[2]);
+    return out;
   }
 
   /** sanitizeEnv() port — per-field presence + clamp */
@@ -712,6 +801,9 @@ public final class CamtrackDoc {
       mo.put("flashlighton", m.flashlighton);
       if (m.env != null) {
         mo.put("env", envMap(m.env));
+      }
+      if (m.light != null) {
+        mo.put("light", lightMap(m.light));
       }
       List<Object> tracksArr = new ArrayList<>();
       for (Track t : m.tracks) {

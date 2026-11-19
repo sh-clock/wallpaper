@@ -46,8 +46,14 @@ android {
         // the arm64-only build already excludes all pre-23 devices
         minSdk 23
         targetSdk 35
-        versionCode 67
-        versionName '10.7'
+        // aim 7: the version lives in /version.properties — the CI's asset-
+        // change bump job is the ONLY writer (one minor level per releasable
+        // change: 10.7 -> 10.8 -> 10.9 ...; versionCode +1 each). No more
+        // competing v11/v1.7.x series.
+        def vprops = new Properties()
+        file('../version.properties').withInputStream { vprops.load(it) }
+        versionCode Integer.parseInt(vprops.getProperty('versionCode', '67'))
+        versionName vprops.getProperty('versionName', '10.7')
         ndk {
             // SH1 engine: arm64 devices only (software rasterizer, one .so)
             abiFilters 'arm64-v8a'
