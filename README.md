@@ -64,6 +64,13 @@ writer. Starting from **1.0.0**:
 
 The old series (v1.7.x / v10.x / v11) are retired.
 
+> **Upgrade note:** `versionCode` restarted at 1 with this scheme — an
+> Android in-place UPDATE install over any pre-1.0 (10.x) build fails with
+> `INSTALL_FAILED_VERSION_DOWNGRADE`. Uninstall the old app once, then
+> install 1.x. Switching from the committed shared test key to your own
+> release key later also requires one uninstall (Android never updates
+> across different signing identities).
+
 ## Release signing
 
 The release APK is signed with the key from the repo secrets when they are

@@ -48,8 +48,12 @@ echo "sdk.dir=/path/to/android-sdk" > local.properties   # once
 
 ## CI
 
-`.github/workflows/android.yml` runs on ubuntu-latest (SDK/NDK preinstalled)
-and uploads both APKs as artifacts on every push / PR / manual run.
+`.github/workflows/android.yml` runs on ubuntu-latest (SDK/NDK preinstalled).
+On every push it builds both APKs and smoke-tests them; when a releasable
+change lands (assets -> PATCH bump, engine/shell code -> MINOR bump) it
+bumps `version.properties`, tags and publishes BOTH APKs as RELEASE
+ASSETS on the release (never workflow artifacts — those stay at zero).
+See README 'Versioning (the 1.0.0 scheme)' and 'Release signing'.
 
 ## Install
 

@@ -101,25 +101,35 @@ android {
         // WALLPAPER_KEY_ALIAS + WALLPAPER_KEY_PASSWORD; see README
         // 'Release signing'). Falls back to the committed shared test
         // key sh1.keystore (test builds only), then the debug key.
+        // AUDIT-B fix: ALL FOUR secrets required — a partial secret set
+        // logs a warning and falls back; it can never select an
+        // unpopulated config (the old 'any env var' test risked a
+        // storeFile-less release config crashing AGP).
         release {
             def b64 = System.getenv('WALLPAPER_KEYSTORE_BASE64')
             def ksPass = System.getenv('WALLPAPER_KEYSTORE_PASSWORD')
             def kAlias = System.getenv('WALLPAPER_KEY_ALIAS')
             def kPass  = System.getenv('WALLPAPER_KEY_PASSWORD')
-            if (b64 && ksPass && kAlias && kPass) {
+            def hasAll = b64 && ksPass && kAlias && kPass
+            if (hasAll) {
                 def ksFile = new File(buildDir, 'release.keystore')
                 ksFile.bytes = Base64.getDecoder().decode(b64.replaceAll('\\s', ''))
                 storeFile ksFile
                 storePassword ksPass
                 keyAlias kAlias
                 keyPassword kPass
+                println 'release signing: the GitHub-secrets key'
             } else {
+                if (b64 || ksPass || kAlias || kPass) {
+                    logger.warn('release signing: PARTIAL WALLPAPER_KEYSTORE_* secret set — falling back to the committed test key. Set ALL FOUR secrets.')
+                }
                 def ks = rootProject.file('sh1.keystore')
                 if (ks.exists()) {
                     storeFile ks
                     storePassword 'sh1wall'
                     keyAlias 'sh1'
                     keyPassword 'sh1wall'
+                    println 'release signing: the committed shared TEST key (set the four WALLPAPER_KEYSTORE_* secrets to sign with your own)'
                 }
             }
         }
@@ -138,9 +148,14 @@ android {
                 }
             }
             debuggable false
-            // the secrets-key if provided, the committed test keystore if
-            // present, else debug-signed (local builds without secrets)
-            signingConfig (System.getenv('WALLPAPER_KEYSTORE_BASE64')
+            // the secrets-key if ALL FOUR secrets are set, the committed
+            // test keystore if present, else debug-signed (AUDIT-B: the
+            // selection condition == the population condition — a partial
+            // secret set falls back cleanly instead of crashing)
+            signingConfig ((System.getenv('WALLPAPER_KEYSTORE_BASE64') &&
+                            System.getenv('WALLPAPER_KEYSTORE_PASSWORD') &&
+                            System.getenv('WALLPAPER_KEY_ALIAS') &&
+                            System.getenv('WALLPAPER_KEY_PASSWORD'))
                           || rootProject.file('sh1.keystore').exists())
                     ? signingConfigs.release : signingConfigs.debug
         }
