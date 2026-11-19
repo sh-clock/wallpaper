@@ -142,9 +142,35 @@ public class Sh1WallpaperService extends WallpaperService {
     return new Sh1Engine();
   }
 
-  private static final String[] ASSETS = {
-      "THRF9FD.glb", "THRF9FD.IPD", "THR_GLB.PLM", "camdat.json"
-  };
+  /**
+   * v11.0 (aim 7): the bundled scene corpus is enumerated DYNAMICALLY
+   * from assets/sh1 (AssetManager.list) — every FILE is copied into
+   * app-private storage; subdirectories (thumbs/) are skipped (they are
+   * read straight from the APK). A new scene = drop the GLB into
+   * assets/sh1 + a models[] entry in camdat.json — no Java edit, no
+   * ASSETS-array maintenance; CI rebuilds + bumps the version.
+   */
+  private static String[] listSceneAssets(Context context) {
+    try {
+      String[] names = context.getAssets().list("sh1");
+      if (names == null || names.length == 0) {
+        Log.e(TAG, "asset copy: assets/sh1 lists empty");
+        return new String[0];
+      }
+      java.util.ArrayList<String> files = new java.util.ArrayList<>();
+      for (String f : names) {
+        String[] sub = context.getAssets().list("sh1/" + f);
+        if (sub != null && sub.length > 0) {
+          continue;   // a directory (thumbs/) — read from the APK directly
+        }
+        files.add(f);
+      }
+      return files.toArray(new String[0]);
+    } catch (IOException e) {
+      Log.e(TAG, "asset copy: cannot list assets/sh1", e);
+      return new String[0];
+    }
+  }
 
   private static volatile boolean sAssetsReady = false;
   private static final AtomicInteger sGen = new AtomicInteger(0);
@@ -265,8 +291,11 @@ public class Sh1WallpaperService extends WallpaperService {
       // fold it into the device-protected home while CE is readable
       Sh1Storage.migrateLegacyCeData(context);
       File dst = Sh1Storage.sh1Dir(context);
+      // v11.0 (aim 7): DYNAMIC corpus — every file currently bundled in
+      // assets/sh1 (GLBs, the IPD/PLM, camdat.json); no hardcoded array
+      String[] assets = listSceneAssets(context);
       boolean missing = false;
-      for (String f : ASSETS) {
+      for (String f : assets) {
         if (!new File(dst, f).exists()) {
           missing = true;
           break;
@@ -280,7 +309,7 @@ public class Sh1WallpaperService extends WallpaperService {
         Log.e(TAG, "asset copy: cannot create " + dst);
         return;
       }
-      for (String f : ASSETS) {
+      for (String f : assets) {
         File out = new File(dst, f);
         if (out.exists()) {
           continue;
