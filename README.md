@@ -25,7 +25,10 @@ The corpus spans the town street (THR), the school (SU/SC), the hospital
 (HP) and nightmare hospital (HU), the sewers with LIVE water floors
 (DR/DRU), Nowhere (ER), the lakeside amusement park (APU) and the
 nightmare town (SPU). 32 of the 44 rooms boot the dark
-flashlight-hell environments ({7,4}/{6,3}); 21 of them also rain, 9 snow.
+flashlight-hell environments — 21 pair `{7,4}` (nightmare) + 11 `{6,3}`
+(night), 16 of them raining; the other 12 are 7 day-street `{1,1}`,
+3 interior-day `{2,2}` and 2 thick-fog Nowhere `{9,9}`. Weather across
+the corpus: 16 rooms rain, 11 snow, 17 none.
 
 Adding a scene = **two file edits, no Java and no engine changes**:
 

@@ -52,21 +52,21 @@
      "fovDeg": 55,
      "loopMode": "pingPong",
      "start": [
-      30.0,
-      2.0,
-      -93.0
+      20.0,
+      0.2,
+      -99.8
      ],
      "end": [
-      30.516,
-      2.0,
-      -93.737
+      20.516,
+      0.2,
+      -100.537
      ],
      "speedMS": 0.25,
      "lookMode": "point",
      "lookAt": [
-      20.0,
-      -1.0,
-      -100.0
+      24.24,
+      -0.15,
+      -95.56
      ],
      "durationSec": 60.0
     }
@@ -324,12 +324,12 @@
      "fovDeg": 58,
      "loopMode": "loop",
      "position": [
-      60.0,
-      0.8,
-      -20.0
+      46.7,
+      1.4,
+      -12.0
      ],
      "yawDeg": 90.0,
-     "pitchDeg": -1.21,
+     "pitchDeg": -4.0,
      "yawSpeedDegS": 0,
      "pitchSpeedDegS": 0,
      "durationSec": 0
@@ -552,12 +552,12 @@
      "fovDeg": 58,
      "loopMode": "loop",
      "position": [
-      60.0,
-      -3.8,
-      140.0
+      63.3,
+      -2.6,
+      139.0
      ],
-     "yawDeg": -75.96,
-     "pitchDeg": -5.54,
+     "yawDeg": 270.0,
+     "pitchDeg": -4.0,
      "yawSpeedDegS": 0,
      "pitchSpeedDegS": 0,
      "durationSec": 0
@@ -711,21 +711,21 @@
      "fovDeg": 60,
      "loopMode": "pingPong",
      "start": [
-      100.0,
-      6.0,
-      127.0
+      95.0,
+      -2.3,
+      130.0
      ],
      "end": [
-      99.1,
-      6.0,
-      127.0
+      94.1,
+      -2.3,
+      130.0
      ],
      "speedMS": 0.25,
      "lookMode": "point",
      "lookAt": [
-      100.0,
-      0.0,
-      140.0
+      101.0,
+      -2.7,
+      130.0
      ],
      "durationSec": 60.0
     }
@@ -1676,12 +1676,12 @@
      "fovDeg": 58,
      "loopMode": "loop",
      "position": [
-      180.0,
-      -3.7,
-      -60.0
+      172.5,
+      -2.5,
+      -53.9
      ],
-     "yawDeg": 76.72,
-     "pitchDeg": -1.24,
+     "yawDeg": 180.0,
+     "pitchDeg": -4.0,
      "yawSpeedDegS": 0,
      "pitchSpeedDegS": 0,
      "durationSec": 0
@@ -2100,12 +2100,12 @@
      "fovDeg": 58,
      "loopMode": "loop",
      "position": [
-      -20.0,
-      -2.4,
-      20.0
+      -13.4,
+      -1.2,
+      11.7
      ],
-     "yawDeg": -69.44,
-     "pitchDeg": -5.35,
+     "yawDeg": 0.0,
+     "pitchDeg": -4.0,
      "yawSpeedDegS": 0,
      "pitchSpeedDegS": 0,
      "durationSec": 0

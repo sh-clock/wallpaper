@@ -714,3 +714,52 @@ appearance) found and fixed the tracks that rendered nothing:
   camdat env values (pair/weatherTarget/flashlightOn/nighton/fogon)
   re-verified VERBATIM against every GLB's SH1X.env EXTRAs — 44/44
   exact, zero invented values.
+
+---
+
+## v11.0.2 addendum — the finishing audit pass (T6 close-out)
+
+A second full corpus render audit (same methodology: the grafted engine's
+desktop `--shot` path, t=1.0, near-camera vs far-camera pixel diff) ran
+after v11.0.1 and found the v11.0.1 claim ("every wallpaper ≥ 9 %")
+overstated: 12 tracks measured below the bar. This addendum records the
+final state, measured, not claimed:
+
+* **7 more rooms re-placed (render-probed).** At v11.0.1 these rendered
+  0.02–1.14 % of the frame (near-nothing): APU0002, DR0100, ER01FC,
+  ER02FC, SPU0401, SUFFFF, SUFE00. Geometry-grid camera probes
+  (5×5 over the room bounds × 4 yaws, then 5-height × 8-yaw refinement;
+  the probe tooling under `scripts/t6_camera_probe*.py`) re-placed them:
+  APU0002 0.32→51.9 %, DR0100 0.96→88.9 %, ER01FC 0.03→26.7 %,
+  SPU0401 0.08→97.1 %, SUFFFF 0.02→69.7 %, ER02FC 1.1→83.0 %
+  (the v11.0.1-era interim placement measured 8.97 %; re-probed to the
+  strong placement eye [95, −2.3, 130] yaw 270 — the belt-ambient track
+  character kept: line, 0.9 m pingPong drift, fov 60, lookMode point).
+* **SUFE00 'rattle_locker' reverted to the verbatim prior-repo port.**
+  The interim re-placement measured 0.00 % (rendered literally nothing);
+  the prior repo's verbatim track (start [−58.8, 0.8, −14.5], lookAt
+  [−58.8, 1.4, −18]) renders the locker wall (5.14 % / 3683 px) and is
+  the port the add-a-scene spec carries — verbatim wins over the broken
+  re-placement.
+* **The 6 sub-9 % verbatim ports kept verbatim, measured and
+  documented.** APU00FF 'ferris' 3.1 % (2235 px — the wheel visible
+  through fog), APUFFFE 'balloons' 8.1 % (5809 px), DRFD00 'ripples'
+  5.1 % (3644 px), SPU0100 'fan_array' 6.9 % (4931 px — the fan array
+  + building outline visible), SPU0301 'tv' 8.8 % (6289 px),
+  SUFE00 'rattle_locker' 5.1 % (3683 px). These are the old repo's
+  authored ambient views of their subjects at distance through the
+  game's fog — they render (VLM-verified visible geometry; none is the
+  0–0.01 % pure-fog failure the audit exists to catch), and the port
+  constraint says verbatim. Every non-verbatim track in the corpus —
+  every conservative/re-placed fallback — measures ≥ 9 %.
+* Final corpus: **50 wallpapers over 44 rooms — 44 tracks ≥ 9 %
+  (10–100 %), 6 verbatim ports at 3.1–8.8 % that render their
+  subjects** (2.2k–6.4k changed pixels each, near-vs-far).
+* Env re-verified VERBATIM again post-change: pair 44/44 exact,
+  weatherTarget = the field17 recipe identity (0/1/2/5/6) 44/44,
+  flashlightOn/nighton/fogon = the Dark/FlashlightAllowed/fogMode pair
+  rule 44/44, bootWeather −1, lensFlare 0, engine flags true — zero
+  invented values.
+* README corpus stats corrected (the v11.0.2 count: 21 {7,4} + 11 {6,3}
+  dark (16 raining) + 7 {1,1} + 3 {2,2} + 2 {9,9}; weather 16 rain /
+  11 snow / 17 none).
