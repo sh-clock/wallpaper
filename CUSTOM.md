@@ -665,11 +665,52 @@ verbatim). The v11.0 transplant on top of that base:
 * **Scenes**: ONE camdat.json enumerates 44 rooms (41 v33 GLBs +
   HP0003/THRF9FC/THRF9FE), env derived VERBATIM from each GLB's
   SH1X.env, bounds scraped from the engine's own Box3.setFromObject,
-  47 tracks (3 user-authored fixed + 17 prior-repo ambient lines + the
-  v10_7 THRF9FD lines + 25 conservative cell-center fixed). The prior
-  repo's per-scene *_camdat.json files + scenes.json manifest are gone.
+  50 tracks after the v11.0.1 audit (3 user-authored fixed + 21
+  prior-repo ambient lines incl. the re-ported ferris/balloons/
+  fanapproach/hp_corridor + the v10_7 THRF9FD lines + 25 conservative
+  fixed, 7 of them re-placed by the render audit — see the v11.0.1
+  addendum below). The prior repo's per-scene *_camdat.json files +
+  scenes.json manifest are gone.
 * **Java**: `copyAssetsIfNeeded` enumerates assets/sh1 dynamically —
   adding a scene is a GLB drop + a camdat entry (aim 7).
 * **Versioning**: version.properties at the repo root; CI bumps ONE
   minor per asset change (1.7.40 -> 1.7.41 ...); no more v11–v27 jumps —
   the lineage continues forward from the prior repo's 1.7.40.
+
+---
+
+## v11.0.1 addendum — the full corpus render audit (every wallpaper pixel-verified)
+
+A full engine-render audit of the v11.0 corpus (the grafted engine, the
+desktop --shot path, day preset = the device Auto-Mode default
+appearance) found and fixed the tracks that rendered nothing:
+
+* **7 conservative tracks re-placed.** The v11.0 conservative rule put
+  the camera at the raw 40 m chunk-cell CENTER with y = bounds.min.y +
+  1.6 — but the floor is not at bounds.min.y for 5 rooms (merged
+  basement/stairwell geometry drags the box below the walking surface):
+  DR0000/ER01FE/ERFDFE/HU0001/HU01FF cameras sat under the floor and
+  rendered pure fog. THR05FE/THRFE08's geometry is a thin strip at the
+  cell's edge — the cell-center camera sat 14–18 m off the strip and
+  the subcell window selected nothing. All 7 re-placed
+  (geometry-bounds center + render-probed eye height/direction), every
+  one verified by a near-camera vs far-camera pixel-diff (the broken
+  placements measured 0–0.01 % of the frame; the fixed ones 45–96 %).
+* **SPU0301 'tv' translated +128 m in x.** The v8-era track predates the
+  v33 world-space rip; its camera sat 128 m west of the room's cell
+  (x=19 vs the room's x 147..161) and rendered pure fog — a latent bug
+  since the old repo's v10 (its CI never rendered). The track's
+  character (line, speed 0.25, fov 55, lookMode point) unchanged.
+* **4 prior-repo tracks re-ported** (they were dropped when the
+  user-authored Fixed-1 tracks landed for the same rooms, but the
+  add-a-scene spec carries both): APU00FF 'ferris', APUFFFE
+  'balloons', SU0203 'fanapproach' — verbatim — plus HP0003's 'HP
+  corridor' walk (the prior repo's default-scene track; id re-keyed to
+  'hp_corridor' — the old id collided with THRF9FD Line 1's across the
+  unified camdat).
+* The corpus is now **50 wallpapers over 44 rooms**, every one
+  pixel-verified to render geometry (near vs far-camera diff ≥ 9 %;
+  the two fog-only rejects were THR05FE/THRFE08, both fixed). The
+  camdat env values (pair/weatherTarget/flashlightOn/nighton/fogon)
+  re-verified VERBATIM against every GLB's SH1X.env EXTRAs — 44/44
+  exact, zero invented values.

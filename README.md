@@ -108,5 +108,3 @@ GLES/Vulkan backends are the Swanstation-derived hw seam (opt-in).
 
 Silent Hill is a trademark of Konami. This is a non-commercial fan work
 following Konami's published fan-content policy.
-
-<!-- trigger-test -->
