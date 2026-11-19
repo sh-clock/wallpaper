@@ -151,13 +151,17 @@ android {
             // the secrets-key if ALL FOUR secrets are set, the committed
             // test keystore if present, else debug-signed (AUDIT-B: the
             // selection condition == the population condition — a partial
-            // secret set falls back cleanly instead of crashing)
-            signingConfig ((System.getenv('WALLPAPER_KEYSTORE_BASE64') &&
-                            System.getenv('WALLPAPER_KEYSTORE_PASSWORD') &&
-                            System.getenv('WALLPAPER_KEY_ALIAS') &&
-                            System.getenv('WALLPAPER_KEY_PASSWORD'))
-                          || rootProject.file('sh1.keystore').exists())
-                    ? signingConfigs.release : signingConfigs.debug
+            // secret set falls back cleanly instead of crashing).
+            // NOTE: computed into a LOCAL first — a parenthesized
+            // expression directly after `signingConfig` parses the
+            // property assignment as a method call and the trailing
+            // ternary assigns a BOOLEAN (the v1.1.0 CI build failure).
+            def useReleaseKey = (System.getenv('WALLPAPER_KEYSTORE_BASE64') &&
+                                 System.getenv('WALLPAPER_KEYSTORE_PASSWORD') &&
+                                 System.getenv('WALLPAPER_KEY_ALIAS') &&
+                                 System.getenv('WALLPAPER_KEY_PASSWORD')) ||
+                                rootProject.file('sh1.keystore').exists()
+            signingConfig useReleaseKey ? signingConfigs.release : signingConfigs.debug
         }
     }
 
