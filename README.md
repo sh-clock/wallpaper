@@ -12,15 +12,6 @@ live wallpaper app (GPL-3.0). The original Doodle wallpapers were removed
 in this fork; the Silent Hill 1 environment renderer is the one and only
 wallpaper.
 
-> **Reset (2026-11-19):** this repository was cleared and rebuilt from the
-> correct `fog-wallpaper-v10_7-source.zip` base (the previous tree was an
-> extremely broken alpha build). The 44-scene corpus and the SH1X engine
-> (v33.8 — the PoC's: prop-anim drivers, room-original env EXTRAs, the
-> user programmable light, water FX, mapLink) were then ported onto that
-> base. The versioning was restarted with it: ONE linear series
-> (10.7 → 10.8 → 10.9 …), bumped by CI on every releasable change — the
-> old repo's competing v1.7.x / v11.0.x tags are retired.
-
 ## Features
 
 * 44 scenes (the town streets, both schools, the hospital, the resort,
