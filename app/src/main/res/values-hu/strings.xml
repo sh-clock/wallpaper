@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<!--
+  ~ This file is part of Doodle Android.
+  ~
+  ~ Doodle Android is free software: you can redistribute it and/or modify
+  ~ it under the terms of the GNU General Public License as published by
+  ~ the Free Software Foundation, either version 3 of the License, or
+  ~ (at your option) any later version.
+  ~
+  ~ Doodle Android is distributed in the hope that it will be useful,
+  ~ but WITHOUT ANY WARRANTY; without even the implied warranty of
+  ~ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  ~ GNU General Public License for more details.
+  ~
+  ~ You should have received a copy of the GNU General Public License
+  ~ along with Doodle Android. If not, see <http://www.gnu.org/licenses/>.
+  ~
+  ~ Copyright (c) 2019-2025 by Patrick Zedler
+  -->
+
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
+
+<!-- TITLES -->
+
+  <string name="title_info">Információ</string>
+  <string name="title_apply_changes">Változtatások mentése</string>
+  <string name="title_logcat">Logcat</string>
+  <string name="title_licenses">Nyílt forráskódú licenszek</string>
+
+  <!-- LABELS -->
+
+<string name="label_degrees">%1$sfok</string>
+
+  <!-- ACTIONS -->
+
+  <string name="action_cancel">Mégsem</string>
+  <string name="action_select">Kiválasztás</string>
+  <string name="action_close">Bezárás</string>
+  <string name="action_back">Vissza</string>
+  <string name="action_open_link">Külső weboldal megnyitása</string>
+  <string name="action_hide">Elrejtés</string>
+  <string name="action_reset">Visszaállítás</string>
+  <string name="action_deactivate">Deaktiválás</string>
+  <string name="action_select_all">Összes kijelölése</string>
+  <string name="action_continue">Tovább</string>
+  <string name="action_reload">Újratöltés</string>
+  <string name="action_open_app_info">Alkalmazás adatainak megnyitása</string>
+  <string name="action_set">Háttérkép beállítása</string>
+  <string name="action_learn_more">Tudj meg többet</string>
+  <string name="action_help">Segítség</string>
+  <string name="action_language_select">Nyelv kiválasztása</string>
+  <string name="action_set_static">Statikus háttérkép beállítása</string>
+  <string name="action_change_time">Idő változtatása</string>
+  <string name="action_change_interval">Intervallum változtatása</string>
+  <string name="action_copy_to_clipboard">Másolás vágólapra</string>
+
+  <!-- APPEARANCE -->
+
+<!-- PARALLAX -->
+
+<!-- SIZE -->
+
+<!-- OTHER -->
+
+  <string name="other_title">Más opciók</string>
+  <string name="other_description">Renderelés, nyelv &amp; visszaállítás</string>
+  <string name="other_language">Nyelv</string>
+  <string name="other_language_system">Rendszer követése</string>
+  <string name="other_language_system_description">Angol, ha fordítás nem érhető el</string>
+  <string name="other_launcher">Ikon elrejtése a launcherben</string>
+  <string name="other_launcher_description">A beállítások csak a rendszer élő háttérkép választójában lesznek elérhetők</string>
+  <string name="other_launcher_unsupported">Ez a funkció már nem támogatott rendszer limitációk miatt</string>
+  <string name="other_theme">App szín téma</string>
+  <string name="other_theme_auto">Auto</string>
+  <string name="other_theme_light">Világos</string>
+  <string name="other_theme_dark">Sötét</string>
+  <string name="other_reset">Minden beállítás visszaállítása</string>
+  <string name="other_log">Logcat mutatása</string>
+  <!-- ABOUT -->
+
+  <string name="about_title">Névjegy</string>
+  <string name="about_version">Verzió</string>
+  <string name="about_changelog">Változáslista</string>
+  <string name="about_developer">Fejlesztő</string>
+  <string name="about_github_description">Forráskód</string>
+  <string name="about_privacy">Adatvédelmi szabályzat</string>
+  <!-- MESSAGES -->
+
+  <string name="msg_hide">Elrejti az ikont a launcherben?</string>
+  <string name="msg_reset">Visszaállít minden beállítást?</string>
+  <string name="msg_force_stop">A változtatások alkalmazásához kényszerleállás szükséges</string>
+  </resources>

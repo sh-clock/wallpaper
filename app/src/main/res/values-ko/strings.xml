@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<!--
+  ~ This file is part of Doodle Android.
+  ~
+  ~ Doodle Android is free software: you can redistribute it and/or modify
+  ~ it under the terms of the GNU General Public License as published by
+  ~ the Free Software Foundation, either version 3 of the License, or
+  ~ (at your option) any later version.
+  ~
+  ~ Doodle Android is distributed in the hope that it will be useful,
+  ~ but WITHOUT ANY WARRANTY; without even the implied warranty of
+  ~ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  ~ GNU General Public License for more details.
+  ~
+  ~ You should have received a copy of the GNU General Public License
+  ~ along with Doodle Android. If not, see <http://www.gnu.org/licenses/>.
+  ~
+  ~ Copyright (c) 2019-2025 by Patrick Zedler
+  -->
+
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
+
+<!-- TITLES -->
+
+  <string name="title_info">정보</string>
+  <string name="title_apply_changes">변경사항 적용</string>
+  <string name="title_licenses">오픈소스 라이선스</string>
+
+  <!-- LABELS -->
+
+<string name="label_degrees">%1$s도</string>
+
+  <!-- ACTIONS -->
+
+  <string name="action_cancel">취소</string>
+  <string name="action_select">선택</string>
+  <string name="action_close">닫기</string>
+  <string name="action_back">뒤로 이동</string>
+  <string name="action_open_link">외부 웹사이트 열기</string>
+  <string name="action_hide">숨기기</string>
+  <string name="action_reset">초기화</string>
+  <string name="action_deactivate">비활성화</string>
+  <string name="action_select_all">모두 선택</string>
+  <string name="action_continue">계속</string>
+  <string name="action_open_app_info">앱 정보 화면 열기</string>
+  <string name="action_set">배경화면 설정</string>
+  <string name="action_learn_more">더 알아보기</string>
+  <string name="action_help">도움말</string>
+  <string name="action_language_select">언어 선택</string>
+  <string name="action_set_static">고정된 배경화면 설정</string>
+  <string name="action_change_time">시간 변경</string>
+  <string name="action_change_interval">간격 조정</string>
+  <!-- APPEARANCE -->
+
+<plurals name="appearance_random_interval_minutes">
+    <item quantity="other">%1$d분 마다</item>
+  </plurals>
+  <plurals name="appearance_random_interval_hours">
+    <item quantity="other">%1$d시간 마다</item>
+  </plurals>
+  <plurals name="appearance_random_interval_days">
+    <item quantity="other">%1$d일 마다</item>
+  </plurals>
+
+  <!-- PARALLAX -->
+
+<string name="other_language_system">시스템 색상 적용</string>
+  <string name="other_language_system_description">번역이 존재하지 않으면 영어로</string>
+  <string name="other_theme_light">라이트</string>
+  </resources>

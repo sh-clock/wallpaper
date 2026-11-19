@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<!--
+  ~ This file is part of Doodle Android.
+  ~
+  ~ Doodle Android is free software: you can redistribute it and/or modify
+  ~ it under the terms of the GNU General Public License as published by
+  ~ the Free Software Foundation, either version 3 of the License, or
+  ~ (at your option) any later version.
+  ~
+  ~ Doodle Android is distributed in the hope that it will be useful,
+  ~ but WITHOUT ANY WARRANTY; without even the implied warranty of
+  ~ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  ~ GNU General Public License for more details.
+  ~
+  ~ You should have received a copy of the GNU General Public License
+  ~ along with Doodle Android. If not, see <http://www.gnu.org/licenses/>.
+  ~
+  ~ Copyright (c) 2019-2025 by Patrick Zedler
+  -->
+
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
+
+  <!-- TITLES -->
+
+  <string name="title_info">Tietoja</string>
+  <string name="title_apply_changes">Ota muutokset käyttöön</string>
+  <string name="title_licenses">Avoimen lähdekoodin lisenssit</string>
+
+  <!-- LABELS -->
+
+<string name="label_degrees">%1$s astetta</string>
+
+  <string name="action_close">Sulje</string>
+  <string name="action_back">Takaisin</string>
+  <string name="action_open_link">Avaa ulkoinen verkkosivusto</string>
+  <string name="action_hide">Piilota</string>
+  <string name="action_reset">Nollaa</string>
+  <string name="action_deactivate">Poista käytöstä</string>
+  <string name="action_select_all">Valitse kaikki</string>
+  <string name="action_continue">Jatka</string>
+  <string name="action_open_app_info">Avaa sovellustiedot</string>
+  <string name="action_set">Aseta taustakuva</string>
+  <string name="action_language_select">Valitse kieli</string>
+  <!-- APPEARANCE -->
+
+<!-- PARALLAX -->
+
+<!-- SIZE -->
+
+<!-- OTHER -->
+
+  <string name="other_title">Muut asetukset</string>
+  <string name="other_language">Kieli</string>
+  <string name="other_language_system">Seuraa järjestelmän asetusta</string>
+  <string name="other_theme">Sovelluksen väriteema</string>
+  <string name="other_theme_auto">Automaattinen</string>
+  <string name="other_theme_light">Vaalea</string>
+  <string name="other_theme_dark">Tumma</string>
+  <string name="other_reset">Nollaa kaikki asetukset</string>
+  <!-- ABOUT -->
+
+  <string name="about_title">Tietoja</string>
+  <string name="about_version">Versio</string>
+  <string name="about_changelog">Muutosloki</string>
+  <string name="about_developer">Kehittäjä</string>
+  <string name="about_github_description">Lähdekoodi</string>
+  </resources>

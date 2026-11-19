@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<!--
+  ~ This file is part of Doodle Android.
+  ~
+  ~ Doodle Android is free software: you can redistribute it and/or modify
+  ~ it under the terms of the GNU General Public License as published by
+  ~ the Free Software Foundation, either version 3 of the License, or
+  ~ (at your option) any later version.
+  ~
+  ~ Doodle Android is distributed in the hope that it will be useful,
+  ~ but WITHOUT ANY WARRANTY; without even the implied warranty of
+  ~ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  ~ GNU General Public License for more details.
+  ~
+  ~ You should have received a copy of the GNU General Public License
+  ~ along with Doodle Android. If not, see <http://www.gnu.org/licenses/>.
+  ~
+  ~ Copyright (c) 2019-2025 by Patrick Zedler
+  -->
+
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
+
+<!-- TITLES -->
+
+  <string name="title_info">信息</string>
+  <string name="title_apply_changes">应用更改</string>
+  <string name="title_logcat">Logcat</string>
+  <string name="title_licenses">开放源代码许可证</string>
+
+  <!-- LABELS -->
+
+<string name="label_degrees">%1$s度</string>
+
+  <!-- ACTIONS -->
+
+  <string name="action_cancel">取消</string>
+  <string name="action_select">选择</string>
+  <string name="action_close">关闭</string>
+  <string name="action_back">返回</string>
+  <string name="action_open_link">打开外部网站</string>
+  <string name="action_hide">隐藏</string>
+  <string name="action_reset">重置</string>
+  <string name="action_deactivate">取消激活</string>
+  <string name="action_select_all">选择全部</string>
+  <string name="action_continue">继续</string>
+  <string name="action_reload">加载</string>
+  <string name="action_open_app_info">打开应用信息</string>
+  <string name="action_set">设置壁纸</string>
+  <string name="action_learn_more">了解更多</string>
+  <string name="action_help">帮助</string>
+  <string name="action_language_select">选择语言</string>
+  <string name="action_set_static">设置静态壁纸</string>
+  <string name="action_change_time">更改时间</string>
+  <string name="action_change_interval">更改间隔</string>
+  <string name="action_copy_to_clipboard">复制到剪贴板</string>
+
+  <!-- APPEARANCE -->
+
+<plurals name="appearance_random_interval_minutes">
+    <item quantity="other">每 %1$d 分钟</item>
+  </plurals>
+  <plurals name="appearance_random_interval_hours">
+    <item quantity="other">每 %1$d 小时</item>
+  </plurals>
+  <plurals name="appearance_random_interval_days">
+    <item quantity="other">每 %1$d 天 </item>
+  </plurals>
+
+  <!-- PARALLAX -->
+
+<!-- SIZE -->
+
+<!-- OTHER -->
+
+  <string name="other_title">其他设置</string>
+  <string name="other_description">渲染、语言&amp;重置</string>
+  <string name="other_language">语言</string>
+  <string name="other_language_system">跟随系统</string>
+  <string name="other_language_system_description">如其他语言不可用将使用英语</string>
+  <string name="other_launcher">在桌面上隐藏图标</string>
+  <string name="other_launcher_description">设置只能在系统的实时壁纸选取器中访问</string>
+  <string name="other_launcher_unsupported">由于系统限制，本应用不再支持此功能</string>
+  <string name="other_theme">应用颜色主题</string>
+  <string name="other_theme_auto">自动</string>
+  <string name="other_theme_light">浅色</string>
+  <string name="other_theme_dark">深色</string>
+  <string name="other_contrast">对比度</string>
+  <string name="other_contrast_description">视觉无障碍</string>
+  <!-- This is a contrast option name: User can choose between standard, medium and high contrast. The button width should be as dense as possible. -->
+  <string name="other_contrast_standard">标准</string>
+  <!-- This is a contrast option name: User can choose between standard, medium and high contrast -->
+  <string name="other_contrast_medium">中等</string>
+  <!-- This is a contrast option name: User can choose between standard, medium and high contrast -->
+  <string name="other_contrast_high">高</string>
+  <string name="other_contrast_dynamic">必须在系统设置中设定设备主题的对比度</string>
+  <string name="other_contrast_dynamic_unsupported">设备主题的动态对比只在 Android 14+ 可用</string>
+  <string name="other_reset">重置所有设置</string>
+  <string name="other_log">显示 logcat</string>
+  <!-- ABOUT -->
+
+  <string name="about_title">关于</string>
+  <string name="about_version">版本</string>
+  <string name="about_changelog">变更日志</string>
+  <string name="about_developer">开发者</string>
+  <string name="about_github_description">源代码</string>
+  <string name="about_privacy">隐私政策</string>
+  <!-- MESSAGES -->
+
+  <string name="msg_hide">在启动器中隐藏应用图标？</string>
+  <string name="msg_reset">重置所有设置吗？</string>
+  <string name="msg_force_stop">需强制停止才能应用更改</string>
+  </resources>

@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ~ This file is part of Doodle Android.
+  ~
+  ~ Doodle Android is free software: you can redistribute it and/or modify
+  ~ it under the terms of the GNU General Public License as published by
+  ~ the Free Software Foundation, either version 3 of the License, or
+  ~ (at your option) any later version.
+  ~
+  ~ Doodle Android is distributed in the hope that it will be useful,
+  ~ but WITHOUT ANY WARRANTY; without even the implied warranty of
+  ~ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  ~ GNU General Public License for more details.
+  ~
+  ~ You should have received a copy of the GNU General Public License
+  ~ along with Doodle Android. If not, see <http://www.gnu.org/licenses/>.
+  ~
+  ~ Copyright (c) 2019-2025 by Patrick Zedler
+  -->
+
+<manifest
+  xmlns:android="http://schemas.android.com/apk/res/android"
+  xmlns:tools="http://schemas.android.com/tools">
+
+  <uses-feature
+    android:name="android.software.live_wallpaper"
+    android:required="true" />
+
+  <uses-permission android:name="android.permission.VIBRATE" />
+  <uses-permission android:name="android.permission.SET_WALLPAPER" />
+
+  <queries>
+    <intent>
+      <action android:name="android.intent.action.MAIN" />
+      <category android:name="android.intent.category.HOME" />
+    </intent>
+  </queries>
+
+  <application
+    android:label="@string/app_name"
+    android:icon="@mipmap/ic_launcher"
+    android:theme="@style/Theme.Doodle"
+    android:supportsRtl="true"
+    android:enableOnBackInvokedCallback="true"
+    android:localeConfig="@xml/locales_config"
+    android:allowBackup="false"
+    android:fullBackupContent="@xml/backup_rules"
+    android:dataExtractionRules="@xml/data_extraction_rules"
+    tools:targetApi="33">
+
+    <activity
+      android:name=".activity.LauncherActivity"
+      android:exported="true">
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN" />
+        <category android:name="android.intent.category.LAUNCHER" />
+      </intent-filter>
+    </activity>
+
+    <activity android:name=".activity.MainActivity" />
+
+    <!-- v9.6 BACK-BUTTON FIX (three-button navigation): the LWP settings
+         activity gets TASK ISOLATION. The system wallpaper picker launches
+         it with FLAG_ACTIVITY_NEW_TASK; with the app's default task
+         affinity it stacked on this app's stale MainActivity task, so the
+         system BACK button revealed the app's main screen (or a dead
+         task) instead of returning to the wallpaper picker — the defect
+         inherited from upstream Doodle. With the empty taskAffinity the
+         settings activity lands in its own transient task and BACK
+         returns to the launcher flow that invoked it. -->
+    <activity
+      android:name=".activity.SettingsActivity"
+      android:exported="true"
+      android:taskAffinity=""
+      android:excludeFromRecents="true"
+      android:autoRemoveFromRecents="true"
+      android:allowTaskReparenting="false" />
+
+    <!-- v9.7: the NATIVE Camtrack editor — a full functional replica of
+         the CamTrack v13 HTML editor built from Material 3 Expressive
+         components (NO WebView). The live preview IS the wallpaper engine
+         (SurfaceView + the editor-session engine API). Launched from the
+         Settings page (same task); configChanges handled locally so
+         rotations never reload the editor session. -->
+    <activity
+      android:name=".activity.CamtrackEditorActivity"
+      android:exported="false"
+      android:label="@string/sh1_camtrack_editor"
+      android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode|density" />
+
+    <!-- The SH1 environment renderer is THE wallpaper of this fork
+         (the original Doodle renderer was removed in the SH1 refactor). -->
+    <service
+      android:directBootAware="true"
+      android:label="@string/sh1_wallpaper_name"
+      android:name=".service.Sh1WallpaperService"
+      android:permission="android.permission.BIND_WALLPAPER"
+      android:exported="true"
+      tools:targetApi="n">
+      <intent-filter>
+        <action android:name="android.service.wallpaper.WallpaperService" />
+      </intent-filter>
+      <meta-data
+        android:name="android.service.wallpaper"
+        android:resource="@xml/sh1_wallpaper" />
+    </service>
+
+    <service
+      android:name="androidx.appcompat.app.AppLocalesMetadataHolderService"
+      android:enabled="false"
+      android:exported="false">
+      <meta-data
+        android:name="autoStoreLocales"
+        android:value="true" />
+    </service>
+
+    <!-- v7 F15: Quick Settings tiles. Only the standard tile binding
+         permission is needed (no dangerous permissions); both tiles go
+         inert/unavailable while their app-settings toggle is off. -->
+    <service
+      android:name=".service.Sh1NextSceneTileService"
+      android:label="@string/sh1_tile_next_label"
+      android:icon="@drawable/ic_rounded_shuffle"
+      android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"
+      android:exported="true">
+      <intent-filter>
+        <action android:name="android.service.quicksettings.action.QS_TILE" />
+      </intent-filter>
+      <meta-data
+        android:name="android.service.quicksettings.ACTIVE_TILE"
+        android:value="true" />
+    </service>
+
+    <service
+      android:name=".service.Sh1FreezeTileService"
+      android:label="@string/sh1_tile_freeze_label"
+      android:icon="@drawable/ic_rounded_bolt"
+      android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"
+      android:exported="true">
+      <intent-filter>
+        <action android:name="android.service.quicksettings.action.QS_TILE" />
+      </intent-filter>
+      <meta-data
+        android:name="android.service.quicksettings.ACTIVE_TILE"
+        android:value="true" />
+    </service>
+
+  </application>
+
+</manifest>

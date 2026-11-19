@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<!--
+  ~ This file is part of Doodle Android.
+  ~
+  ~ Doodle Android is free software: you can redistribute it and/or modify
+  ~ it under the terms of the GNU General Public License as published by
+  ~ the Free Software Foundation, either version 3 of the License, or
+  ~ (at your option) any later version.
+  ~
+  ~ Doodle Android is distributed in the hope that it will be useful,
+  ~ but WITHOUT ANY WARRANTY; without even the implied warranty of
+  ~ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  ~ GNU General Public License for more details.
+  ~
+  ~ You should have received a copy of the GNU General Public License
+  ~ along with Doodle Android. If not, see <http://www.gnu.org/licenses/>.
+  ~
+  ~ Copyright (c) 2019-2025 by Patrick Zedler
+  -->
+
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
+
+<!-- TITLES -->
+
+  <string name="title_info">Bilgi</string>
+  <string name="title_apply_changes">Değişiklikleri uygula</string>
+  <string name="title_logcat">Loglar</string>
+  <string name="title_licenses">Açık kaynaklı lisanslar</string>
+
+  <!-- LABELS -->
+
+<string name="label_degrees">%1$s derece</string>
+
+  <!-- ACTIONS -->
+
+  <string name="action_cancel">İptal</string>
+  <string name="action_select">Seç</string>
+  <string name="action_close">Kapat</string>
+  <string name="action_back">Geri</string>
+  <string name="action_open_link">Açık harici websitesi</string>
+  <string name="action_hide">Gizle</string>
+  <string name="action_reset">Sıfırla</string>
+  <string name="action_deactivate">Deaktif et</string>
+  <string name="action_select_all">Hepsini seçin</string>
+  <string name="action_continue">Devam et</string>
+  <string name="action_reload">Yenile</string>
+  <string name="action_open_app_info">Uygulama bilgisini aç</string>
+  <string name="action_set">Duvar kağıdı olarak ayarla</string>
+  <string name="action_learn_more">Daha fazlasını öğrenin</string>
+  <string name="action_help">Yardım</string>
+  <string name="action_language_select">Dil seç</string>
+  <string name="action_set_static">Hareketsiz duvarkağıdı uygula</string>
+  <string name="action_change_time">Zamanı değiştir</string>
+  <string name="action_change_interval">Aralığı değiştir</string>
+  <string name="action_copy_to_clipboard">Panoya kopyala</string>
+
+  <!-- APPEARANCE -->
+
+<plurals name="appearance_random_interval_minutes">
+    <item quantity="one">Her %1$d dakikada</item>
+    <item quantity="other">Her %1$d dakikada</item>
+  </plurals>
+  <plurals name="appearance_random_interval_hours">
+    <item quantity="one">Her %1$d saatte</item>
+    <item quantity="other">Her %1$d saatte</item>
+  </plurals>
+  <plurals name="appearance_random_interval_days">
+    <item quantity="one">Günde %1$d</item>
+    <item quantity="other">Günde %1$d  </item>
+  </plurals>
+
+  <!-- PARALLAX -->
+
+<!-- SIZE -->
+
+<!-- OTHER -->
+
+  <string name="other_title">Diğer seçenekler</string>
+  <string name="other_description">İşleyici, dil &amp; sıfırlama</string>
+  <string name="other_language">Dil</string>
+  <string name="other_language_system">Sisteme uy</string>
+  <string name="other_language_system_description">Çeviri bulunmuyorsa İngilizce</string>
+  <string name="other_launcher">Başlatıcıda uygulama simgesini gizle</string>
+  <string name="other_launcher_description">Duvar kağıdı ayarları yalnızca cihazın canlı duvar kağıdı seçicisinde erişilebilir olacaktır</string>
+  <string name="other_launcher_unsupported">Bu özellik sistem kısıtlamaları nedeniyle daha fazla desteklenemiyor</string>
+  <string name="other_theme">Uygulama rengi teması</string>
+  <string name="other_theme_auto">Otomatik</string>
+  <string name="other_theme_light">Aydınlık</string>
+  <string name="other_theme_dark">Karanlık</string>
+  <string name="other_reset">Tüm ayarları sıfırla </string>
+  <string name="other_log">Logları görüntüle</string>
+  <!-- ABOUT -->
+
+  <string name="about_title">Hakkında</string>
+  <string name="about_version">Sürüm</string>
+  <string name="about_changelog">Değişiklik günlüğü </string>
+  <string name="about_developer">Geliştirici</string>
+  <string name="about_github_description">Kaynak kodu</string>
+  <string name="about_privacy">Gizlilik politikası </string>
+  <!-- MESSAGES -->
+
+  <string name="msg_hide">Başlatıcıdaki simge gizlensin mi?</string>
+  <string name="msg_reset">Tüm ayarlar sıfırlansın mı?</string>
+  <string name="msg_force_stop">Değişiklikleri uygulamak için zorunlu durdurma gerekli</string>
+  </resources>

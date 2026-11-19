@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="utf-8"?><!--
+  ~ SH1 Fog v8.01 — Material 3 expressive DESIGN TOKENS (Phase M).
+  ~
+  ~ Token layer for the M3 expressive port. Every resource name uses the
+  ~ underscore form (AAPT2 rejects dashes in resource names). These values
+  ~ are the single source of truth for the expressive surfaces; Phase N
+  ~ (v8.1) extends consumption to the full component set.
+  ~
+  ~ Shape scale follows the Material 3 expressive corner system:
+  ~   extra small 4 / small 8 / medium 12 / large 16 / extra large 28
+  ~ Type scale carries the expressive size bump for the settings surfaces.
+  ~ Motion durations follow the M3 expressive easing budget (short/medium/
+  ~ long) used by the sheet, dialog and icon animations.
+  -->
+
+<resources>
+
+  <!-- SHAPE TOKENS -->
+
+  <dimen name="sh1_shape_corner_extra_small">4dp</dimen>
+  <dimen name="sh1_shape_corner_small">8dp</dimen>
+  <dimen name="sh1_shape_corner_medium">12dp</dimen>
+  <dimen name="sh1_shape_corner_large">16dp</dimen>
+  <dimen name="sh1_shape_corner_extra_large">28dp</dimen>
+  <dimen name="sh1_shape_corner_full">32dp</dimen>
+
+  <!-- TYPE TOKENS (expressive scale for the settings surfaces) -->
+
+  <dimen name="sh1_type_headline_medium_size">28sp</dimen>
+  <dimen name="sh1_type_headline_medium_line">36sp</dimen>
+  <dimen name="sh1_type_headline_small_size">24sp</dimen>
+  <dimen name="sh1_type_headline_small_line">32sp</dimen>
+  <dimen name="sh1_type_title_large_size">22sp</dimen>
+  <dimen name="sh1_type_title_large_line">28sp</dimen>
+  <dimen name="sh1_type_title_medium_size">16sp</dimen>
+  <dimen name="sh1_type_title_medium_line">24sp</dimen>
+  <dimen name="sh1_type_body_medium_size">14sp</dimen>
+  <dimen name="sh1_type_body_medium_line">20sp</dimen>
+  <dimen name="sh1_type_label_large_size">14sp</dimen>
+  <dimen name="sh1_type_label_large_line">20sp</dimen>
+
+  <!-- MOTION TOKENS (durations in ms) -->
+
+  <integer name="sh1_motion_duration_short">150</integer>
+  <integer name="sh1_motion_duration_medium">300</integer>
+  <integer name="sh1_motion_duration_long">500</integer>
+
+  <!-- SHAPE APPEARANCE STYLES (built from the tokens; the corner FAMILY
+       resolves through the M3 expressive system attr so device-provided
+       expressive shapes are honored automatically, defaulting to rounded) -->
+
+  <style name="ShapeAppearance.Sh1.Dialog" parent="">
+    <item name="cornerFamily">?attr/shapeCornerFamily</item>
+    <item name="cornerSize">@dimen/sh1_shape_corner_extra_large</item>
+  </style>
+
+  <style name="ShapeAppearance.Sh1.Sheet" parent="">
+    <item name="cornerFamily">?attr/shapeCornerFamily</item>
+    <item name="cornerSizeTopLeft">@dimen/sh1_shape_corner_extra_large</item>
+    <item name="cornerSizeTopRight">@dimen/sh1_shape_corner_extra_large</item>
+    <item name="cornerSizeBottomLeft">0dp</item>
+    <item name="cornerSizeBottomRight">0dp</item>
+  </style>
+
+  <style name="ShapeAppearance.Sh1.Picker" parent="">
+    <item name="cornerFamily">?attr/shapeCornerFamily</item>
+    <item name="cornerSize">@dimen/sh1_shape_corner_extra_large</item>
+  </style>
+
+  <!-- v8.1 Phase N: the expressive pill (50 % corners) for text buttons
+       and snackbar surfaces -->
+
+  <style name="ShapeAppearance.Sh1.Pill" parent="">
+    <item name="cornerFamily">rounded</item>
+    <item name="cornerSize">50%</item>
+  </style>
+
+  <!-- SETTINGS SURFACE LAYER (Phase M): the modal bottom sheet consuming
+       the Sheet shape token; behavior stays with the app's
+       CustomBottomSheetDialog classes — only the shape is tokenized -->
+
+  <style name="Widget.Doodle.BottomSheet.Modal" parent="Widget.Material3.BottomSheet.Modal">
+    <item name="shapeAppearance">@style/ShapeAppearance.Sh1.Sheet</item>
+  </style>
+
+</resources>

@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<!--
+  ~ This file is part of Doodle Android.
+  ~
+  ~ Doodle Android is free software: you can redistribute it and/or modify
+  ~ it under the terms of the GNU General Public License as published by
+  ~ the Free Software Foundation, either version 3 of the License, or
+  ~ (at your option) any later version.
+  ~
+  ~ Doodle Android is distributed in the hope that it will be useful,
+  ~ but WITHOUT ANY WARRANTY; without even the implied warranty of
+  ~ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  ~ GNU General Public License for more details.
+  ~
+  ~ You should have received a copy of the GNU General Public License
+  ~ along with Doodle Android. If not, see <http://www.gnu.org/licenses/>.
+  ~
+  ~ Copyright (c) 2019-2025 by Patrick Zedler
+  -->
+
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
+
+<!-- TITLES -->
+
+  <string name="title_info">Informationen</string>
+  <string name="title_apply_changes">Änderungen anwenden</string>
+  <string name="title_logcat">Log-Nachrichten</string>
+  <string name="title_licenses">Open-Source-Lizenzen</string>
+
+  <!-- LABELS -->
+
+<string name="label_degrees">%1$s°</string>
+
+  <!-- ACTIONS -->
+
+  <string name="action_cancel">Abbrechen</string>
+  <string name="action_select">Auswählen</string>
+  <string name="action_close">Schließen</string>
+  <string name="action_back">Zurück</string>
+  <string name="action_open_link">Externe Website öffnen</string>
+  <string name="action_hide">Verbergen</string>
+  <string name="action_reset">Zurücksetzen</string>
+  <string name="action_deactivate">Deaktivieren</string>
+  <string name="action_select_all">Alle auswählen</string>
+  <string name="action_continue">Fortfahren</string>
+  <string name="action_reload">Neuladen</string>
+  <string name="action_open_app_info">App-Info öffnen</string>
+  <string name="action_set">Hintergrund festlegen</string>
+  <string name="action_learn_more">Mehr erfahren</string>
+  <string name="action_help">Hilfe</string>
+  <string name="action_language_select">Sprache auswählen</string>
+  <string name="action_set_static">Statischen Hintergrund festlegen</string>
+  <string name="action_change_time">Uhrzeit ändern</string>
+  <string name="action_change_interval">Intervall ändern</string>
+  <string name="action_copy_to_clipboard">Kopieren</string>
+
+  <!-- APPEARANCE -->
+
+<plurals name="appearance_random_interval_minutes">
+    <item quantity="one">Jede %1$d Minute</item>
+    <item quantity="other">Alle %1$d Minuten</item>
+  </plurals>
+  <plurals name="appearance_random_interval_hours">
+    <item quantity="one">Jede %1$d Stunde</item>
+    <item quantity="other">Alle %1$d Stunden</item>
+  </plurals>
+  <plurals name="appearance_random_interval_days">
+    <item quantity="one">Jeden %1$d Tag</item>
+    <item quantity="other">Alle %1$d Tage</item>
+  </plurals>
+
+  <!-- PARALLAX -->
+
+<!-- SIZE -->
+
+<!-- OTHER -->
+
+  <string name="other_title">Sonstige Optionen</string>
+  <string name="other_description">Rendering, Sprache &amp; Zurücksetzen</string>
+  <string name="other_language">Sprache</string>
+  <string name="other_language_system">Systemstandard</string>
+  <string name="other_language_system_description">Englisch, wenn Übersetzung nicht verfügbar</string>
+  <string name="other_launcher">App-Icon verbergen</string>
+  <string name="other_launcher_description">Einstellungen nur über Live-Hintergrund-Auswahl des Systems erreichbar</string>
+  <string name="other_launcher_unsupported">Diese Funktion wird aufgrund von Systembeschränkungen nicht mehr unterstützt</string>
+  <string name="other_theme">Farbschema</string>
+  <string name="other_theme_auto">Auto</string>
+  <string name="other_theme_light">Hell</string>
+  <string name="other_theme_dark">Dunkel</string>
+  <string name="other_contrast">Kontrast</string>
+  <string name="other_contrast_description">Barrierefreiheit für dein Sehvermögen</string>
+  <!-- This is a contrast option name: User can choose between standard, medium and high contrast. The button width should be as dense as possible. -->
+  <string name="other_contrast_standard">Standard</string>
+  <!-- This is a contrast option name: User can choose between standard, medium and high contrast -->
+  <string name="other_contrast_medium">Mittel</string>
+  <!-- This is a contrast option name: User can choose between standard, medium and high contrast -->
+  <string name="other_contrast_high">Hoch</string>
+  <string name="other_contrast_dynamic">Kontrast für Systemfarben muss in den Systemeinstellungen festgelegt werden</string>
+  <string name="other_contrast_dynamic_unsupported">Dynamischer Kontrast bei Systemfarben ist nur für Android 14+ verfügbar</string>
+  <string name="other_reset">Alle Einstellungen zurücksetzen</string>
+  <string name="other_log">Log-Nachrichten anzeigen</string>
+  <!-- ABOUT -->
+
+  <string name="about_title">Über</string>
+  <string name="about_version">Version</string>
+  <string name="about_changelog">Änderungen</string>
+  <string name="about_developer">Entwickler</string>
+  <string name="about_github_description">Quellcode</string>
+  <string name="about_privacy">Datenschutzerklärung</string>
+  <!-- MESSAGES -->
+
+  <string name="msg_hide">App-Icon verbergen\?</string>
+  <string name="msg_reset">Einstellungen zurücksetzen\?</string>
+  <string name="msg_force_stop">Erzwungenes Beenden wird benötigt, um die Änderung anzuwenden</string>
+  </resources>

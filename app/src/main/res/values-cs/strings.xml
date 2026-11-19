@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<!--
+  ~ This file is part of Doodle Android.
+  ~
+  ~ Doodle Android is free software: you can redistribute it and/or modify
+  ~ it under the terms of the GNU General Public License as published by
+  ~ the Free Software Foundation, either version 3 of the License, or
+  ~ (at your option) any later version.
+  ~
+  ~ Doodle Android is distributed in the hope that it will be useful,
+  ~ but WITHOUT ANY WARRANTY; without even the implied warranty of
+  ~ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  ~ GNU General Public License for more details.
+  ~
+  ~ You should have received a copy of the GNU General Public License
+  ~ along with Doodle Android. If not, see <http://www.gnu.org/licenses/>.
+  ~
+  ~ Copyright (c) 2019-2025 by Patrick Zedler
+  -->
+
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
+
+<!-- TITLES -->
+
+  <string name="title_info">Informace</string>
+  <string name="title_apply_changes">Aplikovat změny</string>
+  <string name="title_logcat">Protokol</string>
+  <string name="title_licenses">Licence open source</string>
+
+  <!-- LABELS -->
+
+<string name="label_degrees">%1$s stupňů</string>
+
+  <!-- ACTIONS -->
+
+  <string name="action_cancel">Zpět</string>
+  <string name="action_select">Vybrat</string>
+  <string name="action_close">Zavřít</string>
+  <string name="action_back">Zpět</string>
+  <string name="action_open_link">Otevřít externí web</string>
+  <string name="action_hide">Skrýt</string>
+  <string name="action_reset">Obnovit</string>
+  <string name="action_deactivate">Deaktivovat</string>
+  <string name="action_select_all">Vybrat vše</string>
+  <string name="action_continue">Pokračovat</string>
+  <string name="action_reload">Načíst znovu</string>
+  <string name="action_open_app_info">Otevřít informace o aplikaci</string>
+  <string name="action_set">Nastavit tapetu</string>
+  <string name="action_learn_more">Zjistit více </string>
+  <string name="action_help">Nápověda</string>
+  <string name="action_language_select">Vyberte jazyk</string>
+  <string name="action_set_static">Nastavit statickou tapetu</string>
+  <string name="action_change_time">Změnit čas</string>
+  <string name="action_change_interval">Změnit interval</string>
+  <string name="action_copy_to_clipboard">Zkopírovat do schránky </string>
+
+  <!-- APPEARANCE -->
+
+<plurals name="appearance_random_interval_minutes">
+    <item quantity="one">Každou minutu</item>
+    <item quantity="few">Každé %1$d minuty</item>
+    <item quantity="many">Každých %1$d minut</item>
+    <item quantity="other">Každých %1$d minut</item>
+  </plurals>
+  <plurals name="appearance_random_interval_hours">
+    <item quantity="one">Každou hodinu</item>
+    <item quantity="few">Každé %1$d hodiny</item>
+    <item quantity="many">Každých %1$d hodin</item>
+    <item quantity="other">Každých %1$d hodin</item>
+  </plurals>
+  <plurals name="appearance_random_interval_days">
+    <item quantity="one">Každý den</item>
+    <item quantity="few">Každé %1$d dny</item>
+    <item quantity="many">Každých %1$d dní</item>
+    <item quantity="other">Každých %1$d dní</item>
+  </plurals>
+
+  <!-- PARALLAX -->
+
+<!-- SIZE -->
+
+<!-- OTHER -->
+
+  <string name="other_title">Další možnosti</string>
+  <string name="other_description">Vykreslování, jazyk a obnovení</string>
+  <string name="other_language">Jazyk</string>
+  <string name="other_language_system">Barvy systému</string>
+  <string name="other_language_system_description">Angličtina, pokud není dostupný překlad</string>
+  <string name="other_launcher">Skrýt ikonu v launcheru.</string>
+  <string name="other_launcher_description">Nastavení budou přístupná pouze ve výběru živé tapety v systému.</string>
+  <string name="other_launcher_unsupported">Tato funkce již není podporována z důvodu omezení funkcí systému</string>
+  <string name="other_theme">Barevný režim aplikace</string>
+  <string name="other_theme_auto">Automaticky</string>
+  <string name="other_theme_light">Světlý</string>
+  <string name="other_theme_dark">Tmavý</string>
+  <string name="other_contrast">Kontrast</string>
+  <string name="other_contrast_description">Přístupnost pro vaše oči</string>
+  <!-- This is a contrast option name: User can choose between standard, medium and high contrast. The button width should be as dense as possible. -->
+  <string name="other_contrast_standard">Standardní</string>
+  <!-- This is a contrast option name: User can choose between standard, medium and high contrast -->
+  <string name="other_contrast_medium">Střední</string>
+  <!-- This is a contrast option name: User can choose between standard, medium and high contrast -->
+  <string name="other_contrast_high">Vysoký</string>
+  <string name="other_contrast_dynamic">Kontrast pro motiv zařízení musí být nastaven v nastavení zařízení</string>
+  <string name="other_contrast_dynamic_unsupported">Dynamický kontrast pro motiv zařízení je dostupný pouze v systému Android 14 a novějším</string>
+  <string name="other_reset">Obnovit všechna nastavení</string>
+  <string name="other_log">Zobrazit logcat</string>
+  <!-- ABOUT -->
+
+  <string name="about_title">O aplikaci</string>
+  <string name="about_version">Verze</string>
+  <string name="about_changelog">Seznam změn</string>
+  <string name="about_developer">Vývojář</string>
+  <string name="about_github_description">Zdrojový kód</string>
+  <string name="about_privacy">Zásady ochrany osobních údajů</string>
+  <!-- MESSAGES -->
+
+  <string name="msg_hide">Skrýt ikonu v launcheru?</string>
+  <string name="msg_reset">Obnovit všechna nastavení?</string>
+  <string name="msg_force_stop">Vynucené zastavení nutné k provedení změn</string>
+  </resources>
