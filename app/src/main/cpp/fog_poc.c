@@ -2599,6 +2599,29 @@ typedef struct {
     int envParticles;           /* -1 absent; else 0/1 (0 = --nosnow)    */
     int envEngine;              /* -1 absent; else 0/1 (0 = --nofog)     */
     int envAnimsDemo;           /* -1 absent; else 0/1 (1 = --anims-demo) */
+    /* ---- T7 (v35): the USER PROGRAMMABLE LIGHT (models[].light) --------
+     * The camtrack editor's LIGHT panel block — the authored 6-DOF light
+     * that emulates Harry's flashlight (position AND aim independent of
+     * the camera; disable-able; never fires in day modes — the verbatim
+     * Spot-mode/unavailable gates):
+     *   on: strict boolean (absent -> -1, the env flashlightOn/camdat
+     *       flashlighton resolution stands)
+     *   follow: "camera" (the Harry anchor: offset/rot in the camera
+     *       frame) | "world" (a free-world pose: pos + a world-fixed rot)
+     *   pos[3]: meters, world space (follow "world")
+     *   rot[3]: pitch,yaw,roll DEGREES (the aim — the angle distinction;
+     *       the verbatim default -15,0,0; roll carries no engine term)
+     *   offset[3]: camera-local meters (follow "camera")
+     *   ahead: meters forward along the beam                                   */
+    int hasLight;               /* the light block present (JV_OBJ) */
+    int lightOn;                /* -1 absent; else 0/1 */
+    int lightFollow;            /* 0 = camera (default), 1 = world */
+    float lightPos[3];          /* world meters */
+    float lightRot[3];          /* pitch,yaw,roll degs */
+    int hasLightRot;            /* rot authored in the camdat */
+    float lightOffset[3];       /* camera-local meters (glTF axes) */
+    int hasLightOffset;         /* offset authored in the camdat */
+    float lightAhead;           /* meters along the beam (>= 0) */
 } Camdat;
 
 static int camdat_parse_loop(const char *s, int def) {
@@ -2959,6 +2982,50 @@ static int camdat_load(Camdat *cd, const char *path, const char *glbName) {
              * leaves the CLI default (0). The wallpaper's special-case
              * scenes set it; the PoC CLI keeps --anims-demo precedence. */
             cd->envAnimsDemo    = jbool(env, "animsDemo", -1);
+        }
+    }
+
+    /* ---- T7 (v35): models[].light — the USER PROGRAMMABLE LIGHT ----
+     * (the camtrack editor's LIGHT panel: the 6-DOF authored flashlight —
+     * position AND aim independent of the camera, disable-able, never
+     * firing in day modes via the verbatim Spot gates). Strict types and
+     * per-field presence, matching the editor's sanitizeLight whitelist:
+     * every field optional; "follow" defaults to the camera anchor.    */
+    {
+        const JValue *lt = jget(model, "light");
+        if (lt && lt->type == JV_OBJ) {
+            cd->hasLight = 1;
+            cd->lightOn = jbool(lt, "on", -1);
+            const char *follow = jstr(lt, "follow", "camera");
+            cd->lightFollow = (follow && !strcmp(follow, "world")) ? 1 : 0;
+            const JValue *lp = jarr(lt, "pos");
+            if (lp && lp->count >= 3 &&
+                jat(lp, 0)->type == JV_NUM && jat(lp, 1)->type == JV_NUM &&
+                jat(lp, 2)->type == JV_NUM) {
+                cd->lightPos[0] = (float)jat(lp, 0)->num;
+                cd->lightPos[1] = (float)jat(lp, 1)->num;
+                cd->lightPos[2] = (float)jat(lp, 2)->num;
+            }
+            const JValue *lr = jarr(lt, "rot");
+            if (lr && lr->count >= 3 &&
+                jat(lr, 0)->type == JV_NUM && jat(lr, 1)->type == JV_NUM &&
+                jat(lr, 2)->type == JV_NUM) {
+                cd->hasLightRot = 1;
+                cd->lightRot[0] = (float)jat(lr, 0)->num;
+                cd->lightRot[1] = (float)jat(lr, 1)->num;
+                cd->lightRot[2] = (float)jat(lr, 2)->num;
+            }
+            const JValue *lo = jarr(lt, "offset");
+            if (lo && lo->count >= 3 &&
+                jat(lo, 0)->type == JV_NUM && jat(lo, 1)->type == JV_NUM &&
+                jat(lo, 2)->type == JV_NUM) {
+                cd->hasLightOffset = 1;
+                cd->lightOffset[0] = (float)jat(lo, 0)->num;
+                cd->lightOffset[1] = (float)jat(lo, 1)->num;
+                cd->lightOffset[2] = (float)jat(lo, 2)->num;
+            }
+            cd->lightAhead = (float)jnum(lt, "ahead", 0.0);
+            if (cd->lightAhead < 0.0f) cd->lightAhead = 0.0f;
         }
     }
 
@@ -4538,12 +4605,81 @@ __attribute__((unused))
 #endif
 static const v3 SH_LIGHT_OFFSET_CAM = { -0.08f, 0.28f, -0.12f };  /* engine ref (unused in v6 anchor; kept for audits) */
 
+/* v26 USER LIGHT (task 3): --userlight x,y,z sets a FREE-WORLD light (the
+ * engine's NULL-bone-coord native mode, Gfx_FlashlightPositionUpdate
+ * bodyprog_80055028.c:244-275); --userlight-ahead D puts it D meters
+ * ahead of the camera (the trailing-camera geometry the engine's flare
+ * needs: gate 2 requires vz > 120 Q8 = 0.47m). -1 flags "engine anchor"
+ * (the Harry offset default). Disableable with --userlight off (then the
+ * engine anchor applies — the camera-coincident light that engine-true
+ * never flares). Day suppression is preset-driven (Spot-only presets). */
+static int g_userLightMode = 0;      /* 0 = engine anchor (default)     */
+static float g_userLightAheadM = 0;  /* mode 2: meters ahead of camera  */
+static float g_userLightWorld[3];    /* mode 1: free world pos (glTF m) */
+/* T7 (v35): the USER PROGRAMMABLE LIGHT — the camdat models[].light block
+ * { on, follow "camera"|"world", pos[3] m, rot[3] (pitch,yaw,roll degs),
+ *   offset[3] camera-local m, ahead m } — the authored surface of task 3:
+ *   - follow "world": a FREE-WORLD pose (pos + rot, world-fixed aim — the
+ *     engine's NULL-bone-coord path, Gfx_FlashlightPositionUpdate :244-
+ *     275); "it can essentially move in all the ways the camera can":
+ *     full 6-DOF, independent of the track camera;
+ *   - follow "camera" (default): Harry's anchor — the camera frame offset
+ *     (offset, the verbatim Game_FlashlightAttribsSet (-0.08,-0.28,0.12))
+ *     + ahead, the beam rot relative to the camera;
+ *   - on/off: Game_TurnFlashlightOn/Off (the K_F runtime toggle stays the
+ *     verbatim Game_FlashlightToggle with the item_screens_2.c:1267
+ *     availability gate);
+ *   - DAY-MODE SUPPRESSION (verbatim): nothing here forces a Spot — the
+ *     per-vertex MESH light dispatches on lightMode != None (the day
+ *     presets are None), the FX pass gates on lightMode == Spot + flare
+ *     intensity, and the env blend does nothing for identical pairs
+ *     (isFlashlightUnavailable, effects.c:346-352). A user light in a day
+ *     scene stays INERT exactly like Harry's flashlight in daylight.
+ * Precedence: --userlight/--userlightrot CLI > camdat light > Sh1x
+ * userLight EXTRAs (the unbiased verbatim attribs) > the constants.     */
+static int   g_userLightHasRot = 0;     /* 1 = an authored aim (CLI/camdat) */
+static float g_userLightRot[3] = { -15.0f, 0.0f, 0.0f };  /* pitch,yaw,roll */
+static int   g_userLightHasOffset = 0;  /* 1 = an authored camera-local off */
+static float g_userLightOffset[3] = { -0.08f, 0.28f, -0.12f }; /* glTF m   */
+static int   g_userLightCLI = 0;        /* 1 = the CLI authored the light  */
+
+
 /* engine beam dir (y-down local): (0, -sin(-15deg), cos(-15deg)*cos(0)) =
  * (0, +1061, 3957) -> camera-local glTF (x, -y, -z) = (0, -1061, -3957)
  * (forward and 15 deg DOWN — v4 had the y sign double-negated so the beam
  * pointed UP; fixed against func_8003F4DC: vy = -sin(rot0.vx), rot0.vx =
  * Q12_ANGLE(-15 deg) -> +1060 engine = DOWN in engine y-down space)        */
 static const int SH_LIGHT_DIR_CAM_Q12[3] = { 0, SH_SIN_M15, -SH_COS_M15 };
+
+/* fwd decl: fx_q12_angle lives in the v26 FX helpers below (file order) */
+static int fx_q12_angle(float deg);
+
+/* T7 (v35): the AUTHORED light-aim direction — func_8003F4DC's Custom
+ * branch generalized from the fixed -15deg lightRotation to the USER's
+ * rot (the camdat light.rot / the Sh1x userLightRot / the --userlightrot
+ * CLI). The ANGLE DISTINCTION the user asked for: the beam no longer
+ * hardcodes the camera-forward tilt — the authored pitch/yaw feed the
+ * VERBATIM rot math:
+ *   vy = -Math_Sin(rot.vx); t = Math_Cos(rot.vx);
+ *   vz = Q12_MULT(t, Math_Cos(rot.vy)); vx = Q12_MULT(t, Math_Sin(rot.vy));
+ * with Q12_ANGLE(deg) = (s32)(deg/360*4096) TRUNCATED and Math_Sin/Cos =
+ * the RAW g_SineTable lookups (the v8 engine-exact correction), then the
+ * engine y-down -> glTF axis map (x, -y, -z). rot.vz (roll) has NO term in
+ * func_8003F4DC — the engine's lightRotation consumes pitch+yaw only (the
+ * camdat schema carries roll for completeness; it stays unconsumed, as in
+ * the engine). The default (-15, 0) reproduces SH_LIGHT_DIR_CAM_Q12
+ * bit-exactly: fx_q12_angle(-15) = -170, sin(-170) = -1056, cos = 3958.  */
+static void sh_light_dir_from_rot(float pitchDeg, float yawDeg, int out[3]) {
+    int rx = fx_q12_angle(pitchDeg);          /* Q12_ANGLE, trunc-toward-0  */
+    int ry = fx_q12_angle(yawDeg);
+    int evy = -sh_math_sin(rx);                /* the engine's vy (y-down)   */
+    int t   = sh_math_cos(rx);
+    int evz = (int)(((int64_t)t * (int64_t)sh_math_cos(ry)) >> 12);
+    int evx = (int)(((int64_t)t * (int64_t)sh_math_sin(ry)) >> 12);
+    out[0] = evx;                              /* engine -> glTF: (x,-y,-z) */
+    out[1] = -evy;
+    out[2] = -evz;
+}
 
 /* func_80055648 — build the axis-falloff light table (verbatim; used by
  * func_80055D78 position queries — characters/effects in the engine).
@@ -5034,8 +5170,29 @@ static void sh_env_update_pose(ShEnv *env, v3 camPos, Quat camQ) {
                 (int)(((int64_t)lightWeight * flickerQ12) >> 12);
         }
     } else {
-    v3 d = { (float)SH_LIGHT_DIR_CAM_Q12[0], (float)SH_LIGHT_DIR_CAM_Q12[1],
-             (float)SH_LIGHT_DIR_CAM_Q12[2] };
+    /* T7 (v35): the AUTHORED beam — sh_light_dir_from_rot (the verbatim
+     * func_8003F4DC rot math) over the authored rot (CLI --userlightrot /
+     * camdat light.rot / the Sh1x userLightRot EXTRAs — resolved at boot
+     * into g_userLightRot with g_userLightHasRot); the verbatim -15deg
+     * default reproduces SH_LIGHT_DIR_CAM_Q12 bit-exactly (the fixed
+     * constant stays the no-author default). THE ANGLE DISTINCTION: the
+     * light AIM is independent of the camera's own orientation.         */
+    v3 d;
+    if (g_userLightHasRot) {
+        int dirOut[3];
+        sh_light_dir_from_rot(g_userLightRot[0], g_userLightRot[1], dirOut);
+        d.x = (float)dirOut[0]; d.y = (float)dirOut[1]; d.z = (float)dirOut[2];
+    } else {
+        d.x = (float)SH_LIGHT_DIR_CAM_Q12[0];
+        d.y = (float)SH_LIGHT_DIR_CAM_Q12[1];
+        d.z = (float)SH_LIGHT_DIR_CAM_Q12[2];
+    }
+    if (g_userLightMode == 1) {
+        /* follow "world": the free-world light AIM is WORLD-FIXED — the
+         * engine's NULL-bone path keeps lightRotation in world space
+         * (func_8003F4DC's rot0 applied directly, no bone/camera matrix) */
+        L->dir[0] = (int)d.x; L->dir[1] = (int)d.y; L->dir[2] = (int)d.z;
+    } else {
     /* rotate by camera quaternion (three.js: v' = q * v * q^-1) */
     v3 X, Y, Z;
     quat_axes(camQ, &X, &Y, &Z);
@@ -5044,6 +5201,7 @@ static void sh_env_update_pose(ShEnv *env, v3 camPos, Quat camQ) {
     dir.y = X.y * d.x + Y.y * d.y + Z.y * d.z;
     dir.z = X.z * d.x + Y.z * d.y + Z.z * d.z;
     L->dir[0] = (int)dir.x; L->dir[1] = (int)dir.y; L->dir[2] = (int)dir.z;
+    }
     }
 
     /* v6 (user directive): light position == the camera position EXACTLY.
@@ -5056,10 +5214,20 @@ static void sh_env_update_pose(ShEnv *env, v3 camPos, Quat camQ) {
      * the verbatim Game_FlashlightAttribsSet anchor (effects.c:210-218),
      * giving the flare the engine's real light-ahead-of-eye geometry
      * (shLensFlareExec Gate 2 needs scr z > proj/2). The Sh1x userLight
-     * extras can override it (programmable; movable like the camera).    */
-    L->pos[0] = (int)(camPos.x * 4096.0f);
-    L->pos[1] = (int)(camPos.y * 4096.0f);
-    L->pos[2] = (int)(camPos.z * 4096.0f);
+     * extras can override it (programmable; movable like the camera).
+     * T7 (v35): follow "world" (g_userLightMode 1) moves the MESH light
+     * to the authored world pose too — the free-world light lights the
+     * geometry from its OWN position, not the camera's eye (the 6-DOF
+     * user light the task asked for).                                */
+    if (g_userLightMode == 1) {
+        L->pos[0] = (int)(g_userLightWorld[0] * 4096.0f);
+        L->pos[1] = (int)(g_userLightWorld[1] * 4096.0f);
+        L->pos[2] = (int)(g_userLightWorld[2] * 4096.0f);
+    } else {
+        L->pos[0] = (int)(camPos.x * 4096.0f);
+        L->pos[1] = (int)(camPos.y * 4096.0f);
+        L->pos[2] = (int)(camPos.z * 4096.0f);
+    }
 
     /* WorldEnv_LightTransform (identity world matrix):
      * field_28 = clamp16(dir) then *intensity >> 12 (gpf12, s16) — with the
@@ -7090,18 +7258,6 @@ typedef struct {
 
 static LensFlareWork g_flaresys;
 static int g_fxLightPos[3];   /* v26: the engine-anchored FX light pos (Q12, glTF) */
-/* v26 USER LIGHT (task 3): --userlight x,y,z sets a FREE-WORLD light (the
- * engine's NULL-bone-coord native mode, Gfx_FlashlightPositionUpdate
- * bodyprog_80055028.c:244-275); --userlight-ahead D puts it D meters
- * ahead of the camera (the trailing-camera geometry the engine's flare
- * needs: gate 2 requires vz > 120 Q8 = 0.47m). -1 flags "engine anchor"
- * (the Harry offset default). Disableable with --userlight off (then the
- * engine anchor applies — the camera-coincident light that engine-true
- * never flares). Day suppression is preset-driven (Spot-only presets). */
-static int g_userLightMode = 0;      /* 0 = engine anchor (default)     */
-static float g_userLightAheadM = 0;  /* mode 2: meters ahead of camera  */
-static float g_userLightWorld[3];    /* mode 1: free world pos (glTF m) */
-
 /* shLensFlareMakeEffectTargetRate — lens_flare.c:225-250 VERBATIM (tables
  * copied 1:1; vwOresenHokan over the exact ranges).                    */
 static int fx_flare_target_rate(int light_eff_pow, int scr_z, int scr_ang_z) {
@@ -9465,12 +9621,18 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
      * effects.c:492-566). The v30 code pitched the anchor by -15deg
      * (net error ~7cm vertical + Gate-2 depth -0.12 -> -0.19m). The
      * Sh1x userLight extras override the offset (programmable; the
-     * userLightRot stays direction-side data, unconsumed here).        */
+     * userLightRot feeds the beam via sh_env_update_rot). T7 (v35):
+     * the AUTHORED camdat/CLI offset (g_userLightOffset) beats the
+     * EXTRAs — the camdat models[].light.offset is the user's program. */
     {
         /* engine-local (x,y,z) -> camera-local (x,-y,-z) [the PoC's
          * standing axis map]; then camera quaternion * local           */
         float ox = -0.08f, oy = 0.28f, oz = -0.12f;
-        if (sx->hasUserLight) {
+        if (g_userLightHasOffset) {
+            ox = g_userLightOffset[0];
+            oy = g_userLightOffset[1];
+            oz = g_userLightOffset[2];
+        } else if (sx->hasUserLight) {
             ox = sx->userLightOffset[0];
             oy = -sx->userLightOffset[1];
             oz = -sx->userLightOffset[2];
@@ -10103,10 +10265,15 @@ static void fx_water_scroll_sync(const Sh1x *sx, const ShEnv *env,
           env->cur.flashlightLensFlareIntensity != 0))
         return;
     /* the light WORLD pos — the engine anchor chain (identical to the
-     * fx_pass light-position block: the camera-bone offset, the Sh1x
-     * userLight override, the free-world/ahead CLI modes) */
+     * fx_pass light-position block: the camera-bone offset, the T7 authored
+     * offset (camdat light.offset > the Sh1x userLight override), the
+     * free-world/ahead CLI/camdat modes) */
     float ox = -0.08f, oy = 0.28f, oz = -0.12f;
-    if (sx->hasUserLight) {
+    if (g_userLightHasOffset) {
+        ox = g_userLightOffset[0];
+        oy = g_userLightOffset[1];
+        oz = g_userLightOffset[2];
+    } else if (sx->hasUserLight) {
         ox = sx->userLightOffset[0];
         oy = -sx->userLightOffset[1];
         oz = -sx->userLightOffset[2];
@@ -14479,8 +14646,11 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(a, "--userlight") && i + 1 < argc) {
             /* v26 task 3: user-programmable light. "off"=engine anchor;
-             * "x,y,z"=free world light; "ahead:D"=D m ahead of camera   */
+             * "x,y,z"=free world light; "ahead:D"=D m ahead of camera.
+             * T7 (v35): sets g_userLightCLI — the CLI beats the camdat
+             * models[].light block (the standing precedence).           */
             const char *v = argv[++i];
+            g_userLightCLI = 1;
             if (!strcmp(v, "off")) { g_userLightMode = 0; }
             else if (!strncmp(v, "ahead:", 6)) {
                 g_userLightMode = 2;
@@ -14496,6 +14666,24 @@ int main(int argc, char **argv) {
                     fprintf(stderr, "--userlight expects off | x,y,z | ahead:D\n");
                     return 1;
                 }
+            }
+        }
+        else if (!strcmp(a, "--userlightrot") && i + 1 < argc) {
+            /* T7 (v35): the user light AIM — pitch,yaw degrees (the roll
+             * has no engine term, parsed for symmetry). The VERBATIM
+             * default -15,0 = Harry's lightRotation (Game_Flashlight-
+             * AttribsSet); any authored value feeds func_8003F4DC's rot
+             * math (the angle distinction). */
+            float p2 = 0.0f, y2 = 0.0f, r2 = 0.0f;
+            int got = sscanf(argv[++i], "%f,%f,%f", &p2, &y2, &r2);
+            if (got == 2 || got == 3) {
+                g_userLightCLI = 1;
+                g_userLightHasRot = 1;
+                g_userLightRot[0] = p2; g_userLightRot[1] = y2;
+                g_userLightRot[2] = (got == 3) ? r2 : 0.0f;
+            } else {
+                fprintf(stderr, "--userlightrot expects pitch,yaw[,roll] degrees\n");
+                return 1;
             }
         }
         else if (!strcmp(a, "--lensflare") && i + 1 < argc) {
@@ -15196,6 +15384,54 @@ int main(int argc, char **argv) {
         if (worldStage == 2) { bootPair0 = 6; bootPair1 = 3; }   /* D_800A9F88 */
         if (worldStage == 3) { bootPair0 = 9; bootPair1 = 9; }   /* D_800A9F98 */
         if (envPair0 >= 0) { bootPair0 = envPair0; bootPair1 = envPair1; }
+        /* T7 (v35): the USER PROGRAMMABLE LIGHT — the camdat models[].light
+         * block resolves into the user-light globals (the CLI
+         * --userlight/--userlightrot parsed earlier WINS — g_userLightCLI).
+         * follow "world" = the free 6-DOF pose (the mode-1 free-world light:
+         * pos + the world-fixed aim); follow "camera" = the Harry anchor
+         * with the authored offset/rot in the camera frame; ahead extends
+         * the forward offset. light.on rides the flashlight boot toggle
+         * (Game_TurnFlashlightOn) under the SAME precedence chain: CLI
+         * --flashlight/--no-flashlight > light.on > env flashlightOn >
+         * the legacy flashlighton flag. DAY-MODE SUPPRESSION stays verbatim:
+         * an ON light in an identical-pair (day) scene is the engine's own
+         * auto-off/unavailable state — the blend, the mesh light and the FX
+         * pass all refuse per the preset gates, never the user block.   */
+        if (cd.hasLight) {
+            if (!g_userLightCLI) {
+                g_userLightMode = cd.lightFollow ? 1 : 0;
+                if (cd.lightFollow == 1) {
+                    g_userLightWorld[0] = cd.lightPos[0];
+                    g_userLightWorld[1] = cd.lightPos[1];
+                    g_userLightWorld[2] = cd.lightPos[2];
+                }
+                g_userLightAheadM = cd.lightAhead;
+                if (cd.hasLightRot) {
+                    g_userLightHasRot = 1;
+                    g_userLightRot[0] = cd.lightRot[0];
+                    g_userLightRot[1] = cd.lightRot[1];
+                    g_userLightRot[2] = cd.lightRot[2];
+                }
+                if (cd.hasLightOffset) {
+                    g_userLightHasOffset = 1;
+                    g_userLightOffset[0] = cd.lightOffset[0];
+                    g_userLightOffset[1] = cd.lightOffset[1];
+                    g_userLightOffset[2] = cd.lightOffset[2];
+                }
+            }
+            if (cd.lightOn >= 0 && flashlightForced < 0 &&
+                !(cd.hasEnv && !camdatAuto && cd.envFlashlightOn >= 0))
+                flOn = cd.lightOn;
+        }
+        /* the Sh1x userLightRot EXTRAs — the unbiased default aim when
+         * neither the CLI nor the camdat authored one (the verbatim
+         * lightRotation rides the GLB; the angle-distinction surface) */
+        if (!g_userLightHasRot && sc.sh1x.hasUserLight) {
+            g_userLightHasRot = 1;
+            g_userLightRot[0] = sc.sh1x.userLightRot[0];
+            g_userLightRot[1] = sc.sh1x.userLightRot[1];
+            g_userLightRot[2] = sc.sh1x.userLightRot[2];
+        }
         sh_env_set_pair(&A.env, bootPair0, bootPair1);
         /* v9: mode-selection state — cursor at the boot pair; HUD default on */
         A.modeCursor = clampi(bootPair0, 0, SH_PRESET_COUNT - 1);
@@ -15350,7 +15586,8 @@ int main(int argc, char **argv) {
            "  light anchor: HERO == the virtual camera (offsets verbatim)\n"
            "  v8 env modes: --envpair A,B (any of 21 presets) --worldstage N\n"
            "               --lensflare N (enum-2) --lightning  --listmodes\n"
-           "  N cycles: day {1,1} -> night {%d,%d} -> nightmare {%d,%d} -> day\n",
+           "  N cycles: day {1,1} -> night {%d,%d} -> nightmare {%d,%d} -> day\n"
+           "user light (T7 v35): %s%s rot (%.1f, %.1f) deg%s\n",
            SH_PRESET_DECOMP_IDX(bootPair0), SH_PRESET_DECOMP_IDX(bootPair1),
            A.env.night ? " (night boot)" : "",
            A.env.isFlashlightUnavailable ? " [flashlight unavailable — engine auto-off]"
@@ -15373,7 +15610,14 @@ int main(int argc, char **argv) {
                  "isFlashlightUnavailable (bodyprog_effects_8005E0DC.c:650)]",
            A.env.field_0, A.env.screenBrightness,
            SH_PRESET_DECOMP_IDX(A.env.nightP0), SH_PRESET_DECOMP_IDX(A.env.nightP1),
-           SH_PRESET_DECOMP_IDX(A.env.nightM0), SH_PRESET_DECOMP_IDX(A.env.nightM1));
+           SH_PRESET_DECOMP_IDX(A.env.nightM0), SH_PRESET_DECOMP_IDX(A.env.nightM1),
+           /* T7 (v35): the user-programmable light boot state */
+           g_userLightMode == 1 ? "WORLD" :
+           g_userLightMode == 2 ? "CAMERA+AHEAD" : "CAMERA anchor",
+           g_userLightMode == 1
+               ? "" : " (offsets/pos relative to the camera frame)",
+           g_userLightRot[0], g_userLightRot[1],
+           g_userLightHasRot ? "" : " (the verbatim -15deg default)");
     printf("v13 mode selection: ALL 21 presets + %d authentic pairs interactive —\n"
            "  Tab on-screen browser (Up/Down + Enter, 0-9 jump) · [ ] cycle presets\n"
            "  · , . cycle authentic pairs · H HUD toggle · --preset N boot · --menu\n"
