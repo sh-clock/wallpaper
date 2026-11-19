@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<!--
+  ~ This file is part of Doodle Android.
+  ~
+  ~ Doodle Android is free software: you can redistribute it and/or modify
+  ~ it under the terms of the GNU General Public License as published by
+  ~ the Free Software Foundation, either version 3 of the License, or
+  ~ (at your option) any later version.
+  ~
+  ~ Doodle Android is distributed in the hope that it will be useful,
+  ~ but WITHOUT ANY WARRANTY; without even the implied warranty of
+  ~ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  ~ GNU General Public License for more details.
+  ~
+  ~ You should have received a copy of the GNU General Public License
+  ~ along with Doodle Android. If not, see <http://www.gnu.org/licenses/>.
+  ~
+  ~ Copyright (c) 2019-2025 by Patrick Zedler
+  -->
+
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
+
+<!-- TITLES -->
+
+  <string name="title_info">Informacje</string>
+  <string name="title_apply_changes">Zastosuj zmiany</string>
+  <string name="title_logcat">Logcat</string>
+  <string name="title_licenses">Licencje otwartoźródłowych bibliotek</string>
+
+  <!-- LABELS -->
+
+<string name="label_degrees">%1$s stopni</string>
+
+  <!-- ACTIONS -->
+
+  <string name="action_cancel">Anuluj</string>
+  <string name="action_select">Wybierz</string>
+  <string name="action_close">Zamknij</string>
+  <string name="action_back">Cofnij</string>
+  <string name="action_open_link">Otwórz zewnętrzną stronę internetową</string>
+  <string name="action_hide">Ukryj</string>
+  <string name="action_reset">Wyczyść</string>
+  <string name="action_deactivate">Wyłącz</string>
+  <string name="action_select_all">Wybierz wszystko</string>
+  <string name="action_continue">Kontynuj</string>
+  <string name="action_reload">Przeładuj</string>
+  <string name="action_open_app_info">Otwórz informacje o aplikacji</string>
+  <string name="action_set">Ustaw tapetę</string>
+  <string name="action_learn_more">Dowiedz się więcej</string>
+  <string name="action_help">Pomoc</string>
+  <string name="action_language_select">Wybierz język</string>
+  <string name="action_set_static">Ustaw statyczną tapetę</string>
+  <string name="action_change_time">Zmień godzinę</string>
+  <string name="action_change_interval">Zmień interwał</string>
+  <string name="action_copy_to_clipboard">Skopiuj do schowka</string>
+
+  <!-- APPEARANCE -->
+
+<!-- PARALLAX -->
+
+<!-- SIZE -->
+
+<!-- OTHER -->
+
+  <string name="other_title">Inne opcje</string>
+  <string name="other_description">Renderowanie, język i reset</string>
+  <string name="other_language">Język</string>
+  <string name="other_language_system">Taki jak systemowy</string>
+  <string name="other_language_system_description">Angielski jeżeli tłumaczenie nie jest dostępne</string>
+  <string name="other_launcher">Ukryj ikonę na liście aplikacji</string>
+  <string name="other_launcher_description">Ustawienia będą dostępne tylko na ekranie wyboru animaowanych tapet</string>
+  <string name="other_launcher_unsupported">Ta funkcja nie jest już dostępna z powodu ograniczeń systemu</string>
+  <string name="other_theme">Kolor motywu tej aplikacji</string>
+  <string name="other_theme_auto">Automatyczny</string>
+  <string name="other_theme_light">Jasny</string>
+  <string name="other_theme_dark">Ciemny</string>
+  <string name="other_reset">Wyczyść wszystkie ustawienia</string>
+  <string name="other_log">Wyświetl logcat</string>
+  <!-- ABOUT -->
+
+  <string name="about_title">O aplikacji</string>
+  <string name="about_version">Wersja</string>
+  <string name="about_changelog">Historia zmian</string>
+  <string name="about_developer">Programista</string>
+  <string name="about_github_description">Source code</string>
+  <string name="about_privacy">Polityka prywatności</string>
+  <!-- MESSAGES -->
+
+  <string name="msg_hide">Ukryć ikonę na liście aplikacji?</string>
+  <string name="msg_reset">Wyczyścić wszystkie ustawienia?</string>
+  <string name="msg_force_stop">Wymuszono zatrzymanie aby zaaplikować zmiany</string>
+  </resources>

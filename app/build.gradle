@@ -1,33 +1,66 @@
+/*
+ * This file is part of Doodle Android.
+ *
+ * Doodle Android is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Doodle Android is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with Doodle Android. If not, see <http://www.gnu.org/licenses/>.
+ *
+ * Copyright (c) 2019-2025 by Patrick Zedler
+ */
+
 plugins {
-    id 'com.android.application'
+    alias libs.plugins.android.application
+    alias libs.plugins.navigation.safeargs
 }
 
 android {
-    namespace 'com.sh1.poc'
-    compileSdk 34
+    namespace 'xyz.zedler.patrick.doodle'
+    compileSdk 35
     ndkVersion '27.2.12479018'
 
     defaultConfig {
-        applicationId 'com.sh1.poc_SH1_dkk2p'
-        minSdk 24
-        targetSdk 34
-        // v7 (task 7): the version rides version.properties at the repo
-        // root; CI bumps the minor digit on every asset change (see
-        // .github/workflows/android.yml) - 1.7.30 -> 1.7.31. versionCode is
-        // the monotonic integer form (1.7.30 -> 10730).
-        def vprops = new Properties()
-        def vfile = rootProject.file('version.properties')
-        if (vfile.exists()) vfile.withInputStream { vprops.load(it) }
-        versionCode (vprops.getProperty('versionCode', '10730') as Integer)
-        versionName vprops.getProperty('versionName', '1.7.30')
-        ndk { abiFilters 'arm64-v8a' }
+        // v10.7: fixed, clean package name (user mandate) — replaces the
+        // v9.7 dynamic dot-segment scheme
+        // (xyz.zedler.patrick.doodle.SH1.<rand>; historical suffixes: tR5n9m,
+        // hk2lBg, l0qdfw, feqsiw, s1cr78, prmoxi, wcull, kybda8, sqegda,
+        // busazz, v4nn8l, cz22s, b8r2oe, o9ympt, veH8pT, siime7).
+        // applicationId is decoupled from the Java namespace
+        // (xyz.zedler.patrick.doodle): the R class, manifest relative
+        // component names and the JNI symbol names
+        // (Java_xyz_zedler_patrick_doodle_*) all stay on the namespace,
+        // so the rename has ZERO code/engine impact. A package-name change
+        // installs as a NEW app — no in-place upgrade from any prior build
+        // (re-pick the wallpaper once after installing).
+        applicationId 'com.fog.sh.wallpaper'
+        // minSdk 23 (Android 6): the SH1 build ships uncompressed, 16 KB-
+        // aligned native libs (extractNativeLibs=false needs API 23+), and
+        // the arm64-only build already excludes all pre-23 devices
+        minSdk 23
+        targetSdk 35
+        versionCode 67
+        versionName '10.7'
+        ndk {
+            // SH1 engine: arm64 devices only (software rasterizer, one .so)
+            abiFilters 'arm64-v8a'
+        }
         externalNativeBuild {
             cmake {
-                arguments '-DANDROID_STL=none',
-                          // 16 KB page-size compatibility (Android 15+)
-                          '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON'
+                // 16 KB page-size compatibility (Android 15+)
+                arguments '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON'
             }
         }
+        resourceConfigurations += ['ar', 'bqi', 'cs', 'da', 'de', 'en', 'es', 'fi', 'fil', 'fr',
+                                   'hu', 'in', 'it', 'iw', 'ja', 'ko', 'lt', 'nl', 'pl', 'pt-rBR',
+                                   'ro', 'ru', 'tr', 'ug', 'uk', 'vi', 'zh-rCN']
     }
 
     externalNativeBuild {
@@ -37,10 +70,21 @@ android {
         }
     }
 
+    applicationVariants.configureEach { variant ->
+        variant.resValue "string", "versionName", variant.versionName
+    }
+
+    // v10.0: Robolectric needs the real resources (layouts, styles, attrs)
+    testOptions {
+        unitTests {
+            includeAndroidResources = true
+        }
+    }
+
     // store native libs uncompressed so AGP can 16 KB-align them in the APK
-    packagingOptions {
+    packaging {
         jniLibs {
-            useLegacyPackaging false
+            useLegacyPackaging = false
         }
     }
 
@@ -58,17 +102,75 @@ android {
 
     buildTypes {
         release {
-            minifyEnabled false
+            postprocessing {
+                removeUnusedCode true
+                removeUnusedResources true
+                obfuscate false
+                optimizeCode true
+                proguardFiles {
+                    getDefaultProguardFile('proguard-android-optimize.txt')
+                    'proguard-rules.pro'
+                }
+            }
+            debuggable false
             // committed personal keystore if present, else debug-signed
             signingConfig rootProject.file('sh1.keystore').exists()
                     ? signingConfigs.sh1 : signingConfigs.debug
         }
     }
 
+    buildFeatures {
+        viewBinding true
+        buildConfig true
+    }
+
+    lint {
+        abortOnError false
+        disable 'MissingTranslation'
+    }
+
+    bundle {
+        storeArchive {
+            enable true
+        }
+    }
+
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_11
-        targetCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    dependenciesInfo {
+        includeInApk false
     }
 }
 
-/* zero dependencies — pure android.framework + one native lib */
+dependencies {
+    // v10.1 BUG 1: EXPLICIT pin. Previously androidx.activity resolved
+    // TRANSITIVELY to 1.8.1 (via appcompat 1.7.0 / material) — a two-year-
+    // old release of the library that OWNS the OnBackPressedDispatcher ->
+    // window OnBackInvokedCallback bridge (the exact layer between the
+    // system's predictive-back dispatch and the app on API 33+; the 1.9.x
+    // series carries the bridge maturation: registration-state tracking,
+    // in-progress callback handling, unregister-on-disable fixes).
+    // 1.9.3 is the newest stable compatible with compileSdk 35 / AGP 8.7.
+    implementation libs.activity
+    implementation libs.appcompat
+    implementation libs.fragment
+    implementation libs.navigation.fragment
+    implementation libs.navigation.ui
+    implementation libs.preference
+    implementation libs.material
+
+    // v9.7: plain-JVM unit tests for the Camtrack data core (CamtrackDoc /
+    // CamtrackJson / CamtrackMath are deliberately Android-free, so the
+    // serialization round-trip proofs need no Robolectric — test-only)
+    testImplementation 'junit:junit:4.13.2'
+    // v10.0: Robolectric for the REAL widget/dispatcher/intent verification
+    // (the Material Slider lazy draw-time validation crash mechanism, the
+    // launcher trampoline flags, the resolution-aware dither policy with
+    // real SharedPreferences) — real androidx/material bytecode on the
+    // simulated framework, no device needed
+    testImplementation 'org.robolectric:robolectric:4.14.1'
+    testImplementation 'androidx.test:core:1.6.1'
+}

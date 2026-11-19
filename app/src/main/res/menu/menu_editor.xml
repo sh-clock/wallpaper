@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+  <item
+    android:id="@+id/menu_editor_tracks"
+    android:icon="@drawable/ic_rounded_drag_handle"
+    android:title="@string/sh1_camtrack_page_tracks" />
+  <item
+    android:id="@+id/menu_editor_path"
+    android:icon="@drawable/ic_rounded_zoom_out_map_anim"
+    android:title="@string/sh1_camtrack_path_editor" />
+  <item
+    android:id="@+id/menu_editor_world"
+    android:icon="@drawable/ic_rounded_tune_anim"
+    android:title="@string/sh1_camtrack_page_world" />
+  <item
+    android:id="@+id/menu_editor_models"
+    android:icon="@drawable/ic_rounded_memory"
+    android:title="@string/sh1_camtrack_page_models" />
+</menu>

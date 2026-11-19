@@ -1,5 +1,571 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="app_name">SH1 Fog Wallpaper v4</string>
-    <string name="sh1_wallpaper_desc">Silent Hill 1 environment renderer — fog, snow, rain and night cycles at PSX resolution. Software-rasterized, fully offline.</string>
+
+<!--
+  ~ This file is part of Doodle Android.
+  ~
+  ~ Doodle Android is free software: you can redistribute it and/or modify
+  ~ it under the terms of the GNU General Public License as published by
+  ~ the Free Software Foundation, either version 3 of the License, or
+  ~ (at your option) any later version.
+  ~
+  ~ Doodle Android is distributed in the hope that it will be useful,
+  ~ but WITHOUT ANY WARRANTY; without even the implied warranty of
+  ~ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  ~ GNU General Public License for more details.
+  ~
+  ~ You should have received a copy of the GNU General Public License
+  ~ along with Doodle Android. If not, see <http://www.gnu.org/licenses/>.
+  ~
+  ~ Copyright (c) 2019-2025 by Patrick Zedler
+  -->
+
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
+
+  <!-- APP & WALLPAPER -->
+
+  <string name="app_name" translatable="false">Fog Wallpaper</string>
+  <string name="app_developer" translatable="false">Patrick Zedler</string>
+  <string name="app_website" translatable="false">https://patrickzedler.com</string>
+  <string name="app_github" translatable="false">https://github.com/patzly/doodle-android/</string>
+
+  <!-- SH1 FOG (the wallpaper of this fork) -->
+
+  <string name="sh1_wallpaper_name" translatable="false">Fog Wallpaper</string>
+  <string name="sh1_wallpaper_desc">A software-rendered Silent Hill 1 fog street — engine-true fog, snow, rain and drifting camera tracks at PSX resolution. Fully offline.</string>
+  <string name="sh1_wallpaper_description">A faithful software-rendered Silent Hill 1 fog street on your home screen — PSX-accurate graphics, engine-true fog, snow and rain, drifting camera tracks. Fully offline, no ads, no tracking.</string>
+
+  <!-- SH1 ENVIRONMENT SETTINGS -->
+
+  <string name="environment_title">Appearance</string>
+  <string name="environment_description">Scene, weather &amp; wobble</string>
+  <string name="sh1_title_parallax">Parallax</string>
+  <string name="sh1_parallax_description">Tilt camera, deadzone &amp; polling</string>
+  <string name="sh1_title_settings">Settings</string>
+  <string name="sh1_settings_description">Frame rate, resolution &amp; schedules</string>
+  <string name="sh1_environment_info">21 engine presets control fog, light and tint. Auto mode follows your device clock.</string>
+  <string name="sh1_auto_mode">Auto mode</string>
+  <string name="sh1_auto_mode_description">Day 06:00–18:00 · Night 18:00–06:00</string>
+  <string name="sh1_current_mode">Current mode</string>
+  <string name="sh1_current_mode_day">Day mode — env 1 · THR day street</string>
+  <string name="sh1_current_mode_night">Night mode — env 6 · night street</string>
+  <string name="sh1_current_mode_manual">Manual — env %1$s · %2$s</string>
+  <string name="sh1_env_mode">Environment mode</string>
+  <string name="sh1_env_mode_description">All 21 engine presets</string>
+  <string name="sh1_env_mode_value">Env %1$s · %2$s</string>
+  <string name="sh1_weather">Weather</string>
+  <string name="sh1_weather_description">Scene default · snow · rain</string>
+  <string name="sh1_weather_value">%1$s — %2$s</string>
+  <string name="sh1_weather_scene_value">Scene default · %1$s</string>
+  <string name="sh1_env_select">Select environment mode</string>
+  <string name="sh1_env_select_description">All 21 presets of the game\'s environment system.</string>
+  <string name="sh1_weather_select">Select weather</string>
+  <string name="sh1_weather_select_description">Snow and rain with wind levels 0–3, or the scene\'s own recipe.</string>
+  <string name="sh1_weather_scene_default">Scene default</string>
+
+  <!-- SH1 SCENE &amp; CAMDAT (Phase D) -->
+
+  <string name="sh1_scene">Wallpaper scene</string>
+  <string name="sh1_scene_description">From the active camera config</string>
+  <string name="sh1_scene_value">%1$s · %2$s tracks</string>
+  <string name="sh1_scene_missing">Missing asset — tap to load it</string>
+  <string name="sh1_scene_select">Select wallpaper scene</string>
+  <string name="sh1_scene_select_description">Scenes defined by the active camera config. Long-press a scene to pin its env mode and weather.</string>
+  <string name="sh1_scene_track_count">%1$d track(s)</string>
+  <string name="sh1_scene_tracks_weather">%1$d track(s) · per-track weather</string>
+  <string name="sh1_scene_env">Env pair %1$s/%2$s · %3$s</string>
+  <string name="sh1_scene_env_none">No env object · engine defaults</string>
+  <string name="sh1_track">Camera track</string>
+  <string name="sh1_track_description">The active scene\'s camera tracks</string>
+  <string name="sh1_track_select">Select camera track</string>
+  <string name="sh1_track_select_description">The scene\'s camera tracks: line, circle, curve, spiral and more.</string>
+  <string name="sh1_track_value">%1$s</string>
+  <string name="sh1_track_disabled">disabled</string>
+  <string name="sh1_config">Camera config</string>
+  <string name="sh1_config_description">Load an external camera config</string>
+  <string name="sh1_config_value">%1$s · %2$d scene(s)</string>
+  <string name="sh1_config_default">Bundled default</string>
+  <string name="sh1_config_external">External config</string>
+  <string name="sh1_config_select_title">Load camera config</string>
+  <string name="sh1_config_merge_title">External camera config</string>
+  <string name="sh1_config_merge_msg">Replace the current config or merge the new scenes into it.</string>
+  <string name="sh1_config_action_overwrite">Overwrite</string>
+  <string name="sh1_config_action_merge">Merge</string>
+  <string name="sh1_config_invalid">The selected file is not a valid camdat.json (no usable scenes)</string>
+  <string name="sh1_byoa">Import scene assets</string>
+  <string name="sh1_byoa_description">Load .glb models from storage</string>
+  <string name="sh1_byoa_imported">%1$d file(s) imported into the app storage</string>
+  <string name="sh1_byoa_none">No .glb files found in the selected folder</string>
+
+  <!-- SH1 DAY/NIGHT SCHEDULE (Phase E-2) -->
+
+  <string name="sh1_day_time">Day mode starts</string>
+  <string name="sh1_day_time_description">%1$s</string>
+  <string name="sh1_night_time">Night mode starts</string>
+  <string name="sh1_night_time_description">%1$s</string>
+  <string name="sh1_time_picker_day">Day mode start time</string>
+  <string name="sh1_time_picker_night">Night mode start time</string>
+
+  <!-- SH1 SCENE RANDOMIZER (Phase E-3) -->
+
+  <string name="sh1_randomizer">Scene randomizer</string>
+  <string name="sh1_randomizer_description">Switch scene &amp; camera automatically</string>
+  <string name="sh1_randomizer_value">%1$s</string>
+  <string name="sh1_randomizer_select">Scene randomizer</string>
+  <string name="sh1_randomizer_select_description">Switches between the active config\'s scenes automatically.</string>
+  <string name="sh1_randomizer_interval">Custom interval</string>
+  <string name="sh1_randomizer_interval_description">Every %1$d minutes</string>
+  <string name="sh1_randomizer_interval_title">Randomizer interval</string>
+  <string name="sh1_randomizer_interval_unit">minutes</string>
+
+  <!-- SH1 BATTERY / POWER SAVE (Phase E-4 / E-5) -->
+
+  <string name="sh1_battery_critical">Critical battery</string>
+  <string name="sh1_battery_critical_description">Freeze at %1$d%% and below</string>
+  <string name="sh1_battery_critical_title">Critical battery percentage</string>
+  <string name="sh1_battery_critical_hint">Rendering pauses below this level and resumes when charging or back above it.</string>
+  <string name="sh1_power_save">Battery saver compliance</string>
+  <string name="sh1_power_save_description">Freeze while system battery saver is on</string>
+
+  <!-- SH1 v7 PHASE H FEATURES -->
+
+  <string name="sh1_thumbnails">Scene thumbnails</string>
+  <string name="sh1_thumbnails_description">Show cached scene previews in the list</string>
+
+  <string name="sh1_auto_preset">Custom auto-mode presets</string>
+  <string name="sh1_auto_preset_description">Map the day and night presets yourself</string>
+  <string name="sh1_auto_day">Day preset</string>
+  <string name="sh1_auto_day_description">%1$s</string>
+  <string name="sh1_auto_night">Night preset</string>
+  <string name="sh1_auto_night_description">%1$s</string>
+  <string name="sh1_auto_day_preset_select">Day preset</string>
+  <string name="sh1_auto_night_preset_select">Night preset</string>
+  <string name="sh1_auto_preset_select_description">The preset Auto mode switches to during this half of the day.</string>
+
+  <string name="sh1_shuffle">Shuffle bag</string>
+  <string name="sh1_shuffle_description">Every scene once before repeats</string>
+  <string name="sh1_favorites">Favorites only</string>
+  <string name="sh1_favorites_description">Randomize starred scenes only</string>
+  <string name="sh1_prewarm">Pre-load next scene</string>
+  <string name="sh1_prewarm_description">Faster switches after lock-screen picks</string>
+
+  <string name="sh1_overrides">Per-scene overrides</string>
+  <string name="sh1_overrides_description">Long-press a scene to pin env and weather</string>
+  <string name="sh1_storage_guard">Import size guard</string>
+  <string name="sh1_storage_guard_description">Warn before large imports or low disk</string>
+  <string name="sh1_watchdog">Broken scene fallback</string>
+  <string name="sh1_watchdog_description">Fall back if a scene stays black</string>
+
+  <string name="sh1_backup">Backup &amp; restore</string>
+  <string name="sh1_backup_description">Export or import settings and config</string>
+  <string name="sh1_backup_dialog_title">Backup &amp; restore</string>
+  <string name="sh1_backup_dialog_msg">Export the app settings and the active camera config to a single file, or restore from one.</string>
+  <string name="sh1_backup_export">Export</string>
+  <string name="sh1_backup_import">Import</string>
+  <string name="sh1_backup_done">Backup written</string>
+  <string name="sh1_backup_restored">Backup restored</string>
+  <string name="sh1_backup_invalid">Not a valid backup file</string>
+
+  <string name="sh1_charging">No freeze while charging</string>
+  <string name="sh1_charging_description">Keep the wallpaper live when plugged in</string>
+  <string name="sh1_aod">Freeze on screen-off</string>
+  <string name="sh1_aod_description">Hold the frame while the display is off</string>
+  <string name="sh1_halfrate">Mid-battery half rate</string>
+  <string name="sh1_halfrate_description">Cap at 15 fps below the mid level</string>
+  <string name="sh1_mid_battery">Mid battery</string>
+  <string name="sh1_mid_battery_description">Half rate at %1$d%% and below</string>
+  <string name="sh1_mid_battery_title">Mid battery percentage</string>
+  <string name="sh1_mid_battery_hint">Below this level the presentation caps at 15 fps. The critical level still freezes completely.</string>
+
+  <string name="sh1_resolution">Render resolution</string>
+  <string name="sh1_resolution_description">%1$s</string>
+
+  <!-- v10.0 Task 3: the PS1 ordered-dither toggle (auto-off above native) -->
+  <string name="sh1_dither">PS1 dither</string>
+  <string name="sh1_dither_description">On at 320×224 · turns off automatically at higher resolutions</string>
+  <string name="sh1_dither_auto_on">On at 320×224 · turns off automatically at higher resolutions</string>
+  <string name="sh1_dither_auto_off">Off — the scaled dither grid looks unnatural above 320×224</string>
+  <string name="sh1_dither_user_on">On (your choice) · applies at every resolution</string>
+  <string name="sh1_dither_user_off">Off (your choice) · applies at every resolution</string>
+  <string name="sh1_resolution_title">Render resolution</string>
+  <!-- v9.6 (Camtrack v13): the in-app Camtrack editor -->
+  <string name="sh1_camtrack_editor">Camtrack editor</string>
+  <string name="sh1_camtrack_editor_description">Camera tracks · day/night env · live preview</string>
+  <string name="sh1_camtrack_unsaved_msg">The editor has unsaved changes. Save them to the wallpaper, discard them, or stay in the editor?</string>
+  <string name="sh1_camtrack_unsaved_save">Save &amp; close</string>
+  <string name="sh1_camtrack_unsaved_discard">Discard</string>
+  <string name="sh1_camtrack_save_failed">Could not save — the camdat was rejected</string>
+  <!-- v9.7: the NATIVE Camtrack editor (MD3 Expressive, no WebView) -->
+  <string name="sh1_camtrack_saved">Saved — the wallpaper camdat was updated and will reload</string>
+  <string name="sh1_camtrack_discarded">Discarded — the original camdat was restored</string>
+  <string name="sh1_camtrack_save">Save</string>
+  <string name="sh1_camtrack_dirty">Unsaved changes</string>
+  <string name="sh1_camtrack_page_tracks">Tracks</string>
+  <string name="sh1_camtrack_page_track">Track</string>
+  <string name="sh1_camtrack_page_world">World</string>
+  <string name="sh1_camtrack_page_models">Models</string>
+  <string name="sh1_camtrack_add_track">Add track</string>
+  <string name="sh1_camtrack_play_track">Preview this track</string>
+  <string name="sh1_camtrack_drag_handle">Reorder track</string>
+  <string name="sh1_camtrack_preview">LIVE PREVIEW</string>
+  <string name="sh1_camtrack_path_editor">Path — top-down</string>
+  <string name="sh1_camtrack_path_hint">Drag the anchors · pinch to zoom · tap a path to select</string>
+  <string name="sh1_camtrack_props_empty">Select or create a track to edit its speed, look target, FOV and loop behaviour</string>
+  <string name="sh1_camtrack_tracks_empty">Add a track to get started</string>
+  <string name="sh1_camtrack_delete_track">Delete track</string>
+  <string name="sh1_camtrack_duplicate_track">Duplicate</string>
+  <string name="sh1_camtrack_delete_last_track">A model needs at least one track</string>
+  <string name="sh1_camtrack_group_common">Common</string>
+  <string name="sh1_camtrack_group_path">Path</string>
+  <string name="sh1_camtrack_group_look">Look direction</string>
+  <string name="sh1_camtrack_group_points">Anchor points</string>
+  <string name="sh1_camtrack_group_sceneenv">Scene environment</string>
+  <string name="sh1_camtrack_group_daynight">Day / Night environments</string>
+  <string name="sh1_camtrack_group_weather">Weather — per track</string>
+  <string name="sh1_camtrack_group_atmo">Atmosphere</string>
+  <string name="sh1_camtrack_group_rendering">Rendering</string>
+  <string name="sh1_camtrack_name">Name</string>
+  <string name="sh1_camtrack_fov">Field of view</string>
+  <string name="sh1_camtrack_loop">Loop mode</string>
+  <string name="sh1_camtrack_look_mode">Look mode</string>
+  <string name="sh1_camtrack_normal_side">Normal side</string>
+  <string name="sh1_camtrack_direction">Direction</string>
+  <string name="sh1_camtrack_speed_ms">Speed</string>
+  <string name="sh1_camtrack_speed_degs">Speed</string>
+  <string name="sh1_camtrack_start">Start</string>
+  <string name="sh1_camtrack_end">End</string>
+  <string name="sh1_camtrack_center">Center</string>
+  <string name="sh1_camtrack_position">Position</string>
+  <string name="sh1_camtrack_look_at">Look at</string>
+  <string name="sh1_camtrack_point">Point %1$d</string>
+  <string name="sh1_camtrack_remove_point">Remove point</string>
+  <string name="sh1_camtrack_add_point">Add point at end</string>
+  <string name="sh1_camtrack_point_min">A %1$s needs at least two points</string>
+  <string name="sh1_camtrack_yaw">Yaw</string>
+  <string name="sh1_camtrack_pitch">Pitch</string>
+  <string name="sh1_camtrack_yaw_speed">Yaw speed</string>
+  <string name="sh1_camtrack_pitch_speed">Pitch speed</string>
+  <string name="sh1_camtrack_yaw_bounds">Yaw boundaries (mirror between min/max)</string>
+  <string name="sh1_camtrack_pitch_bounds">Pitch boundaries (mirror between min/max)</string>
+  <string name="sh1_camtrack_yaw_min">Yaw min</string>
+  <string name="sh1_camtrack_yaw_max">Yaw max</string>
+  <string name="sh1_camtrack_pitch_min">Pitch min</string>
+  <string name="sh1_camtrack_pitch_max">Pitch max</string>
+  <string name="sh1_camtrack_lazy_rate">Lazy turn rate</string>
+  <string name="sh1_camtrack_arc_bounds">Limit arc (rotation boundaries)</string>
+  <string name="sh1_camtrack_arc_min">Arc min</string>
+  <string name="sh1_camtrack_arc_max">Arc max</string>
+  <string name="sh1_camtrack_radius_x">Radius X</string>
+  <string name="sh1_camtrack_radius_z">Radius Z</string>
+  <string name="sh1_camtrack_radius_start">Radius start</string>
+  <string name="sh1_camtrack_radius_end">Radius end</string>
+  <string name="sh1_camtrack_height_start">Height offset start</string>
+  <string name="sh1_camtrack_height_end">Height offset end</string>
+  <string name="sh1_camtrack_start_angle">Start angle</string>
+  <string name="sh1_camtrack_turns">Turns</string>
+  <string name="sh1_camtrack_size_x">Size X</string>
+  <string name="sh1_camtrack_size_z">Size Z</string>
+  <string name="sh1_camtrack_lanes">Lanes</string>
+  <string name="sh1_camtrack_semi_x">Semi-axis X</string>
+  <string name="sh1_camtrack_semi_z">Semi-axis Z</string>
+  <string name="sh1_camtrack_env_pair">Env pair (A · B)</string>
+  <string name="sh1_camtrack_env_slot_a">Custom slot A</string>
+  <string name="sh1_camtrack_env_slot_b">Custom slot B</string>
+  <string name="sh1_camtrack_day_env">Day env</string>
+  <string name="sh1_camtrack_night_env">Night env</string>
+  <string name="sh1_camtrack_track_day_env">Track day ovr</string>
+  <string name="sh1_camtrack_track_night_env">Track night ovr</string>
+  <string name="sh1_camtrack_phase_scene">Scene</string>
+  <string name="sh1_camtrack_phase_day">Day</string>
+  <string name="sh1_camtrack_phase_night">Night</string>
+  <string name="sh1_camtrack_weather_inherit">Inherit</string>
+  <string name="sh1_camtrack_model_weather">Model default</string>
+  <string name="sh1_camtrack_boot_recipe">Boot recipe</string>
+  <string name="sh1_camtrack_lens_flare">Lens flare</string>
+  <string name="sh1_camtrack_flashlight">Flashlight</string>
+  <string name="sh1_camtrack_psx_wobble">PSX wobble</string>
+  <string name="sh1_camtrack_dither">Ordered dither</string>
+  <string name="sh1_camtrack_particles">Snow / rain</string>
+  <string name="sh1_camtrack_engine">Engine effects</string>
+  <string name="sh1_camtrack_rate">Rate</string>
+  <string name="sh1_camtrack_models_empty">No models in this camdat</string>
+  <string name="sh1_camtrack_model_tracks">%1$d track%2$s</string>
+  <string name="sh1_camtrack_pick_preset">Environment preset</string>
+  <string name="sh1_camtrack_pick_pair">Authentic pair</string>
+  <string name="sh1_camtrack_inherit_model">Inherit — the model preset</string>
+  <string name="sh1_camtrack_editor_error">The camdat could not be parsed</string>
+  <string name="sh1_res_authentic">320 × 224 (authentic)</string>
+  <string name="sh1_res_present">640 × 360 (presentation)</string>
+  <string name="sh1_fps">Frame rate</string>
+  <string name="sh1_fps_description">%1$s</string>
+  <string name="sh1_fps_title">Frame rate</string>
+  <string name="sh1_fps_eco">15 fps (battery saver)</string>
+  <string name="sh1_fps_cinema">24 fps (cinematic)</string>
+  <string name="sh1_fps_authentic">30 fps (authentic)</string>
+  <string name="sh1_fps_duplicate">60 fps (duplicated ticks)</string>
+  <string name="sh1_adaptive">Adaptive pacing</string>
+  <string name="sh1_adaptive_description">Lower the rate on slow devices</string>
+
+  <!-- v10.1 TASK 4: strict center-crop presentation + user pan offsets -->
+  <string name="sh1_crop_x">Crop position · horizontal</string>
+  <string name="sh1_crop_x_description">%1$s</string>
+  <string name="sh1_crop_y">Crop position · vertical</string>
+  <string name="sh1_crop_y_description">%1$s</string>
+  <string name="sh1_crop_center">Centered · the screen fills edge to edge, excess cropped evenly</string>
+  <string name="sh1_crop_left">Shifted left %1$d%% · only this band is visible on the screen</string>
+  <string name="sh1_crop_right">Shifted right %1$d%% · only this band is visible on the screen</string>
+  <string name="sh1_crop_up">Shifted up %1$d%% · only this band is visible on the screen</string>
+  <string name="sh1_crop_down">Shifted down %1$d%% · only this band is visible on the screen</string>
+  <string name="sh1_crop_editor_hint">Drag the highlighted window or use the sliders — the scene stays fixed; only the visible window (the darkened bars) shifts</string>
+  <string name="sh1_crop_toggle">Screen crop window</string>
+
+  <string name="sh1_diagnostics">Engine diagnostics</string>
+  <!-- v9.0 Phase H/I additions (concise professional summaries; verbose
+       detail lives behind the info expandables / diagnostics sheet) -->
+
+  <!-- F20 gradual day/night blend -->
+  <string name="sh1_transition">Gradual day/night blend</string>
+  <string name="sh1_transition_description">Crossfade over ~3 s at the day/night boundary</string>
+
+  <!-- F22 sun-time auto mode -->
+  <string name="sh1_sun_mode">Sun-time mode</string>
+  <string name="sh1_sun_mode_description">Follows actual dawn and dusk (civil twilight)</string>
+  <string name="sh1_city">City</string>
+  <string name="sh1_city_description">Select your city</string>
+  <string name="sh1_city_none">Not selected — clock schedule active</string>
+  <string name="sh1_city_value">%1$s</string>
+  <string name="sh1_city_twilight_value">%1$s · dawn %2$s · dusk %3$s</string>
+  <string name="sh1_city_none_summary">Falls back to the day/night schedule times</string>
+  <string name="sh1_city_custom">Custom coordinates</string>
+  <string name="sh1_city_custom_summary">Enter exact latitude / longitude</string>
+  <string name="sh1_city_custom_active_summary">Lat %1$s · Lon %2$s</string>
+  <string name="sh1_city_custom_title">Custom coordinates</string>
+  <string name="sh1_city_custom_description">Decimal degrees, WGS84. North / East positive.</string>
+  <string name="sh1_city_custom_lat_hint">Latitude</string>
+  <string name="sh1_city_custom_lon_hint">Longitude</string>
+  <string name="sh1_city_custom_invalid_lat">Latitude must be within ±90</string>
+  <string name="sh1_city_custom_invalid_lon">Longitude must be within ±180</string>
+  <string name="sh1_city_select_title">Select city</string>
+  <string name="sh1_city_search_hint">Search city or country</string>
+
+  <!-- F21 per-scene day/night env -->
+  <string name="sh1_scene_day_env">Scene day environment</string>
+  <string name="sh1_scene_day_env_description">Falls back to the global day preset</string>
+  <string name="sh1_scene_night_env">Scene night environment</string>
+  <string name="sh1_scene_night_env_description">Falls back to the global night preset</string>
+  <string name="sh1_scene_env_value">%1$s — %2$s</string>
+  <string name="sh1_scene_env_global">Global default (%1$s)</string>
+
+  <!-- F24 PSX wobble -->
+  <string name="sh1_wobble">PSX vertex wobble</string>
+  <string name="sh1_wobble_description">Authentic PS1 vertex snap, affine UVs, 15-bit color</string>
+
+  <!-- F25/F26 sliders -->
+  <string name="sh1_reset">Reset</string>
+  <string name="sh1_res_slider_value">%1$s</string>
+  <string name="sh1_res_default_label">320 × 224 · authentic</string>
+
+  <!-- F23 device tilt -->
+  <string name="sh1_tilt_section">Tilt camera</string>
+  <string name="sh1_env_defaults_section">Global env defaults</string>
+  <string name="sh1_randomizer_section">Wallpaper rotation</string>
+  <string name="sh1_auto_section">Auto mode</string>
+  <string name="sh1_battery_section">Battery &amp; power</string>
+  <!-- v9.9: the RENDERING BACKEND picker strings (the user overruled the
+       v9.9 no-ship verdict: the hardware path ships as an experimental
+       opt-in at its measured ~99% bit-exact ceiling; the PS1 wobble +
+       dither tables are perfectly preserved — see the v9.9 worklog) -->
+  <string name="sh1_rendering_section">Rendering</string>
+  <string name="sh1_hwrender">Rendering backend</string>
+  <string name="sh1_hwrender_description">%s</string>
+  <string name="sh1_hwbackend_title">Rendering backend</string>
+  <string name="sh1_hwbackend_software">Software (Default)</string>
+  <string name="sh1_hwbackend_gles">OpenGL ES (Hardware)</string>
+  <string name="sh1_hwbackend_vulkan">Vulkan (Hardware)</string>
+  <string name="sh1_hwbackend_current">Active: %s — tap to change</string>
+  <string name="sh1_hwbackend_warning_title">Experimental feature</string>
+  <string name="sh1_hwbackend_warning_body">Hardware rendering is experimental.
+    Older or budget devices may experience crashes, graphical glitches, or
+    high battery drain. Software rendering is recommended for
+    stability.</string>
+  <string name="sh1_hwbackend_warning_accept">Use anyway</string>
+  <string name="sh1_hwreport_title">About hardware rendering</string>
+  <string name="sh1_hwreport_body">The hardware backends render the scene mesh on the GPU using the same dither shader and vertex snap as the software renderer; snow, brightness and presentation stay on the CPU.\n\nAccuracy (vs. software, 320×224):\n• OpenGL ES: 44–50 dB PSNR, ~99% bit-exact\n• Vulkan: 44–50 dB PSNR, ~99% bit-exact\n\nBattery (measured, standardized 60 s sequence):\n• CPU work per frame drops by about a third — rasterization moves to the GPU\n• Battery-neutral at the native 320×224 resolution\n• At higher render resolutions: 40–70% lower render energy\n\nThe software renderer remains the default and the accuracy reference.</string>
+  <string name="sh1_data_section">Data &amp; diagnostics</string>
+  <string name="sh1_tilt">Camera follows device tilt</string>
+  <string name="sh1_tilt_description">Significant tilts shift the view smoothly</string>
+  <string name="sh1_tilt_threshold">Tilt threshold</string>
+  <string name="sh1_tilt_threshold_description">%1$d degrees</string>
+  <string name="sh1_tilt_max">Camera shift</string>
+  <string name="sh1_tilt_max_description">Up to %1$s°</string>
+  <string name="sh1_tilt_rate">Sensor polling rate</string>
+  <string name="sh1_tilt_rate_description">%1$d Hz</string>
+
+  <!-- F29 wallpaper selector -->
+  <string name="sh1_wallpaper_selector">Wallpaper</string>
+  <string name="sh1_wallpaper_selector_value">%1$s · %2$s</string>
+  <string name="sh1_wallpaper_count_value">%1$d wallpapers</string>
+  <string name="sh1_wallpaper_track_type">%1$s</string>
+  <string name="sh1_city_select_description">All national capitals and cities of one million or more (GeoNames)</string>
+  <string name="sh1_scene_env_override_description">Applies to the active scene only</string>
+  <string name="sh1_scene_env_global_row">Use the global default</string>
+
+
+  <string name="sh1_diagnostics_description">FPS, frame time and freeze state</string>
+  <string name="sh1_diagnostics_title">Engine diagnostics</string>
+  <string name="sh1_diagnostics_description_sheet">Live readout of the running engine. Read-only.</string>
+  <string name="sh1_diag_engine">Engine: %1$s</string>
+  <string name="sh1_diag_state_running">running</string>
+  <string name="sh1_diag_state_stopped">stopped</string>
+  <string name="sh1_diag_fps">FPS: %1$s</string>
+  <string name="sh1_diag_frame">Frame time: %1$s ms</string>
+  <string name="sh1_diag_freeze">Freeze: %1$s</string>
+  <string name="sh1_diag_state_frozen">frozen (0 fps)</string>
+  <string name="sh1_diag_state_live">live</string>
+  <string name="sh1_diag_raster">Raster: %1$d × %2$d</string>
+  <string name="sh1_diag_res_setting">Resolution setting: %1$s</string>
+  <string name="sh1_diag_cap">Cap setting: %1$d fps</string>
+  <string name="sh1_diag_battery">Critical battery: %1$d%%</string>
+  <string name="sh1_diag_scene">Scene: %1$s</string>
+
+  <string name="sh1_tiles">Quick settings tiles</string>
+  <string name="sh1_tiles_description">Next scene and freeze tiles</string>
+  <string name="sh1_tile_next_label">Next scene</string>
+  <string name="sh1_tile_next_subtitle">Next scene</string>
+  <string name="sh1_tile_freeze_label">Freeze wallpaper</string>
+  <string name="sh1_tile_frozen">Frozen</string>
+  <string name="sh1_tile_live">Live</string>
+  <string name="sh1_tile_disabled">Off</string>
+
+  <string name="sh1_config_report_title">Config import report</string>
+  <string name="sh1_config_report_msg">%1$d scene(s) accepted, %2$d rejected</string>
+  <string name="sh1_config_report_accepted">Accepted</string>
+  <string name="sh1_config_report_rejected">Rejected</string>
+
+  <string name="sh1_override_none">Not set</string>
+  <string name="sh1_override_dialog_msg">Pin the environment mode or weather for this scene. Applied on the next switch.</string>
+  <string name="sh1_override_pick_env">Env mode: %1$s</string>
+  <string name="sh1_override_pick_weather">Weather: %1$s</string>
+  <string name="sh1_override_env_title">Scene env mode</string>
+  <string name="sh1_override_weather_title">Scene weather</string>
+  <string name="sh1_override_clear">Clear overrides</string>
+
+  <string name="sh1_import_too_large_title">Asset too large</string>
+  <string name="sh1_import_too_large_msg">The file is %1$d MB. Imports are capped at 512 MB.</string>
+  <string name="sh1_import_confirm_title">Large import</string>
+  <string name="sh1_import_confirm_msg">Import a %1$d MB file into the app storage?</string>
+
+  <!-- TITLES -->
+
+  <string name="title_info">Information</string>
+  <string name="title_apply_changes">Apply changes</string>
+  <string name="title_logcat">Logcat</string>
+  <string name="title_licenses">Open source licenses</string>
+
+  <!-- LABELS -->
+
+  <string name="label_degrees">%1$s degrees</string>
+
+  <!-- ACTIONS -->
+
+  <string name="action_cancel">Cancel</string>
+  <string name="action_ok">OK</string>
+  <string name="action_select">Select</string>
+  <string name="action_close">Close</string>
+  <string name="action_back">Back</string>
+  <string name="action_open_link">Open external website</string>
+  <string name="action_hide">Hide</string>
+  <string name="action_reset">Reset</string>
+  <string name="action_deactivate">Deactivate</string>
+  <string name="action_select_all">Select all</string>
+  <string name="action_continue">Continue</string>
+  <string name="action_reload">Reload</string>
+  <string name="action_open_app_info">Open app info</string>
+  <string name="action_set">Set wallpaper</string>
+  <string name="action_learn_more">Learn more</string>
+  <string name="action_help">Help</string>
+  <string name="action_language_select">Select language</string>
+  <string name="action_set_static">Set static wallpaper</string>
+  <string name="action_change_time">Change time</string>
+  <string name="action_change_interval">Change interval</string>
+  <string name="action_copy_to_clipboard">Copy to clipboard</string>
+
+  <!-- OTHER -->
+
+  <string name="other_title">Other options</string>
+  <string name="other_description">Battery, backup, theme &amp; reset</string>
+  <string name="other_language">Language</string>
+  <string name="other_language_description">Choose the app language</string>
+  <string name="other_language_system">Follow system</string>
+  <string name="other_language_system_description">English if translation is not available</string>
+  <string name="other_launcher">Hide icon in launcher</string>
+  <string name="other_launcher_description">Settings will only be accessible in your system\'s live wallpaper picker</string>
+  <string name="other_launcher_unsupported">This feature is no longer supported due to system restrictions</string>
+  <string name="other_theme">App color theme</string>
+  <string name="other_theme_description">Change the color scheme</string>
+  <string name="other_theme_auto">Auto</string>
+  <string name="other_theme_light">Light</string>
+  <string name="other_theme_dark">Dark</string>
+  <string name="other_contrast">Contrast</string>
+  <string name="other_contrast_description">Accessibility for your vision</string>
+  <!-- This is a contrast option name: User can choose between standard, medium and high contrast. The button width should be as dense as possible. -->
+  <string name="other_contrast_standard">Standard</string>
+  <!-- This is a contrast option name: User can choose between standard, medium and high contrast -->
+  <string name="other_contrast_medium">Medium</string>
+  <!-- This is a contrast option name: User can choose between standard, medium and high contrast -->
+  <string name="other_contrast_high">High</string>
+  <string name="other_contrast_dynamic">Contrast for device theme has to be set in system settings</string>
+  <string name="other_contrast_dynamic_unsupported">Dynamic contrast for device theme is only available on Android 14+</string>
+  <string name="other_reset">Reset all settings</string>
+  <string name="other_reset_description">Clears all settings, including the ones kept after an uninstall</string>
+  <string name="other_log">Display logcat</string>
+  <string name="other_log_description">For debugging</string>
+
+  <!-- ABOUT -->
+
+  <string name="about_title">About</string>
+  <string name="about_description">Version, credits &amp; licenses</string>
+  <string name="about_version">Version</string>
+  <string name="about_changelog">Changelog</string>
+  <string name="about_changelog_description">Recent changes</string>
+  <string name="about_developer">Developer</string>
+  <string name="about_github" translatable="false">GitHub</string>
+  <string name="about_github_description">Source code</string>
+  <string name="about_privacy">Privacy policy</string>
+  <string name="about_privacy_description">Offline — no data collected</string>
+
+  <!-- MESSAGES -->
+
+  <string name="msg_hide">Hide icon in launcher?</string>
+  <string name="msg_reset">Reset all settings?</string>
+  <string name="msg_reset_description">All settings will be reset. This cannot be undone.</string>
+  <string name="msg_force_stop">Forced stop required to apply changes</string>
+  <string name="msg_apply_changes">A restart of the wallpaper service is required. Force-stop the app in the system settings and apply it as your wallpaper again.</string>
+  <string name="msg_preview_missing">No wallpaper picker found — set the wallpaper from the system’s live wallpaper picker</string>
+  <string name="msg_report_crash">Attach the crash log when reporting an issue</string>
+  <string name="msg_copied_to_clipboard">Copied to clipboard</string>
+
+  <!-- LICENSES -->
+
+  <string name="license_jost" translatable="false">Jost* Typeface</string>
+  <string name="license_jost_author" translatable="false">Owen Earl</string>
+  <string name="license_jost_link" translatable="false">https://github.com/indestructible-type/Jost</string>
+  <string name="license_author_google" translatable="false">Google</string>
+  <string name="license_material_components" translatable="false">Material Components Android</string>
+  <string name="license_material_components_link" translatable="false">https://github.com/material-components/material-components-android</string>
+  <string name="license_material_icons" translatable="false">Material Design Icons</string>
+  <string name="license_material_icons_link" translatable="false">https://github.com/google/material-design-icons</string>
+  <string name="license_geonames" translatable="false">GeoNames World Cities</string>
+  <string name="license_geonames_link" translatable="false">https://www.geonames.org</string>
+  <string name="license_gpl_v3_overline" translatable="false">This app</string>
+  <string name="license_gpl_v3" translatable="false">GNU GPL v3</string>
+  <string name="title_source_projects" translatable="false">Source projects</string>
+  <string name="credit_decomp" translatable="false">silent-hill-decomp</string>
+  <string name="credit_decomp_description" translatable="false">Game logic · GPL-3.0</string>
+  <string name="credit_decomp_link" translatable="false">https://github.com/shdecompilations/silent-hill-decomp</string>
+  <string name="credit_swanstation" translatable="false">SwanStation</string>
+  <string name="credit_swanstation_description" translatable="false">Software rasterizer · GPL-3.0</string>
+  <string name="credit_swanstation_link" translatable="false">https://github.com/libretro/swanstation</string>
+  <string name="credit_doodle" translatable="false">Doodle Android</string>
+  <string name="credit_doodle_description" translatable="false">Base app &amp; UI · GPL-3.0</string>
+
 </resources>

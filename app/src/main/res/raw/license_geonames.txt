@@ -1,0 +1,15 @@
+GeoNames World Cities Database
+=================================
+
+The built-in world city database of Sun-Time Auto Mode is derived from
+the GeoNames "cities15000" dataset (https://www.geonames.org).
+
+(c) GeoNames, licensed under the Creative Commons Attribution 4.0
+License (CC BY 4.0). The full license text is available at
+https://creativecommons.org/licenses/by/4.0/
+
+The app ships a filtered subset: every national capital and every city
+of one million or more inhabitants (city names, country names and
+decimal-degree WGS84 coordinates).
+
+Attribution: (c) GeoNames, CC BY 4.0, https://www.geonames.org

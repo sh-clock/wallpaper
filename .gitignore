@@ -1,9 +1,19 @@
+# Gradle / Android build outputs
 .gradle/
 build/
 app/build/
 local.properties
-.idea/
-*.iml
+app/.cxx/
+.cxx/
 captures/
 .externalNativeBuild/
-.cxx/
+
+# IDEs
+.idea/
+*.iml
+.navigation/
+.vscode/
+
+# OS cruft
+.DS_Store
+Thumbs.db

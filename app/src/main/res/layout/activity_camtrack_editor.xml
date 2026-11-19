@@ -1,0 +1,389 @@
+<?xml version="1.0" encoding="utf-8"?><!--
+  ~ This file is part of Doodle Android.
+  ~
+  ~ Doodle Android is free software: you can redistribute it and/or modify
+  ~ it under the terms of the GNU General Public License as published by
+  ~ the Free Software Foundation, either version 3 of the License, or
+  ~ (at your option) any later version.
+  ~
+  ~ Doodle Android is distributed in the hope that it will be useful,
+  ~ but WITHOUT ANY WARRANTY; without even the implied warranty of
+  ~ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  ~ GNU General Public License for more details.
+  ~
+  ~ You should have received a copy of the GNU General Public License
+  ~ along with Doodle Android. If not, see <http://www.gnu.org/licenses/>.
+  ~
+  ~ Copyright (c) 2019-2025 by Patrick Zedler
+  -->
+
+<androidx.coordinatorlayout.widget.CoordinatorLayout
+  xmlns:android="http://schemas.android.com/apk/res/android"
+  xmlns:app="http://schemas.android.com/apk/res-auto"
+  xmlns:tools="http://schemas.android.com/tools"
+  android:id="@+id/coordinator_editor"
+  android:layout_width="match_parent"
+  android:layout_height="match_parent"
+  android:background="?attr/colorSurface"
+  android:fitsSystemWindows="true">
+
+  <com.google.android.material.appbar.AppBarLayout
+    android:id="@+id/appbar_editor"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="?attr/colorSurface"
+    app:liftOnScroll="false">
+
+    <com.google.android.material.appbar.MaterialToolbar
+      android:id="@+id/toolbar_editor"
+      style="@style/Widget.Doodle.Toolbar.Back"
+      android:layout_width="match_parent"
+      android:layout_height="?attr/actionBarSize"
+      app:title="@string/sh1_camtrack_editor" />
+
+  </com.google.android.material.appbar.AppBarLayout>
+
+  <LinearLayout
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    app:layout_behavior="@string/appbar_scrolling_view_behavior">
+
+    <!-- ===================== the LIVE ENGINE preview ==================== -->
+    <FrameLayout
+      android:id="@+id/frame_editor_preview"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content"
+      android:background="@android:color/black">
+
+      <!-- v10.1 BUG 2 hardening: match_parent height (the frame's height
+           is ALWAYS set explicitly by applyPreviewAspect at surface
+           create/change; a wrap_content SurfaceView measures to zero —
+           SurfaceView has no intrinsic content — which itself yields a
+           black band). -->
+      <SurfaceView
+        android:id="@+id/surface_editor_preview"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+      <!-- v10.1 TASK 4: the CROP OVERLAY. The preview shows the FULL
+           framebuffer; this overlay draws the exact sub-window the phone
+           screen will show under the STRICT CENTER-CROP presentation
+           (semi-transparent scrim outside it) and lets the user DRAG the
+           crop window (the normalized offsets the wallpaper's blit
+           consumes). Math = the faithful Java mirror of and_blit. -->
+      <xyz.zedler.patrick.doodle.view.Sh1CropOverlayView
+        android:id="@+id/crop_editor_overlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:contentDescription="@string/sh1_crop_editor_hint" />
+
+      <TextView
+        android:id="@+id/text_editor_preview_label"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|end"
+        android:layout_margin="8dp"
+        android:paddingHorizontal="8dp"
+        android:paddingVertical="2dp"
+        android:text="@string/sh1_camtrack_preview"
+        android:textSize="10sp"
+        android:letterSpacing="0.12"
+        android:textColor="?attr/colorOnSecondaryContainer"
+        android:background="@drawable/shape_editor_chip" />
+
+    </FrameLayout>
+
+    <!-- ===================== the playbar ================================ -->
+    <LinearLayout
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content"
+      android:orientation="horizontal"
+      android:gravity="center_vertical"
+      android:paddingHorizontal="8dp"
+      android:paddingTop="2dp"
+      android:paddingBottom="0dp">
+
+      <ImageButton
+        android:id="@+id/image_editor_play"
+        android:layout_width="44dp"
+        android:layout_height="44dp"
+        android:src="@drawable/ic_rounded_pause"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:contentDescription="@string/sh1_camtrack_play_track"
+        app:tint="?attr/colorOnSurfaceVariant" />
+
+      <TextView
+        android:id="@+id/text_editor_time"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="4dp"
+        android:layout_marginEnd="8dp"
+        android:minWidth="96dp"
+        android:textSize="13sp"
+        android:fontFamily="monospace"
+        android:textColor="?attr/colorOnSurfaceVariant"
+        android:text="0.0 / 0.0 s" />
+
+      <!-- v10.0 BUG 2 FIX: CONTINUOUS playhead scrubber (no stepSize).
+           updatePlaybarChrome() sets an arbitrary per-mille float
+           (trackTime / cycle * 1000) on EVERY Choreographer frame while
+           playing; with stepSize="1" Material Slider's lazy draw-time
+           validation (BaseSlider.validateConfigurationIfDirty <- onDraw)
+           threw IllegalStateException: "Value(1.1254324) must be equal to
+           valueFrom(0.0) plus a multiple of stepSize(1.0)" — the reported
+           editor crash seconds after open. A per-mille playhead is a
+           continuous quantity; integer per-mille ticks are meaningless
+           visual noise anyway. -->
+      <com.google.android.material.slider.Slider
+        android:id="@+id/slider_editor_scrub"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:valueFrom="0"
+        android:valueTo="1000" />
+
+      <TextView
+        android:id="@+id/text_editor_rate"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="8dp"
+        android:layout_marginEnd="4dp"
+        android:paddingHorizontal="10dp"
+        android:paddingVertical="4dp"
+        android:text="@string/sh1_camtrack_rate"
+        android:textSize="12sp"
+        android:textStyle="bold"
+        android:textColor="?attr/colorOnSecondaryContainer"
+        android:background="@drawable/shape_editor_chip" />
+
+    </LinearLayout>
+
+    <!-- ===================== v10.1 TASK 4: the crop panel ================ -->
+    <!-- Collapsed by default (clean editor; the overlay + drag stay fully
+         functional). Tapping the toggle expands the precise X/Y offset
+         sliders — the same normalized -1..1 values the wallpaper's
+         presentation blit consumes. CONTINUOUS sliders (no stepSize —
+         the v10.0 slider-crash lesson). -->
+    <LinearLayout
+      android:id="@+id/linear_editor_crop_toggle"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content"
+      android:orientation="horizontal"
+      android:gravity="center_vertical"
+      android:paddingHorizontal="12dp"
+      android:paddingTop="0dp"
+      android:paddingBottom="0dp"
+      android:background="?attr/selectableItemBackground">
+
+      <ImageView
+        android:id="@+id/image_editor_crop_toggle"
+        android:layout_width="24dp"
+        android:layout_height="24dp"
+        android:src="@drawable/ic_rounded_drag_pan_anim"
+        app:tint="?attr/colorOnSurfaceVariant"
+        android:contentDescription="@string/sh1_crop_toggle" />
+
+      <TextView
+        android:id="@+id/text_editor_crop_toggle"
+        android:layout_width="0dp"
+        android:layout_height="48dp"
+        android:layout_weight="1"
+        android:layout_marginStart="12dp"
+        android:gravity="center_vertical"
+        android:text="@string/sh1_crop_toggle"
+        android:textSize="13sp"
+        android:textStyle="bold"
+        android:textColor="?attr/colorOnSurfaceVariant" />
+
+    </LinearLayout>
+
+    <LinearLayout
+      android:id="@+id/panel_editor_crop"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content"
+      android:orientation="vertical"
+      android:visibility="gone"
+      android:paddingHorizontal="8dp"
+      android:paddingBottom="4dp">
+
+      <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="4dp"
+        android:layout_marginEnd="4dp"
+        android:text="@string/sh1_crop_editor_hint"
+        android:textSize="11sp"
+        android:textColor="?attr/colorOnSurfaceVariant" />
+
+      <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <TextView
+          android:layout_width="24dp"
+          android:layout_height="wrap_content"
+          android:gravity="center"
+          android:text="X"
+          android:textSize="12sp"
+          android:textStyle="bold"
+          android:textColor="?attr/colorOnSurfaceVariant"
+          tools:ignore="HardcodedText" />
+
+        <com.google.android.material.slider.Slider
+          android:id="@+id/slider_editor_crop_x"
+          android:layout_width="0dp"
+          android:layout_height="wrap_content"
+          android:layout_weight="1"
+          android:valueFrom="-1"
+          android:valueTo="1" />
+      </LinearLayout>
+
+      <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <TextView
+          android:layout_width="24dp"
+          android:layout_height="wrap_content"
+          android:gravity="center"
+          android:text="Y"
+          android:textSize="12sp"
+          android:textStyle="bold"
+          android:textColor="?attr/colorOnSurfaceVariant"
+          tools:ignore="HardcodedText" />
+
+        <com.google.android.material.slider.Slider
+          android:id="@+id/slider_editor_crop_y"
+          android:layout_width="0dp"
+          android:layout_height="wrap_content"
+          android:layout_weight="1"
+          android:valueFrom="-1"
+          android:valueTo="1" />
+      </LinearLayout>
+
+      <com.google.android.material.button.MaterialButton
+        android:id="@+id/button_editor_crop_reset"
+        style="@style/Widget.Doodle.Button.TextButton"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="end"
+        android:text="@string/sh1_reset"
+        android:minWidth="0dp"
+        tools:ignore="TouchTargetSizeCheck" />
+
+    </LinearLayout>
+
+    <!-- ===================== the editor pages =========================== -->
+    <ViewFlipper
+      android:id="@+id/flipper_editor_pages"
+      android:layout_width="match_parent"
+      android:layout_height="0dp"
+      android:layout_weight="1">
+
+      <!-- TRACKS: the draggable list -->
+      <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent">
+
+        <androidx.recyclerview.widget.RecyclerView
+          android:id="@+id/recycler_editor_tracks"
+          android:layout_width="match_parent"
+          android:layout_height="match_parent"
+          android:paddingBottom="8dp"
+          android:clipToPadding="false" />
+
+        <TextView
+          android:id="@+id/text_editor_tracks_empty"
+          android:layout_width="wrap_content"
+          android:layout_height="wrap_content"
+          android:layout_gravity="center"
+          android:padding="24dp"
+          android:text="@string/sh1_camtrack_tracks_empty"
+          android:textColor="?attr/colorOnSurfaceVariant"
+          android:visibility="gone" />
+
+        <com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
+          android:id="@+id/fab_editor_add"
+          android:layout_width="wrap_content"
+          android:layout_height="wrap_content"
+          android:layout_gravity="bottom|end"
+          android:layout_margin="16dp"
+          app:icon="@drawable/ic_rounded_add"
+          app:iconTint="?attr/colorOnPrimaryContainer"
+          android:text="@string/sh1_camtrack_add_track"
+          android:textColor="?attr/colorOnPrimaryContainer"
+          app:backgroundTint="?attr/colorPrimaryContainer" />
+
+      </FrameLayout>
+
+      <!-- PATH: the 2D top-down editor canvas -->
+      <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical">
+
+        <xyz.zedler.patrick.doodle.view.CamtrackPathView
+          android:id="@+id/path_editor_canvas"
+          android:layout_width="match_parent"
+          android:layout_height="0dp"
+          android:layout_weight="1" />
+
+        <TextView
+          android:layout_width="match_parent"
+          android:layout_height="wrap_content"
+          android:padding="8dp"
+          android:gravity="center"
+          android:textSize="11sp"
+          android:textColor="?attr/colorOnSurfaceVariant"
+          android:text="@string/sh1_camtrack_path_hint" />
+
+      </LinearLayout>
+
+      <!-- WORLD: the World & Weather panel replica (rows built in code) -->
+      <androidx.core.widget.NestedScrollView
+        android:id="@+id/scroll_editor_world"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent">
+
+        <LinearLayout
+          android:id="@+id/linear_editor_world"
+          android:layout_width="match_parent"
+          android:layout_height="wrap_content"
+          android:orientation="vertical"
+          android:paddingBottom="24dp" />
+
+      </androidx.core.widget.NestedScrollView>
+
+      <!-- MODELS: the models list (rows built in code) -->
+      <androidx.core.widget.NestedScrollView
+        android:id="@+id/scroll_editor_models"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent">
+
+        <LinearLayout
+          android:id="@+id/linear_editor_models"
+          android:layout_width="match_parent"
+          android:layout_height="wrap_content"
+          android:orientation="vertical"
+          android:paddingBottom="24dp" />
+
+      </androidx.core.widget.NestedScrollView>
+
+    </ViewFlipper>
+
+    <!-- ===================== the MD3 navigation bar ===================== -->
+    <com.google.android.material.bottomnavigation.BottomNavigationView
+      android:id="@+id/nav_editor"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content"
+      app:labelVisibilityMode="labeled"
+      app:menu="@menu/menu_editor" />
+
+  </LinearLayout>
+
+</androidx.coordinatorlayout.widget.CoordinatorLayout>
