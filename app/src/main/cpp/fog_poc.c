@@ -135,6 +135,7 @@
  * the func_8008E5B4 scroll source (left 64x64) + the static right-half
  * tiles; extracted by tools/extract_dr_wave_tim.py. */
 #include "dr_wave_data.h"
+#include "tv_tim_data.h"
 /* the engine's VERBATIM sine LUT (g_SineTable from libkmath.s) — v8:
  * Math_Sin/Math_Cos are RAW 4096-entry lookups (no interpolation); needed
  * for the weather-transition sine driver (Particle_SystemUpdate) and the
@@ -1227,23 +1228,24 @@ typedef struct {
     int axis;                       /* 0 x 1 y 2 z                           */
     float cur[3];                   /* live driver state (rot/pos meters)    */
     unsigned lcgS1, lcgS2;          /* tvNoise live LCG state (D_800DB914/918) */
-    int tvChannel, tvTimer;         /* tvNoise channel state machine:
-                                     * tvChannel = the MASTER state
-                                     * D_800E0698.field_0 (0 off / 1 attract /
-                                     * 2 channel-change / 3 on); tvTimer = the
-                                     * tracked screen's field_24 (Q12 ms)   */
-    /* ---- v31 tvNoise per-screen state (the engine s_800E06A0, one live
-     * tracked screen = the REF_NEAR near screen field_8[9]; the SCREEN
-     * QUAD PAINT is data-blocked — D_800DB7D4/D_800DB7E4[3][3]/
-     * D_800DB874[] are extern-only in the decomp repo,
-     * include/maps/map4/map4_s03.h:149-170, so the noise UVs cannot be
-     * drawn; the state machine still ticks, map4_s03.c VERBATIM):
-     *   tvSub   field_22 sub-state | tvDur field_28 latched duration
-     *   tvSlot  field_30 TIM-slot index (cycles per state machine)
-     *   tvU/tvV field_34/field_36 paint UV offsets
-     *   tvPat   field_23 pattern walk | tvPatT field_2C countdown
-     *   tvDone  field_21 screen-completed flag                    */
-    int tvSub, tvDur, tvSlot, tvU, tvV, tvPat, tvPatT, tvDone;
+    int tvChannel;                  /* tvNoise MASTER state D_800E0698.field_0
+                                     * (0 off / 1 attract / 2 channel-change /
+                                     * 3 on) — ONE per overlay, all 10 screens */
+    /* ---- v36 tvNoise ALL-TEN-SCREEN state (the engine s_800E06A0 x 10,
+     * func_800D7718's loop map4_s03.c:554-558; the SCREEN QUAD PAINT is
+     * now LIVE — the corner tables D_800DB7D4/D_800DB7E4[3][3] + the
+     * TIM-slot window table D_800DB874[16] decoded from VIN/
+     * MAP4_S03.BIN at overlay base 0x800C9578 — see sh_tv_paint):
+     *   tvTimer[i] field_24 | tvDur[i] field_28 latched duration
+     *   tvSub[i]   field_22 sub-state | tvSlot[i] field_30 paint style
+     *   tvU[i]/tvV[i] field_34/field_36 paint UV offsets
+     *   tvPat[i]   field_23 pattern walk | tvPatT[i] field_2C countdown
+     *   tvDone[i]  field_21 screen-completed flag                  */
+    int tvTimer[10];
+    int tvSub[10], tvDur[10], tvSlot[10], tvU[10], tvV[10];
+    int tvPat[10], tvPatT[10], tvDone[10];
+    int tvR1[10], tvR2[10], tvR3[10]; /* v36: the paint's 3 LCG draws —
+                                     * temp_s6/spB0/temp_s4's rnd terms */
     char timNames[3][12];           /* the TV1/2/3.TIM slot list (catalog)   */
     int nTims;
     /* ---- v31 rngWalk (map6_s03.c:375-444 VERBATIM — SITAI_NE, the only
@@ -1289,6 +1291,13 @@ typedef struct {
     int liveVy[16], liveVz[16];     /* gravityScatter live pos (raw Q12 m)   */
     int seeded;                     /* gravityScatter: per-inst state seeded  */
     int isCabin;                    /* ferrisWheel cabin (FWBOX parity set)   */
+    int instBase;                   /* v36: sineBob's instRange base — the
+                                     * GLOBAL horse index (UMA1_HID's 4 horses
+                                     * are engine-loop indices 6..9, the i>=6
+                                     * phase branch; map6_s04_2.c:3622-3633) */
+    float rot0PerInst[16][3];      /* v36: per-instance authored rot0 (the
+                                     * carousel horses' D_800EBAFC yaws) */
+    int rot0PerInstN;
     int pendSlot[5];                /* ferris arm i pendulum slot (4 aliased) */
     /* ---- v32 (S18): the deferred driver families (A_SWEEP §4b) ---- */
     int slideIdx;                   /* slideDoor: g_WorldObject_Dr[i] index  */
@@ -1313,7 +1322,115 @@ typedef struct {
     int chunkX, chunkZ, activeChunks, isExterior;
     Sh1xMapLinkNb nbs[8];
     int nNbs;
+
 } Sh1xMapLink;
+
+/* ==================================================================== */
+/* v36: THE TV SCREEN PAINT — func_800D88C8 (map4_s03.c:1252-1409),      */
+/* the data UNBLOCKED: the corner tables D_800DB7D4 / D_800DB7E4[3][3]  */
+/* + the TIM-slot window table D_800DB874[16] + the anchor constants    */
+/* decoded VERBATIM from VIN/MAP4_S03.BIN (the compiled map overlay,     */
+/* load base g_OvlDynamic 0x800C9578, main.c:26):                        */
+/*   D_800DB7C8  = (Q12(164), Q12(0), Q12(52))    the REF_NEAR worldobj */
+/*   anchor      = (Q12(160), Q12(0), Q12(40))    func_800D7718:535     */
+/*   D_800DB7D4  = {1847,-728,3423 | 1440,-295,3016} Q8 (the near big)  */
+/*   D_800DB7E4[3][3] (Q8 pairs) + D_800DB874[16] (see the ripper's      */
+/*   tvPaint emission). The corner cross-wiring is func_800D761C        */
+/*   VERBATIM (c1 takes (B.x, A.y, B.z), c2 (A.x, B.y, A.z)).           */
+/* The 3 TV TIMs (TV1/TV2/TV3) upload via func_800D7450 +              */
+/* Fs_QueuePostLoadTim: TV1 pixels (832..863, 256..511) CLUT rows 0..2; */
+/* TV2 pixels (800..863, 0..255) CLUT rows 5..6; TV3 pixels             */
+/* (768..831, 384..511) CLUT rows 10..11 — the CLUT bank at x 448.      */
+/* Sampling is SwanStation's Palette8Bit path VERBATIM (gpu_sw_backend.  */
+/* cpp ShadePixel): texel(u,v) -> halfword(tpX + u/2, tpY + v) -> the    */
+/* byte -> palette VRAM (448 + idx, clutRow). The palette STRIP rows     */
+/* 0..11 span x 448..703: entry 0..15 = the TV's own CLUT row;          */
+/* 16..255 = the engine's other VRAM (the room's streamed texture slots */
+/* at tpages 8..10 x 512..703, map.c:152-167 Texture_Init slots, plus    */
+/* the tpage-7 region) — the ripper emits the reconstructed strip from   */
+/* the room's own first three TIMs (the runtime LRU stream content      */
+/* VARIES in-game; the approximation is documented in the EXTRAs src).  */
+/* ==================================================================== */
+#define TV_SCREENS 10
+#define TV_STYLES  16
+typedef struct {
+    int tp;                 /* tpage bits (field_0 & 0x1F; |0x20 = 8bpp) */
+    int clutWord;           /* the RAW clut id (field_2): x=(w&0x3F)<<4=448, row=w>>6 */
+    int u0, v0;             /* field_4 / field_5 (the UV window base)   */
+    int du, dv;             /* field_6 / field_7 (the window size)      */
+    int ru, rv;             /* field_8 / field_9 (the LCG rnd ranges)   */
+} TvStyle;
+typedef struct {
+    int hasTv;                          /* the tvPaint EXTRAs parsed      */
+    int big[TV_SCREENS];               /* field_20 (the near screen)     */
+    int cA[TV_SCREENS][3], cB[TV_SCREENS][3];  /* the raw Q8 table pairs  */
+    TvStyle style[TV_STYLES];          /* D_800DB874[16] verbatim        */
+    int bright, dim, flickMask;        /* 188 / 164 / pad & 0xB          */
+    unsigned short strip[12][256];     /* the CLUT bank rows 0..11       */
+    unsigned char *plane[TV_STYLES];   /* lazy RGBA planes per style     */
+} TvPaint;
+
+static void sh_tvpaint_free(TvPaint *tvp) {
+    for (int i = 0; i < TV_STYLES; i++) {
+        free(tvp->plane[i]);
+        tvp->plane[i] = NULL;
+    }
+}
+
+/* the modeled VRAM halfwords the paint's UV windows can touch — the TV
+ * TIM uploads (everything else = 0: fresh-boot stale VRAM) */
+static unsigned short sh_tvpaint_vram(int x, int y) {
+    if (x >= 832 && x < 864 && y >= 256 && y < 512) {
+        int k = (x - 832) * 2;
+        return (unsigned short)(g_tv1Idx[y - 256][k] |
+                                (g_tv1Idx[y - 256][k + 1] << 8));
+    }
+    if (x >= 800 && x < 864 && y >= 0 && y < 256) {
+        int k = (x - 800) * 2;
+        return (unsigned short)(g_tv2Idx[y][k] |
+                                (g_tv2Idx[y][k + 1] << 8));
+    }
+    if (x >= 768 && x < 832 && y >= 384 && y < 512) {
+        int k = (x - 768) * 2;
+        return (unsigned short)(g_tv3Idx[y - 384][k] |
+                                (g_tv3Idx[y - 384][k + 1] << 8));
+    }
+    return 0;
+}
+
+/* build the style's RGBA plane (256x256 texels) lazily */
+static const unsigned char *sh_tvpaint_plane(TvPaint *tvp, int st) {
+    if (st < 0 || st >= TV_STYLES) return NULL;
+    if (tvp->plane[st]) return tvp->plane[st];
+    const TvStyle *s = &tvp->style[st];
+    int row = s->clutWord >> 6;
+    if (row < 0 || row > 11) row = 0;
+    int bx = (s->tp & 0xF) << 6;
+    int by = (s->tp & 0x10) ? 256 : 0;
+    unsigned char *p = (unsigned char *)malloc((size_t)256 * 256 * 4);
+    if (!p) return NULL;
+    for (int v = 0; v < 256; v++) {
+        int y = by + v;
+        for (int u = 0; u < 256; u++) {
+            int x = bx + (u >> 1);
+            unsigned short hw = sh_tvpaint_vram(x, y);
+            int idx = (hw >> ((u & 1) * 8)) & 0xFF;
+            unsigned short c15 = tvp->strip[row][idx];
+            unsigned char *px = p + ((size_t)v * 256 + u) * 4;
+            if (c15 == 0) {           /* the 0x0000 texel hole (engine)   */
+                px[0] = px[1] = px[2] = px[3] = 0;
+            } else {
+                int r = c15 & 0x1F, g = (c15 >> 5) & 0x1F, b = (c15 >> 10) & 0x1F;
+                px[0] = (unsigned char)((r << 3) | (r >> 2));
+                px[1] = (unsigned char)((g << 3) | (g >> 2));
+                px[2] = (unsigned char)((b << 3) | (b >> 2));
+                px[3] = 255;
+            }
+        }
+    }
+    tvp->plane[st] = p;
+    return p;
+}
 typedef struct {
     int chunkX, chunkZ;            /* s_IpdHeader s8 @2/@3 (fixed s8!)     */
     int subcell[5][5][2];          /* [z][x] = (start, count) into order   */
@@ -1344,9 +1461,11 @@ typedef struct {
     int envIsDark;                  /* idx1 Spot && idx0 != idx1: the game's
                                      * dark-room flashlight-ON signature    */
     char envSrc[80];
+    TvPaint tvp;                     /* v36: the tvPaint EXTRAs (map4_s03)  */
 } Sh1x;
 
 static void sh1x_free(Sh1x *sx) {
+    sh_tvpaint_free(&sx->tvp);
     for (int i = 0; sx->bufs && i < sx->nBuffers; i++) {
         free(sx->bufs[i].billboards);
         free(sx->bufs[i].subchunkRanges);
@@ -1562,6 +1681,61 @@ static void sh1x_load(Sh1x *sx, const JValue *json) {
             sx->mapLink.nNbs++;
         }
     }
+    /* ---- v36: the tvPaint tables (map4_s03 func_800D88C8's data, the
+     * VIN/MAP4_S03.BIN decode; see the TvPaint block comment) -------- */
+    memset(&sx->tvp, 0, sizeof(sx->tvp));
+    {
+        const JValue *tvp = jget(sh, "tvPaint");
+        if (tvp) {
+            sx->tvp.hasTv = 1;
+            const JValue *scr = jarr(tvp, "screens");
+            int nscr = jcount(scr);
+            for (int k = 0; k < nscr && k < TV_SCREENS; k++) {
+                const JValue *s = jat(scr, k);
+                if (!s) continue;
+                sx->tvp.big[k] = jintb(s, "big", 0);
+                const JValue *ca = jarr(s, "cA"), *cb = jarr(s, "cB");
+                if (jcount(ca) >= 3) {
+                    sx->tvp.cA[k][0] = (int)jat(ca, 0)->num;
+                    sx->tvp.cA[k][1] = (int)jat(ca, 1)->num;
+                    sx->tvp.cA[k][2] = (int)jat(ca, 2)->num;
+                }
+                if (jcount(cb) >= 3) {
+                    sx->tvp.cB[k][0] = (int)jat(cb, 0)->num;
+                    sx->tvp.cB[k][1] = (int)jat(cb, 1)->num;
+                    sx->tvp.cB[k][2] = (int)jat(cb, 2)->num;
+                }
+            }
+            const JValue *sty = jarr(tvp, "styles");
+            int nsty = jcount(sty);
+            for (int k = 0; k < nsty && k < TV_STYLES; k++) {
+                const JValue *s = jat(sty, k);
+                if (!s) continue;
+                TvStyle *t = &sx->tvp.style[k];
+                t->tp = jint(s, "tp", 0);
+                t->clutWord = jint(s, "clut", 0);
+                t->u0 = jint(s, "u0", 0);
+                t->v0 = jint(s, "v0", 0);
+                t->du = jint(s, "du", 0);
+                t->dv = jint(s, "dv", 0);
+                t->ru = jint(s, "ru", 0);
+                t->rv = jint(s, "rv", 0);
+            }
+            sx->tvp.bright = jint(tvp, "flickBright", 188);
+            sx->tvp.dim = jint(tvp, "flickDim", 164);
+            sx->tvp.flickMask = jint(tvp, "flickMask", 0xB);
+            const JValue *ps = jarr(tvp, "paletteStrip");
+            int nps = jcount(ps);
+            for (int r = 0; r < nps && r < 12; r++) {
+                const JValue *row = jat(ps, r);
+                int nc = jcount(row);
+                for (int c = 0; c < nc && c < 256; c++) {
+                    const JValue *v = jat(row, c);
+                    sx->tvp.strip[r][c] = v ? (unsigned short)(int)v->num : 0;
+                }
+            }
+        }
+    }
     const JValue *pa = jarr(sh, "propAnims");
     int npa = jcount(pa);
     for (int k = 0; k < npa && k < 64; k++) {
@@ -1725,6 +1899,23 @@ static void sh1x_load(Sh1x *sx, const JValue *json) {
             }
         }
         a->isCabin = jintb(e, "cabin", 0);
+        a->instBase = 0;                    /* v36: sineBob instRange[0] */
+        { const JValue *ir = jarr(e, "instRange");
+            if (jcount(ir) >= 1)
+                a->instBase = (int)jat(ir, 0)->num;
+        }
+        { const JValue *rpi = jarr(e, "rot0PerInst");
+            int nr = jcount(rpi);
+            for (int q = 0; q < nr && q < 16; q++) {
+                const JValue *rp = jat(rpi, q);
+                if (rp && rp->count >= 3) {
+                    a->rot0PerInst[q][0] = (float)jat(rp, 0)->num;
+                    a->rot0PerInst[q][1] = (float)jat(rp, 1)->num;
+                    a->rot0PerInst[q][2] = (float)jat(rp, 2)->num;
+                    a->rot0PerInstN++;
+                }
+            }
+        }
         { const JValue *ppi = jarr(e, "posPerInst");
             int n = jcount(ppi);
             for (int q = 0; q < n && q < 16; q++) {
@@ -1803,7 +1994,8 @@ static void sh1x_load(Sh1x *sx, const JValue *json) {
         if (a->driver == 5 && g_animsDemo)
             a->rawVy = jint(e, "postEventVyRaw", 91);
         a->lcgS1 = 0; a->lcgS2 = 0;      /* engine seeds D_800DB918 static 0 */
-        a->tvChannel = 0; a->tvTimer = 0;
+        a->rot0PerInstN = 0; a->instBase = 0;
+        a->tvChannel = 0;
         /* v31.4 (17-FIX1): --anims-demo = the engine state AFTER the story
          * events — with flag 332 set, the engine's chunk-entry hook does
          * func_800D76BC(3) (map4_s03.c:1787-1795), i.e. the town-center
@@ -1812,9 +2004,13 @@ static void sh1x_load(Sh1x *sx, const JValue *json) {
          * (no --anims-demo) stays master 0 (off — pre-intro), engine-true. */
         if (g_animsDemo && a->driver == 2)
             a->tvChannel = 3;
-        /* v31 tvNoise per-screen state init (func_800D761C: all zero) */
-        a->tvSub = 0; a->tvDur = 0; a->tvSlot = 0; a->tvU = 0; a->tvV = 0;
-        a->tvPat = 0; a->tvPatT = 0; a->tvDone = 0;
+        /* v36 tvNoise ALL-TEN-SCREEN state init (func_800D7548 ->
+         * func_800D761C per screen: field_21/22/23/24/2C all zero) */
+        for (int si = 0; si < 10; si++) {
+            a->tvTimer[si] = 0; a->tvSub[si] = 0; a->tvDur[si] = 0;
+            a->tvSlot[si] = 0; a->tvU[si] = 0; a->tvV[si] = 0;
+            a->tvPat[si] = 0; a->tvPatT[si] = 0; a->tvDone[si] = 0;
+        }
         /* v31 rngWalk live state init (Map_WorldObjectsInit:296-299 —
          * D_800DFEF0/2/4/5 all start 0; the base rot/pos come from the
          * authored WorldObject_Init pose ("SITAI_NE", 75, 0.5, 19.7,
@@ -8110,9 +8306,10 @@ static void rain_blit_splash(Frame *fb, const RainFlakeDraw *rd) {
 typedef struct {
     int bucket;              /* OT bucket = Q8 depth >> 3 (32/m, otShift 1) */
     int seq;                 /* engine add order (flakes first, then quads) */
-    int kind;                /* 0 = quad, 1 = snow, 2/3/4 = rain streak/splash/drip */
+    int kind;                /* 0 = quad, 1 = snow, 2/3/4 = rain, 5 = TV paint */
     int item;                /* DrawItem index (kind 0)                     */
-    int tri0;                /* first triangle's index offset (kind 0)      */
+    int tri0;                /* first triangle's index offset (kind 0) / the
+                              * TvQuad index (kind 5)                       */
     int ntri;                /* triangles in this entry: 2 (quad) or 1      */
     SnowFlakeDraw fd;
     RainFlakeDraw rfd;
@@ -8358,6 +8555,14 @@ static void sh1x_anim_pose(const Sh1x *sx, const Sh1xPropAnim *a, int inst,
     rotDeg[0] = a->rot0[0]; rotDeg[1] = a->rot0[1]; rotDeg[2] = a->rot0[2];
     posEng[0] = a->pos[0];  posEng[1] = a->pos[1];  posEng[2] = a->pos[2];
     *posReplaceMask = 0;
+    /* v36: the per-instance authored rot0 (the carousel horses'
+     * D_800EBAFC yaws — the STATIC pose the engine's WorldObjects_Add
+     * feeds from the table, map6_s04_2.c:3636) */
+    if (a->rot0PerInstN > inst && inst >= 0) {
+        rotDeg[0] = a->rot0PerInst[inst][0];
+        rotDeg[1] = a->rot0PerInst[inst][1];
+        rotDeg[2] = a->rot0PerInst[inst][2];
+    }
     const float R2D = 360.0f / 4096.0f;
     if (a->sharedLeader >= 0 && a->sharedLeader < sx->nAnims) {
         /* follower: the engine adds this object with the LEADER's live
@@ -8414,7 +8619,12 @@ static void sh1x_anim_pose(const Sh1x *sx, const Sh1xPropAnim *a, int inst,
         int master = 0;
         for (int m = 0; m < sx->nAnims; m++)
             if (sx->anims[m].driver == 13) { master = sx->anims[m].mvMaster; break; }
-        int i = inst > 0 ? inst : 0;
+        /* v36: the GLOBAL horse index (map6_s04_2.c:3615-3644 loops ONE
+         * 0..9 range; the UMA2_HID family = 0..5, the UMA1_HID family =
+         * 6..9 = the catalog instRange base + the per-node inst) — the
+         * i>=6 branch (i*4096/2 + Q12(0.5)) was UNREACHABLE for the
+         * UMA1_HID nodes before the base existed. */
+        int i = (inst > 0 ? inst : 0) + a->instBase;
         int phase = (i < 6) ? (int)(i * 4096 / 3) : (i * 2048 + 2048);
         int arg = master * 4 + phase;
         posEng[1] = (float)((-4096 - sh_sin_q12(arg)) / 5) / 4096.0f;
@@ -8758,51 +8968,51 @@ static int sh_tv_lcg(Sh1xPropAnim *a, int dtRaw) {
 }
 
 /* func_800D81FC — the blank/off slot (map4_s03.c:833-843) */
-static int sh_tv_81FC(Sh1xPropAnim *a, int arg1, int dtRaw) {
+static int sh_tv_81FC(Sh1xPropAnim *a, int si, int arg1, int dtRaw) {
     (void)dtRaw;
-    if (a->tvTimer == 0) a->tvDur = arg1;
-    a->tvSlot = 0; a->tvU = 0; a->tvV = 0;
-    return a->tvTimer >= a->tvDur;
+    if (a->tvTimer[si] == 0) a->tvDur[si] = arg1;
+    a->tvSlot[si] = 0; a->tvU[si] = 0; a->tvV[si] = 0;
+    return a->tvTimer[si] >= a->tvDur[si];
 }
 
 /* func_800D8230 — the picture-segment slot (map4_s03.c:845-858) */
-static int sh_tv_8230(Sh1xPropAnim *a, int arg1, int arg2, int dtRaw) {
+static int sh_tv_8230(Sh1xPropAnim *a, int si, int arg1, int arg2, int dtRaw) {
     (void)dtRaw;
-    if (a->tvTimer == 0) a->tvDur = arg2;
-    a->tvSlot = arg1 + 6; a->tvV = 0; a->tvU = 0;
-    return a->tvTimer >= a->tvDur;
+    if (a->tvTimer[si] == 0) a->tvDur[si] = arg2;
+    a->tvSlot[si] = arg1 + 6; a->tvV[si] = 0; a->tvU[si] = 0;
+    return a->tvTimer[si] >= a->tvDur[si];
 }
 
 /* func_800D826C — the static-noise slot with the v-offset ramp
  * (map4_s03.c:860-1003)                                                       */
-static int sh_tv_826C(Sh1xPropAnim *a, int arg1, int arg2, int dtRaw) {
+static int sh_tv_826C(Sh1xPropAnim *a, int si, int arg1, int arg2, int dtRaw) {
     (void)dtRaw;
-    if (a->tvTimer == 0) a->tvDur = arg2;
-    a->tvSlot = 4; a->tvU = 0;
+    if (a->tvTimer[si] == 0) a->tvDur[si] = arg2;
+    a->tvSlot[si] = 4; a->tvU[si] = 0;
     switch (arg1) {
-        default: case 0: a->tvV = 0; break;
-        case 1: a->tvV = 64; break;
-        case 2: a->tvV = 32; break;
+        default: case 0: a->tvV[si] = 0; break;
+        case 1: a->tvV[si] = 64; break;
+        case 2: a->tvV[si] = 32; break;
         case 4:
-            a->tvV = (int)((((int64_t)(arg2 < a->tvTimer ? arg2 : a->tvTimer)
+            a->tvV[si] = (int)((((int64_t)(arg2 < a->tvTimer[si] ? arg2 : a->tvTimer[si])
                              << 12) / arg2) >> 6);
             break;
         case 3:
-            a->tvV = 64 - (int)(((((int64_t)(arg2 < a->tvTimer ? arg2
-                                                              : a->tvTimer)
+            a->tvV[si] = 64 - (int)(((((int64_t)(arg2 < a->tvTimer[si] ? arg2
+                                                              : a->tvTimer[si])
                                       << 12) / arg2) << 6) >> 12);
             break;
     }
-    return a->tvTimer >= a->tvDur;
+    return a->tvTimer[si] >= a->tvDur[si];
 }
 
 /* func_800D8354 — the signal-search segment (map4_s03.c:1005-1058)     */
-static int sh_tv_8354(Sh1xPropAnim *a, int arg1, int arg2, int dtRaw) {
+static int sh_tv_8354(Sh1xPropAnim *a, int si, int arg1, int arg2, int dtRaw) {
     int var_t0, sp10[4], var_v1, temp_a0;
     if (arg1 != 0) var_t0 = 1;
     else var_t0 = ((sh_tv_lcg(a, dtRaw) & 0xFFF) < 0x199);
-    if (a->tvTimer == 0) a->tvDur = arg2;
-    a->tvV = 0; a->tvU = 0;
+    if (a->tvTimer[si] == 0) a->tvDur[si] = arg2;
+    a->tvV[si] = 0; a->tvU[si] = 0;
     sp10[0] = arg2 - 0x555;
     if (sp10[0] < 0) sp10[0] = 0;
     if (sp10[0] > 0x111) sp10[0] = 0x111;        /* CLAMP(0, 0x111) */
@@ -8811,105 +9021,105 @@ static int sh_tv_8354(Sh1xPropAnim *a, int arg1, int arg2, int dtRaw) {
     sp10[1] = var_v1 + sp10[0];
     sp10[2] = sp10[1] + 0x3BB;
     sp10[3] = sp10[1] + 0x45E;
-    var_v1 = a->tvTimer;
-    if (sp10[0] >= a->tvTimer) {
-        a->tvSlot = 2;
+    var_v1 = a->tvTimer[si];
+    if (sp10[0] >= a->tvTimer[si]) {
+        a->tvSlot[si] = 2;
         temp_a0 = sp10[0];
         var_v1 = (var_v1 <= temp_a0) ? (var_v1 << 12) : (temp_a0 << 12);
-        a->tvV = fx_q12_mul(var_v1 / temp_a0, 0x19) - 0x20;
+        a->tvV[si] = fx_q12_mul(var_v1 / temp_a0, 0x19) - 0x20;
     } else {
-        if (var_v1 < sp10[1]) a->tvSlot = 2;
+        if (var_v1 < sp10[1]) a->tvSlot[si] = 2;
         else if (var_v1 < sp10[2] || var_t0 == 0 || var_v1 >= sp10[3])
-            a->tvSlot = 3;
-        else a->tvSlot = 2;
+            a->tvSlot[si] = 3;
+        else a->tvSlot[si] = 2;
     }
-    return a->tvTimer >= arg2;
+    return a->tvTimer[si] >= arg2;
 }
 
 /* func_800D84C0 — the rolling-brightness segment (map4_s03.c:1060-1130) */
-static int sh_tv_84C0(Sh1xPropAnim *a, int arg1, int arg2, int dtRaw) {
-    if (a->tvTimer == 0) a->tvDur = arg2;
-    a->tvU = 0;
+static int sh_tv_84C0(Sh1xPropAnim *a, int si, int arg1, int arg2, int dtRaw) {
+    if (a->tvTimer[si] == 0) a->tvDur[si] = arg2;
+    a->tvU[si] = 0;
     switch (arg1) {
         case 0: default:
-            a->tvSlot = 5;
+            a->tvSlot[si] = 5;
             /* (FP_TO(timer % Q12(2/3), 12) / Q12(2/3)) >> 6; Q12(2/3)=2730 */
-            a->tvV = (int)(((int64_t)(a->tvTimer % 2730) << 12) / 2730) >> 6;
-            if (a->tvV > 24 && a->tvV < 29) a->tvV = 32;
+            a->tvV[si] = (int)(((int64_t)(a->tvTimer[si] % 2730) << 12) / 2730) >> 6;
+            if (a->tvV[si] > 24 && a->tvV[si] < 29) a->tvV[si] = 32;
             break;
         case 1:
-            a->tvSlot = 5;
-            a->tvU = sh_tv_lcg(a, dtRaw) % 6;
-            a->tvV = 32;
+            a->tvSlot[si] = 5;
+            a->tvU[si] = sh_tv_lcg(a, dtRaw) % 6;
+            a->tvV[si] = 32;
             break;
     }
-    return !(a->tvTimer < a->tvDur);
+    return !(a->tvTimer[si] < a->tvDur[si]);
 }
 
 /* func_800D85E4 — the blank hold slot 15 (map4_s03.c:1132-1144)        */
-static int sh_tv_85E4(Sh1xPropAnim *a, int arg1, int dtRaw) {
+static int sh_tv_85E4(Sh1xPropAnim *a, int si, int arg1, int dtRaw) {
     (void)dtRaw;
-    if (a->tvTimer == 0) a->tvDur = arg1;
-    a->tvSlot = 15; a->tvV = 0; a->tvU = 0;
-    return a->tvTimer >= a->tvDur;
+    if (a->tvTimer[si] == 0) a->tvDur[si] = arg1;
+    a->tvSlot[si] = 15; a->tvV[si] = 0; a->tvU[si] = 0;
+    return a->tvTimer[si] >= a->tvDur[si];
 }
 
 /* func_800D8874 — the pattern-change interval (map4_s03.c:1218-1230):
  * Q12_MULT_PRECISE(Q12(0.5), Q12_FRACT(lcg)) + Q12(1.0) = 1.0..1.5 s   */
-static int sh_tv_8874(Sh1xPropAnim *a, int dtRaw) {
+static int sh_tv_8874(Sh1xPropAnim *a, int si, int dtRaw) {
     int temp2 = sh_tv_lcg(a, dtRaw) & 0xFFF;      /* Q12_FRACT */
     return fx_q12_mul(2048, temp2) + 4096;
 }
 
 /* func_800D87AC — the picture-pattern random walk (map4_s03.c:1188-1216) */
-static int sh_tv_87AC(Sh1xPropAnim *a, int dtRaw) {
+static int sh_tv_87AC(Sh1xPropAnim *a, int si, int dtRaw) {
     int cond = 0, temp;
-    if (a->tvTimer == 0) {
+    if (a->tvTimer[si] == 0) {
         cond = 1;
-        a->tvPatT = sh_tv_8874(a, dtRaw);
-    } else if (a->tvTimer >= a->tvPatT) {
+        a->tvPatT[si] = sh_tv_8874(a, si, dtRaw);
+    } else if (a->tvTimer[si] >= a->tvPatT[si]) {
         cond = 1;
-        a->tvPatT += sh_tv_8874(a, dtRaw);
+        a->tvPatT[si] += sh_tv_8874(a, si, dtRaw);
     }
     if (cond) {
         temp = sh_tv_lcg(a, dtRaw) & 0xFFF;       /* Q12_FRACT */
-        if (temp < 1228) a->tvPat = 0;            /* Q12(0.3f)  */
-        else if (temp < 2048) a->tvPat = 1;       /* Q12(0.5f)  */
-        else if (temp < 3153) a->tvPat = 2;       /* Q12(0.77f) */
-        else if (temp < 3399) a->tvPat = 3;       /* Q12(0.83f) */
-        else a->tvPat = 4;
+        if (temp < 1228) a->tvPat[si] = 0;            /* Q12(0.3f)  */
+        else if (temp < 2048) a->tvPat[si] = 1;       /* Q12(0.5f)  */
+        else if (temp < 3153) a->tvPat[si] = 2;       /* Q12(0.77f) */
+        else if (temp < 3399) a->tvPat[si] = 3;       /* Q12(0.83f) */
+        else a->tvPat[si] = 4;
     }
-    return a->tvPat;
+    return a->tvPat[si];
 }
 
 /* func_800D8620 — the wobble/picture slots (map4_s03.c:1146-1186)      */
-static int sh_tv_8620(Sh1xPropAnim *a, int arg1, int arg2, int dtRaw) {
-    if (a->tvTimer == 0) a->tvDur = arg2;
-    if (arg1 == -1 /* NO_VALUE */) arg1 = sh_tv_87AC(a, dtRaw);
+static int sh_tv_8620(Sh1xPropAnim *a, int si, int arg1, int arg2, int dtRaw) {
+    if (a->tvTimer[si] == 0) a->tvDur[si] = arg2;
+    if (arg1 == -1 /* NO_VALUE */) arg1 = sh_tv_87AC(a, si, dtRaw);
     switch (arg1 + 1) {
         default: case 0:
-            a->tvSlot = 1; a->tvU = 0; a->tvV = 0;
+            a->tvSlot[si] = 1; a->tvU[si] = 0; a->tvV[si] = 0;
             break;
         case 2:
-            a->tvSlot = 1; a->tvU = 50; a->tvV = 24;
+            a->tvSlot[si] = 1; a->tvU[si] = 50; a->tvV[si] = 24;
             break;
         case 3:
-            a->tvSlot = 1; a->tvU = 128; a->tvV = 0;
+            a->tvSlot[si] = 1; a->tvU[si] = 128; a->tvV[si] = 0;
             break;
         case 4:
-            a->tvU = 0; a->tvSlot = 4;
+            a->tvU[si] = 0; a->tvSlot[si] = 4;
             /* FP_FROM(-(Q12_DIV(timer % Q12(1.5), Q12(1.5)) * 80), 12) - 108 */
             {
-                int64_t z = ((int64_t)(a->tvTimer % 6144) << 12) / 6144 * 80;
-                a->tvV = (int)((-z) >> 12) - 108;
+                int64_t z = ((int64_t)(a->tvTimer[si] % 6144) << 12) / 6144 * 80;
+                a->tvV[si] = (int)((-z) >> 12) - 108;
             }
             break;
         case 5:
-            a->tvSlot = 1; a->tvU = 0; a->tvV = 0;
-            a->tvV = sh_tv_lcg(a, dtRaw) % 320;
+            a->tvSlot[si] = 1; a->tvU[si] = 0; a->tvV[si] = 0;
+            a->tvV[si] = sh_tv_lcg(a, dtRaw) % 320;
             break;
     }
-    return !(a->tvTimer < a->tvDur);
+    return !(a->tvTimer[si] < a->tvDur[si]);
 }
 
 /* D_800CACA8 — the state-1 attract-sequence durations per screen
@@ -8921,110 +9131,110 @@ static const int sh_tv_caca8[10] = {
 
 /* func_800D78F4 — master state 1, the power-on attract sequence
  * (map4_s03.c:608-678; screenIdx = the tracked screen index 9)          */
-static int sh_tv_state1(Sh1xPropAnim *a, int screenIdx, int dtRaw) {
+static int sh_tv_state1(Sh1xPropAnim *a, int si, int dtRaw) {
     int var_s0 = 0, var_s2 = 0;
-    switch (a->tvSub) {
+    switch (a->tvSub[si]) {
         case 0: default:
-            var_s0 = sh_tv_81FC(a, sh_tv_caca8[screenIdx] + 2048, dtRaw);
+            var_s0 = sh_tv_81FC(a, si, sh_tv_caca8[si] + 2048, dtRaw);
             break;
-        case 1:  var_s0 = sh_tv_826C(a, 0, 409, dtRaw); break;
-        case 2:  var_s0 = sh_tv_826C(a, 1, 409, dtRaw); break;
-        case 3:  var_s0 = sh_tv_826C(a, 3, 955, dtRaw); break;
-        case 4:  var_s0 = sh_tv_826C(a, 4, 546, dtRaw); break;
-        case 5:  var_s0 = sh_tv_8620(a, 0, 6144, dtRaw); break;
-        case 6:  var_s0 = sh_tv_826C(a, 2, 682, dtRaw); break;
-        case 7:  var_s0 = sh_tv_8354(a, 1, 8192, dtRaw); break;
-        case 8:  var_s0 = sh_tv_826C(a, 3, 1365, dtRaw); break;
-        case 9:  var_s0 = sh_tv_84C0(a, 0, 9011, dtRaw); break;
-        case 10: var_s0 = sh_tv_826C(a, 4, 1365, dtRaw); break;
-        case 11: var_s0 = sh_tv_85E4(a, 409, dtRaw); break;
-        case 12: var_s0 = sh_tv_826C(a, 3, 1365, dtRaw); break;
-        case 13: var_s2 = sh_tv_84C0(a, 1, 2048, dtRaw); break;
+        case 1:  var_s0 = sh_tv_826C(a, si, 0, 409, dtRaw); break;
+        case 2:  var_s0 = sh_tv_826C(a, si, 1, 409, dtRaw); break;
+        case 3:  var_s0 = sh_tv_826C(a, si, 3, 955, dtRaw); break;
+        case 4:  var_s0 = sh_tv_826C(a, si, 4, 546, dtRaw); break;
+        case 5:  var_s0 = sh_tv_8620(a, si, 0, 6144, dtRaw); break;
+        case 6:  var_s0 = sh_tv_826C(a, si, 2, 682, dtRaw); break;
+        case 7:  var_s0 = sh_tv_8354(a, si, 1, 8192, dtRaw); break;
+        case 8:  var_s0 = sh_tv_826C(a, si, 3, 1365, dtRaw); break;
+        case 9:  var_s0 = sh_tv_84C0(a, si, 0, 9011, dtRaw); break;
+        case 10: var_s0 = sh_tv_826C(a, si, 4, 1365, dtRaw); break;
+        case 11: var_s0 = sh_tv_85E4(a, si, 409, dtRaw); break;
+        case 12: var_s0 = sh_tv_826C(a, si, 3, 1365, dtRaw); break;
+        case 13: var_s2 = sh_tv_84C0(a, si, 1, 2048, dtRaw); break;
     }
-    a->tvTimer += dtRaw;
-    if (var_s0) { a->tvSub++; a->tvTimer = 0; }
+    a->tvTimer[si] += dtRaw;
+    if (var_s0) { a->tvSub[si]++; a->tvTimer[si] = 0; }
     return var_s2;
 }
 
 /* func_800D7AE0 — master state 2, the channel-change noise walk
  * (map4_s03.c:681-827); durations (LCG>>5) + the per-state bases        */
-static int sh_tv_state2(Sh1xPropAnim *a, int dtRaw) {
+static int sh_tv_state2(Sh1xPropAnim *a, int si, int dtRaw) {
     int var_s0 = 0, var_s2 = 0;
-    switch (a->tvSub) {
-        case 0:  var_s0 = sh_tv_84C0(a, 0, (sh_tv_lcg(a, dtRaw) >> 5) + 0x1199, dtRaw); break;
-        case 1:  var_s0 = sh_tv_826C(a, 4, (sh_tv_lcg(a, dtRaw) >> 5) + 0x555, dtRaw); break;
-        case 2:  var_s0 = sh_tv_8620(a, 1, (sh_tv_lcg(a, dtRaw) >> 5) + 0x1800, dtRaw); break;
-        case 3:  var_s0 = sh_tv_826C(a, 3, (sh_tv_lcg(a, dtRaw) >> 5) + 0x555, dtRaw); break;
-        case 4:  var_s0 = sh_tv_8230(a, 0, (sh_tv_lcg(a, dtRaw) >> 5) + 0x2AA, dtRaw); break;
-        case 5:  var_s0 = sh_tv_826C(a, 3, (sh_tv_lcg(a, dtRaw) >> 5) + 0x555, dtRaw); break;
-        case 6:  var_s0 = sh_tv_8230(a, 1, (sh_tv_lcg(a, dtRaw) >> 5) + 0xAAA, dtRaw); break;
-        case 7:  var_s0 = sh_tv_826C(a, 4, (sh_tv_lcg(a, dtRaw) >> 5) + 0x555, dtRaw); break;
-        case 8:  var_s0 = sh_tv_8230(a, 2, (sh_tv_lcg(a, dtRaw) >> 5) + 0x1000, dtRaw); break;
-        case 9:  var_s0 = sh_tv_826C(a, 3, (sh_tv_lcg(a, dtRaw) >> 5) + 0x555, dtRaw); break;
-        case 10: var_s0 = sh_tv_8230(a, 3, (sh_tv_lcg(a, dtRaw) >> 5) + 0xAAA, dtRaw); break;
-        case 11: var_s0 = sh_tv_826C(a, 4, (sh_tv_lcg(a, dtRaw) >> 5) + 0x555, dtRaw); break;
-        case 12: var_s0 = sh_tv_8230(a, 4, (sh_tv_lcg(a, dtRaw) >> 5) + 0x2AA, dtRaw); break;
-        case 13: var_s0 = sh_tv_8230(a, 5, (sh_tv_lcg(a, dtRaw) >> 5) + 0xAAA, dtRaw); break;
-        case 14: var_s0 = sh_tv_826C(a, 3, (sh_tv_lcg(a, dtRaw) >> 5) + 0x555, dtRaw); break;
-        case 15: var_s0 = sh_tv_8230(a, 6, (sh_tv_lcg(a, dtRaw) >> 5) + 0x2AA, dtRaw); break;
-        case 16: var_s0 = sh_tv_826C(a, 4, (sh_tv_lcg(a, dtRaw) >> 5) + 0x555, dtRaw); break;
-        case 17: var_s0 = sh_tv_8230(a, 7, (sh_tv_lcg(a, dtRaw) >> 5) + 0xD55, dtRaw); break;
-        case 18: var_s0 = sh_tv_826C(a, 3, (sh_tv_lcg(a, dtRaw) >> 5) + 0x555, dtRaw); break;
-        case 19: var_s0 = sh_tv_8230(a, 6, (sh_tv_lcg(a, dtRaw) >> 5) + 0xAAA, dtRaw); break;
-        case 20: var_s0 = sh_tv_826C(a, 4, (sh_tv_lcg(a, dtRaw) >> 5) + 0x555, dtRaw); break;
-        case 21: var_s0 = sh_tv_8230(a, 8, (sh_tv_lcg(a, dtRaw) >> 5) + 0x1555, dtRaw); break;
-        case 22: var_s0 = sh_tv_826C(a, 4, (sh_tv_lcg(a, dtRaw) >> 5) + 0x444, dtRaw); break;
-        case 24: var_s0 = sh_tv_8620(a, 2, (sh_tv_lcg(a, dtRaw) >> 5) + 0x1800, dtRaw); break;
-        case 25: var_s0 = sh_tv_85E4(a, (sh_tv_lcg(a, dtRaw) >> 5) + 0x199, dtRaw); break;
-        case 26: var_s0 = sh_tv_826C(a, 4, (sh_tv_lcg(a, dtRaw) >> 5) + 0x444, dtRaw); break;
+    switch (a->tvSub[si]) {
+        case 0:  var_s0 = sh_tv_84C0(a, si, 0, (sh_tv_lcg(a, dtRaw) >> 5) + 0x1199, dtRaw); break;
+        case 1:  var_s0 = sh_tv_826C(a, si, 4, (sh_tv_lcg(a, dtRaw) >> 5) + 0x555, dtRaw); break;
+        case 2:  var_s0 = sh_tv_8620(a, si, 1, (sh_tv_lcg(a, dtRaw) >> 5) + 0x1800, dtRaw); break;
+        case 3:  var_s0 = sh_tv_826C(a, si, 3, (sh_tv_lcg(a, dtRaw) >> 5) + 0x555, dtRaw); break;
+        case 4:  var_s0 = sh_tv_8230(a, si, 0, (sh_tv_lcg(a, dtRaw) >> 5) + 0x2AA, dtRaw); break;
+        case 5:  var_s0 = sh_tv_826C(a, si, 3, (sh_tv_lcg(a, dtRaw) >> 5) + 0x555, dtRaw); break;
+        case 6:  var_s0 = sh_tv_8230(a, si, 1, (sh_tv_lcg(a, dtRaw) >> 5) + 0xAAA, dtRaw); break;
+        case 7:  var_s0 = sh_tv_826C(a, si, 4, (sh_tv_lcg(a, dtRaw) >> 5) + 0x555, dtRaw); break;
+        case 8:  var_s0 = sh_tv_8230(a, si, 2, (sh_tv_lcg(a, dtRaw) >> 5) + 0x1000, dtRaw); break;
+        case 9:  var_s0 = sh_tv_826C(a, si, 3, (sh_tv_lcg(a, dtRaw) >> 5) + 0x555, dtRaw); break;
+        case 10: var_s0 = sh_tv_8230(a, si, 3, (sh_tv_lcg(a, dtRaw) >> 5) + 0xAAA, dtRaw); break;
+        case 11: var_s0 = sh_tv_826C(a, si, 4, (sh_tv_lcg(a, dtRaw) >> 5) + 0x555, dtRaw); break;
+        case 12: var_s0 = sh_tv_8230(a, si, 4, (sh_tv_lcg(a, dtRaw) >> 5) + 0x2AA, dtRaw); break;
+        case 13: var_s0 = sh_tv_8230(a, si, 5, (sh_tv_lcg(a, dtRaw) >> 5) + 0xAAA, dtRaw); break;
+        case 14: var_s0 = sh_tv_826C(a, si, 3, (sh_tv_lcg(a, dtRaw) >> 5) + 0x555, dtRaw); break;
+        case 15: var_s0 = sh_tv_8230(a, si, 6, (sh_tv_lcg(a, dtRaw) >> 5) + 0x2AA, dtRaw); break;
+        case 16: var_s0 = sh_tv_826C(a, si, 4, (sh_tv_lcg(a, dtRaw) >> 5) + 0x555, dtRaw); break;
+        case 17: var_s0 = sh_tv_8230(a, si, 7, (sh_tv_lcg(a, dtRaw) >> 5) + 0xD55, dtRaw); break;
+        case 18: var_s0 = sh_tv_826C(a, si, 3, (sh_tv_lcg(a, dtRaw) >> 5) + 0x555, dtRaw); break;
+        case 19: var_s0 = sh_tv_8230(a, si, 6, (sh_tv_lcg(a, dtRaw) >> 5) + 0xAAA, dtRaw); break;
+        case 20: var_s0 = sh_tv_826C(a, si, 4, (sh_tv_lcg(a, dtRaw) >> 5) + 0x555, dtRaw); break;
+        case 21: var_s0 = sh_tv_8230(a, si, 8, (sh_tv_lcg(a, dtRaw) >> 5) + 0x1555, dtRaw); break;
+        case 22: var_s0 = sh_tv_826C(a, si, 4, (sh_tv_lcg(a, dtRaw) >> 5) + 0x444, dtRaw); break;
+        case 24: var_s0 = sh_tv_8620(a, si, 2, (sh_tv_lcg(a, dtRaw) >> 5) + 0x1800, dtRaw); break;
+        case 25: var_s0 = sh_tv_85E4(a, si, (sh_tv_lcg(a, dtRaw) >> 5) + 0x199, dtRaw); break;
+        case 26: var_s0 = sh_tv_826C(a, si, 4, (sh_tv_lcg(a, dtRaw) >> 5) + 0x444, dtRaw); break;
         case 23: case 27:
-            var_s0 = sh_tv_826C(a, 3, (sh_tv_lcg(a, dtRaw) >> 5) + 0x2AA, dtRaw); break;
+            var_s0 = sh_tv_826C(a, si, 3, (sh_tv_lcg(a, dtRaw) >> 5) + 0x2AA, dtRaw); break;
         case 28:
-            var_s2 = sh_tv_8620(a, 0, (sh_tv_lcg(a, dtRaw) >> 5) + 0x1800, dtRaw); break;
+            var_s2 = sh_tv_8620(a, si, 0, (sh_tv_lcg(a, dtRaw) >> 5) + 0x1800, dtRaw); break;
     }
-    a->tvTimer += dtRaw;
-    if (var_s0) { a->tvTimer = 0; a->tvSub += 1; }
+    a->tvTimer[si] += dtRaw;
+    if (var_s0) { a->tvTimer[si] = 0; a->tvSub[si] += 1; }
     return var_s2;
 }
 
 /* func_800D7F1C — master state 3, the ON program walk (map4_s03.c:
  * 830-958): clip segments (var_s0) finish -> JUMP to a random checkpoint
  * (LCG % 17) * 10; static segments (var_s2) finish -> the next entry.  */
-static void sh_tv_state3(Sh1xPropAnim *a, int dtRaw) {
+static void sh_tv_state3(Sh1xPropAnim *a, int si, int dtRaw) {
     int var_s0 = 0, var_s2 = 0;
-    switch (a->tvSub) {
-        case 0: default: var_s0 = sh_tv_8620(a, -1, 0xAAA, dtRaw); break;
-        case 0x0A: var_s0 = sh_tv_8620(a, -1, 0xAAA, dtRaw); break;
-        case 0x14: var_s0 = sh_tv_8620(a, -1, 0xD55, dtRaw); break;
-        case 0x1E: var_s0 = sh_tv_8620(a, -1, 0x1000, dtRaw); break;
-        case 0x28: var_s0 = sh_tv_8620(a, -1, 0x12AA, dtRaw); break;
-        case 0x32: var_s0 = sh_tv_8620(a, -1, 0x1555, dtRaw); break;
-        case 0x3C: var_s0 = sh_tv_8354(a, 0, 0x1AAA, dtRaw); break;
-        case 0x46: var_s0 = sh_tv_8354(a, 0, 0x1AAA, dtRaw); break;
-        case 0x50: var_s2 = sh_tv_826C(a, 4, 0x3BB, dtRaw); break;
-        case 0x51: var_s0 = sh_tv_8230(a, 0, 0x2AA, dtRaw); break;
-        case 0x5A: var_s2 = sh_tv_826C(a, 3, 0x444, dtRaw); break;
-        case 0x5B: var_s0 = sh_tv_8230(a, 1, 0xAAA, dtRaw); break;
-        case 0x64: var_s2 = sh_tv_826C(a, 4, 0x444, dtRaw); break;
-        case 0x65: var_s0 = sh_tv_8230(a, 2, 0x1000, dtRaw); break;
-        case 0x6E: var_s2 = sh_tv_826C(a, 3, 0x444, dtRaw); break;
-        case 0x6F: var_s0 = sh_tv_8230(a, 3, 0xAAA, dtRaw); break;
-        case 0x78: var_s2 = sh_tv_826C(a, 4, 0x444, dtRaw); break;
-        case 0x79: var_s2 = sh_tv_8230(a, 4, 0x2AA, dtRaw); break;
-        case 0x7A: var_s0 = sh_tv_8230(a, 5, 0xAAA, dtRaw); break;
-        case 0x82: var_s2 = sh_tv_826C(a, 3, 0x555, dtRaw); break;
-        case 0x83: var_s0 = sh_tv_8230(a, 6, 0x2AA, dtRaw); break;
-        case 0x8D: var_s0 = sh_tv_8230(a, 7, 0xD55, dtRaw); break;
-        case 0x96: var_s2 = sh_tv_826C(a, 3, 0x555, dtRaw); break;
-        case 0x97: var_s0 = sh_tv_8230(a, 6, 0xAAA, dtRaw); break;
-        case 0x8C: case 0xA0: var_s2 = sh_tv_826C(a, 4, 0x555, dtRaw); break;
-        case 0xA1: var_s0 = sh_tv_8230(a, 8, 0x1000, dtRaw); break;
+    switch (a->tvSub[si]) {
+        case 0: default: var_s0 = sh_tv_8620(a, si, -1, 0xAAA, dtRaw); break;
+        case 0x0A: var_s0 = sh_tv_8620(a, si, -1, 0xAAA, dtRaw); break;
+        case 0x14: var_s0 = sh_tv_8620(a, si, -1, 0xD55, dtRaw); break;
+        case 0x1E: var_s0 = sh_tv_8620(a, si, -1, 0x1000, dtRaw); break;
+        case 0x28: var_s0 = sh_tv_8620(a, si, -1, 0x12AA, dtRaw); break;
+        case 0x32: var_s0 = sh_tv_8620(a, si, -1, 0x1555, dtRaw); break;
+        case 0x3C: var_s0 = sh_tv_8354(a, si, 0, 0x1AAA, dtRaw); break;
+        case 0x46: var_s0 = sh_tv_8354(a, si, 0, 0x1AAA, dtRaw); break;
+        case 0x50: var_s2 = sh_tv_826C(a, si, 4, 0x3BB, dtRaw); break;
+        case 0x51: var_s0 = sh_tv_8230(a, si, 0, 0x2AA, dtRaw); break;
+        case 0x5A: var_s2 = sh_tv_826C(a, si, 3, 0x444, dtRaw); break;
+        case 0x5B: var_s0 = sh_tv_8230(a, si, 1, 0xAAA, dtRaw); break;
+        case 0x64: var_s2 = sh_tv_826C(a, si, 4, 0x444, dtRaw); break;
+        case 0x65: var_s0 = sh_tv_8230(a, si, 2, 0x1000, dtRaw); break;
+        case 0x6E: var_s2 = sh_tv_826C(a, si, 3, 0x444, dtRaw); break;
+        case 0x6F: var_s0 = sh_tv_8230(a, si, 3, 0xAAA, dtRaw); break;
+        case 0x78: var_s2 = sh_tv_826C(a, si, 4, 0x444, dtRaw); break;
+        case 0x79: var_s2 = sh_tv_8230(a, si, 4, 0x2AA, dtRaw); break;
+        case 0x7A: var_s0 = sh_tv_8230(a, si, 5, 0xAAA, dtRaw); break;
+        case 0x82: var_s2 = sh_tv_826C(a, si, 3, 0x555, dtRaw); break;
+        case 0x83: var_s0 = sh_tv_8230(a, si, 6, 0x2AA, dtRaw); break;
+        case 0x8D: var_s0 = sh_tv_8230(a, si, 7, 0xD55, dtRaw); break;
+        case 0x96: var_s2 = sh_tv_826C(a, si, 3, 0x555, dtRaw); break;
+        case 0x97: var_s0 = sh_tv_8230(a, si, 6, 0xAAA, dtRaw); break;
+        case 0x8C: case 0xA0: var_s2 = sh_tv_826C(a, si, 4, 0x555, dtRaw); break;
+        case 0xA1: var_s0 = sh_tv_8230(a, si, 8, 0x1000, dtRaw); break;
     }
-    a->tvTimer += dtRaw;
-    if (var_s2) { a->tvSub++; a->tvTimer = 0; }
+    a->tvTimer[si] += dtRaw;
+    if (var_s2) { a->tvSub[si]++; a->tvTimer[si] = 0; }
     if (var_s0) {
-        a->tvSub = (sh_tv_lcg(a, dtRaw) % 17) * 10;
-        a->tvTimer = 0;
+        a->tvSub[si] = (sh_tv_lcg(a, dtRaw) % 17) * 10;
+        a->tvTimer[si] = 0;
     }
 }
 
@@ -9313,56 +9523,69 @@ static void sh1x_anims_tick(Sh1x *sx, double dt) {
             break;
         case 2: { /* tvNoise — map4_s03.c VERBATIM LCG + master/channel
                     * state machine + duration timers (see the helpers
-                    * above for the full citations). The SCREEN QUAD PAINT
-                    * is a documented BLOCKER: the corner tables
-                    * D_800DB7D4/D_800DB7E4[3][3] + the TIM-slot window
-                    * table D_800DB874[] are extern-only in the decomp
-                    * repo (map4_s03.h:149-170 — addresses, no contents);
-                    * only the state machine ticks.                        */
+                    * above for the full citations). v36: ALL TEN SCREENS
+                    * tick (func_800D7718's loop map4_s03.c:554-558), each
+                    * drawing its 3 paint LCG values per frame
+                    * (temp_s6/spB0/temp_s4, map4_s03.c:1284-1286) in loop
+                    * order — the shared LCG stream (D_800DB914/918) is
+                    * consumed exactly at the engine's per-screen rate.
+                    * The SCREEN QUAD PAINT itself is sh_tv_paint (below). */
             if (dtRaw == 0) break;   /* func_800D7808: g_DeltaTime == 0   */
-            /* func_800D7808 (map4_s03.c:561-578) over the master state   */
-            switch (a->tvChannel) {
-                case 0:  /* off: the screens run func_800D78D4 = 81FC(0) */
-                    sh_tv_81FC(a, 0, dtRaw);
-                    break;
-                case 1:  /* attract: per-screen func_800D78F4(a, 9)      */
-                    if (sh_tv_state1(a, 9, dtRaw))
-                        a->tvDone = 1;         /* field_21 = master state */
-                    break;
-                case 2:  /* channel-change: func_800D7AE0                */
-                    if (sh_tv_state2(a, dtRaw)) {
-                        /* func_800D76BC(3): master -> 3 + the screens
-                         * reset (func_800D7548 -> func_800D761C zeroes
-                         * field_21/22/23/24/2C per screen)               */
-                        a->tvChannel = 3;
-                        a->tvSub = 0; a->tvTimer = 0; a->tvDone = 0;
-                        a->tvPat = 0; a->tvPatT = 0;
-                    }
-                    break;
-                case 3:  /* on: func_800D7F1C                            */
-                    sh_tv_state3(a, dtRaw);
-                    break;
+            for (int si = 0; si < 10; si++) {
+                /* func_800D7808 (map4_s03.c:561-578) over the master state */
+                switch (a->tvChannel) {
+                    case 0:  /* off: the screens run func_800D78D4 = 81FC(0) */
+                        sh_tv_81FC(a, si, 0, dtRaw);
+                        break;
+                    case 1:  /* attract: per-screen func_800D78F4(a, i) */
+                        if (sh_tv_state1(a, si, dtRaw))
+                            a->tvDone[si] = 1;  /* field_21 = master state */
+                        break;
+                    case 2:  /* channel-change: func_800D7AE0            */
+                        if (sh_tv_state2(a, si, dtRaw)) {
+                            /* func_800D76BC(3): master -> 3 + ALL screens
+                             * reset (func_800D7548 -> func_800D761C zeroes
+                             * field_21/22/23/24/2C for EVERY screen)     */
+                            a->tvChannel = 3;
+                            for (int sj = 0; sj < 10; sj++) {
+                                a->tvSub[sj] = 0; a->tvTimer[sj] = 0;
+                                a->tvDone[sj] = 0;
+                                a->tvPat[sj] = 0; a->tvPatT[sj] = 0;
+                            }
+                        }
+                        break;
+                    case 3:  /* on: func_800D7F1C                        */
+                        sh_tv_state3(a, si, dtRaw);
+                        break;
+                }
+                /* the paint LCG draws: func_800D88C8 draws 3 LCG values
+                 * per screen per frame (temp_s6 / spB0 / temp_s4,
+                 * map4_s03.c:1284-1286) — the u0 draw, the u1 draw and the
+                 * v0 draw, in the engine's own evaluation order; the
+                 * values are STORED (tvR1/R2/R3) for the render pass's
+                 * UV windows (sh_tvpaint_collect).                        */
+                {
+                    const TvStyle *st_ = (sx->tvp.hasTv &&
+                                         a->tvSlot[si] >= 0 &&
+                                         a->tvSlot[si] < TV_STYLES)
+                                        ? &sx->tvp.style[a->tvSlot[si]] : NULL;
+                    int m1 = st_ ? (st_->ru + 1) : 1;
+                    int m2 = st_ ? (st_->rv + 1) : 1;
+                    a->tvR1[si] = sh_tv_lcg(a, dtRaw) % (m1 ? m1 : 1);
+                    a->tvR2[si] = sh_tv_lcg(a, dtRaw) % (m1 ? m1 : 1);
+                    a->tvR3[si] = sh_tv_lcg(a, dtRaw) % (m2 ? m2 : 1);
+                }
             }
-            /* the paint-mirror LCG draws: func_800D88C8 draws 3 LCG
-             * values per screen per frame (temp_s6 / spB0 / temp_s4,
-             * map4_s03.c:1284-1286); the paint is data-blocked but the
-             * tracked screen's draws keep the LCG advancing at the
-             * engine's per-screen rate.                                */
-            sh_tv_lcg(a, dtRaw);
-            sh_tv_lcg(a, dtRaw);
-            sh_tv_lcg(a, dtRaw);
             /* FOGPOC_TVDBG (debug env, the FOGPOC_TICKDBG precedent):
-             * one stderr line per tick proving the state machine
-             * advances — the screen QUAD PAINT is the documented blocker
-             * (D_800DB7D4/D_800DB7E4[3][3]/D_800DB874[] extern-only in
-             * the decomp repo), so this is the observable trace.        */
+             * the tracked near screen (index 9) state — the trace the T2
+             * tick-match harness consumes.                              */
             if (getenv("FOGPOC_TVDBG"))
                 fprintf(stderr,
                         "TVDBG ch=%d sub=%d t=%d dur=%d slot=%d u=%d v=%d "
                         "pat=%d patT=%d done=%d lcg=%08x/%08x\n",
-                        a->tvChannel, a->tvSub, a->tvTimer, a->tvDur,
-                        a->tvSlot, a->tvU, a->tvV, a->tvPat, a->tvPatT,
-                        a->tvDone, a->lcgS1, a->lcgS2);
+                        a->tvChannel, a->tvSub[9], a->tvTimer[9], a->tvDur[9],
+                        a->tvSlot[9], a->tvU[9], a->tvV[9], a->tvPat[9], a->tvPatT[9],
+                        a->tvDone[9], a->lcgS1, a->lcgS2);
             break;
         }
         case 17: { /* rngWalk — map6_s03.c:375-444 VERBATIM (SITAI_NE:
@@ -10676,6 +10899,259 @@ static void sh1x_water_fx_draw(Frame *fb, const Renderer *R,
 }
 
 /* v18 diagnostics — FOGPOC_LIGHTDUMP (globals declared above utils) */
+
+/* ---- v36: THE TV PAINT QUADS (func_800D88C8 VERBATIM) ------------------
+ * One quad per small screen; the big near screen subdivides 3x3 with the
+ * PROJECTED-space midpoint interpolation (sp10/sp30, map4_s03.c:1289-
+ * 1373); the color is the flat grayscale (var_s2 188 / the pad&0xB flicker
+ * 164, map4_s03.c:539-548) modulated with the style's noise plane.     */
+typedef struct {
+    RVert v[4];              /* the quad corners (snapped, UV'd)            */
+    const unsigned char *tex;  /* the style's 256x256 RGBA plane          */
+    int bright;              /* var_s2 (188 or 164)                       */
+} TvQuad;
+
+static int g_tvpaint_pad;   /* D_800DB924.pad — the flicker counter (s16)  */
+
+/* project one corner: world (glTF m) -> RVert (snapped when ps1) */
+static int sh_tvpaint_project(const mat4 *viewProj, const mat4 *view,
+                              float wx, float wy, float wz,
+                              Frame *fb, const Renderer *R, RVert *out) {
+    float cx = viewProj->m[0]*wx + viewProj->m[4]*wy + viewProj->m[8]*wz  + viewProj->m[12];
+    float cy = viewProj->m[1]*wx + viewProj->m[5]*wy + viewProj->m[9]*wz  + viewProj->m[13];
+    float cw = viewProj->m[3]*wx + viewProj->m[7]*wy + viewProj->m[11]*wz + viewProj->m[15];
+    if (getenv("FOGPOC_TVPP"))
+        fprintf(stderr, "TVPP w=(%.2f,%.2f,%.2f) cw=%.3f\n", wx, wy, wz, cw);
+    if (cw <= 1e-6f) return 0;
+    float vz = view->m[2]*wx + view->m[6]*wy + view->m[10]*wz + view->m[14];
+    float depth = -vz;
+    if (depth <= 0.05f) return 0;
+    out->sx = ((cx / cw) + 1.0f) * 0.5f * (float)fb->w;
+    out->sy = (1.0f - ((cy / cw) + 1.0f) * 0.5f) * (float)fb->h;
+    if (R->opts.ps1)
+        gte_snap_screen(&out->sx, &out->sy, R->enginePixScale, R->enginePixScaleY);
+    out->z = depth;
+    out->vcol[0] = out->vcol[1] = out->vcol[2] = 0;   /* set by caller */
+    out->ocol[0] = out->ocol[1] = out->ocol[2] = 0;
+    return 1;
+}
+
+/* func_800D88C8 (map4_s03.c:1252-1409) — collect the screen quads into
+ * the OT. Called AFTER the weather flakes, BEFORE the mesh quads (the
+ * engine's map-update-before-WorldGfx_Draw order, game_sys_states.c:172
+ * vs :189). nTvq/maxTvq: the side array; returns the number of PostEnts
+ * pushed. */
+static int sh_tvpaint_collect(const Sh1x *sx, const mat4 *viewProj,
+                              const mat4 *view, Frame *fb, const Renderer *R,
+                              PostEnt *post, int *nPost, int *seq,
+                              TvQuad *tvq, int *nTvq, int maxTvq,
+                              int maxPost) {
+    if (!sx->tvp.hasTv) return 0;
+    if (getenv("FOGPOC_TVPDBG"))
+        fprintf(stderr, "TVPDBG collect: hasTv=1 nAnims=%d\n", sx->nAnims);
+    for (int ai = 0; ai < sx->nAnims; ai++) {
+        const Sh1xPropAnim *a = &sx->anims[ai];
+        if (a->driver != 2) continue;         /* the tvNoise family only */
+        if (getenv("FOGPOC_TVPDBG"))
+            fprintf(stderr, "TVPDBG anim '%s' gated=%d ch=%d slot0=%d\n",
+                    a->object, a->gated, a->tvChannel, a->tvSlot[0]);
+        if (a->gated) continue;
+        /* D_800DB924.pad++ (the flicker) — master != 0 only */
+        if (a->tvChannel != 0) {
+            g_tvpaint_pad++;
+            if ((int16_t)g_tvpaint_pad < 0) g_tvpaint_pad &= 0xFFFF;
+        }
+        int var_s2 = ((a->tvChannel != 0) &&
+                      !((int16_t)g_tvpaint_pad & 0xB))
+                     ? sx->tvp.dim : sx->tvp.bright;
+        for (int si = 0; si < TV_SCREENS; si++) {
+            int st = a->tvSlot[si];
+            if (st < 0 || st >= TV_STYLES) continue;
+            const TvStyle *sty = &sx->tvp.style[st];
+            const unsigned char *tex = sh_tvpaint_plane((TvPaint *)&sx->tvp, st);
+            if (!tex) continue;
+            /* the UV window (func_800D88C8:1284-1287; setUV4 u8 wrap) */
+            int u0 = a->tvU[si] + sty->u0 + a->tvR1[si];
+            int u1 = a->tvU[si] + sty->u0 + a->tvR2[si] + sty->du - 1;
+            int v0 = a->tvV[si] + sty->v0 + a->tvR3[si];
+            int v1 = v0 + sty->dv - 1;
+            u0 &= 0xFF; u1 &= 0xFF; v0 &= 0xFF; v1 &= 0xFF;
+            /* the corners (func_800D761C's cross-wiring): c0 = A,
+             * c1 = (B.x, A.y, B.z), c2 = (A.x, B.y, A.z), c3 = B.
+             * World = anchor(engine Q12 m) + corner(Q8)/256, glTF map
+             * (x, -y, -z). anchor = (160, 0, 40) func_800D7718:535.     */
+            const int *A = sx->tvp.cA[si], *B = sx->tvp.cB[si];
+            const float ax = 160.0f, aeng_y = 0.0f, az = 40.0f;
+            float wx[4] = { ax + A[0] / 256.0f, ax + B[0] / 256.0f,
+                            ax + A[0] / 256.0f, ax + B[0] / 256.0f };
+            float wy[4] = { -(aeng_y + A[1] / 256.0f),
+                             -(aeng_y + A[1] / 256.0f),
+                             -(aeng_y + B[1] / 256.0f),
+                             -(aeng_y + B[1] / 256.0f) };
+            float wz[4] = { -(az + A[2] / 256.0f), -(az + B[2] / 256.0f),
+                            -(az + A[2] / 256.0f), -(az + B[2] / 256.0f) };
+            RVert rv[4];
+            int ok = 1;
+            for (int c = 0; c < 4; c++) {
+                if (!sh_tvpaint_project(viewProj, view, wx[c], wy[c], wz[c],
+                                        fb, R, &rv[c])) { ok = 0; break; }
+                if (getenv("FOGPOC_TVPDBG") && si < 2 && c == 0)
+                    fprintf(stderr, "TVPDBG si=%d c0 proj=(%.1f,%.1f,z=%.2f) "
+                            "w=(%.2f,%.2f,%.2f)\n", si, rv[c].sx, rv[c].sy,
+                            rv[c].z, wx[c], wy[c], wz[c]);
+                rv[c].vcol[0] = rv[c].vcol[1] = rv[c].vcol[2] = var_s2;
+                rv[c].ocol[0] = rv[c].ocol[1] = rv[c].ocol[2] = 0;
+            }
+            if (!ok) continue;
+            if (getenv("FOGPOC_TVPDBG") && si < 2)
+                fprintf(stderr, "TVPDBG si=%d st=%d u0=%d u1=%d v0=%d v1=%d "
+                        "A=(%d,%d,%d) B=(%d,%d,%d) proj=(%.1f,%.1f,z=%.2f)\n",
+                        si, st, u0, u1, v0, v1, A[0], A[1], A[2],
+                        B[0], B[1], B[2], rv[0].sx, rv[0].sy, rv[0].z);
+            if (sx->tvp.big[si]) {
+                /* the 3x3 subdivided near screen (sp10 -> sp30 midpoints,
+                 * map4_s03.c:1329-1407): interpolate on the SNAPPED screen
+                 * lattice + the depth + the UVs, all >>1 like the engine. */
+                int ex[4], ey[4];
+                for (int c = 0; c < 4; c++) {
+                    ex[c] = (int)lrintf(rv[c].sx / R->enginePixScale);
+                    ey[c] = (int)lrintf(rv[c].sy / R->enginePixScaleY);
+                }
+                int uu[4] = { u0, u1, u0, u1 }, vv[4] = { v0, v0, v1, v1 };
+                float zz[4];
+                for (int c = 0; c < 4; c++) zz[c] = rv[c].z;
+                /* grid[j][k]: j = row (v), k = col (u); corners c0,c1,c2,c3
+                 * map to (0,0),(0,2),(2,0),(2,2) per func_800D88C8:1329 */
+                int gx[3][3], gy[3][3], gu[3][3], gv[3][3];
+                float gz[3][3];
+                int cx_[4] = { ex[0], ex[1], ex[2], ex[3] };
+                int cy_[4] = { ey[0], ey[1], ey[2], ey[3] };
+                int cu_[4] = { uu[0], uu[1], uu[2], uu[3] };
+                int cv_[4] = { vv[0], vv[1], vv[2], vv[3] };
+                float cz_[4] = { zz[0], zz[1], zz[2], zz[3] };
+                /* corners at grid (0,0)=c0 (0,2)=c1 (2,0)=c2 (2,2)=c3 */
+                gx[0][0] = cx_[0]; gy[0][0] = cy_[0]; gz[0][0] = cz_[0];
+                gx[0][2] = cx_[1]; gy[0][2] = cy_[1]; gz[0][2] = cz_[1];
+                gx[2][0] = cx_[2]; gy[2][0] = cy_[2]; gz[2][0] = cz_[2];
+                gx[2][2] = cx_[3]; gy[2][2] = cy_[3]; gz[2][2] = cz_[3];
+                gu[0][0] = cu_[0]; gv[0][0] = cv_[0];
+                gu[0][2] = cu_[1]; gv[0][2] = cv_[1];
+                gu[2][0] = cu_[2]; gv[2][0] = cv_[2];
+                gu[2][2] = cu_[3]; gv[2][2] = cv_[3];
+                /* the edge midpoints (func_800D88C8:1345-1373, >>1 each) */
+                gx[0][1] = (gx[0][0] + gx[0][2]) >> 1;
+                gy[0][1] = (gy[0][0] + gy[0][2]) >> 1;
+                gz[0][1] = (gz[0][0] + gz[0][2]) * 0.5f;
+                gu[0][1] = (gu[0][0] + gu[0][2]) >> 1;
+                gv[0][1] = (gv[0][0] + gv[0][2]) >> 1;
+                gx[1][0] = (gx[0][0] + gx[2][0]) >> 1;
+                gy[1][0] = (gy[0][0] + gy[2][0]) >> 1;
+                gz[1][0] = (gz[0][0] + gz[2][0]) * 0.5f;
+                gu[1][0] = (gu[0][0] + gu[2][0]) >> 1;
+                gv[1][0] = (gv[0][0] + gv[2][0]) >> 1;
+                gx[1][2] = (gx[0][2] + gx[2][2]) >> 1;
+                gy[1][2] = (gy[0][2] + gy[2][2]) >> 1;
+                gz[1][2] = (gz[0][2] + gz[2][2]) * 0.5f;
+                gu[1][2] = (gu[0][2] + gu[2][2]) >> 1;
+                gv[1][2] = (gv[0][2] + gv[2][2]) >> 1;
+                gx[2][1] = (gx[2][0] + gx[2][2]) >> 1;
+                gy[2][1] = (gy[2][0] + gy[2][2]) >> 1;
+                gz[2][1] = (gz[2][0] + gz[2][2]) * 0.5f;
+                gu[2][1] = (gu[2][0] + gu[2][2]) >> 1;
+                gv[2][1] = (gv[2][0] + gv[2][2]) >> 1;
+                gx[1][1] = (gx[1][0] + gx[1][2]) >> 1;
+                gy[1][1] = (gy[1][0] + gy[1][2]) >> 1;
+                gz[1][1] = (gz[1][0] + gz[1][2]) * 0.5f;
+                gu[1][1] = (gu[1][0] + gu[1][2]) >> 1;
+                gv[1][1] = (gv[1][0] + gv[1][2]) >> 1;
+                for (int jj = 0; jj < 2; jj++) {
+                    for (int kk = 0; kk < 2; kk++) {
+                        if (*nTvq >= maxTvq || *nPost >= maxPost) continue;
+                        TvQuad *q = &tvq[(*nTvq)++];
+                        for (int c2 = 0; c2 < 4; c2++) {
+                            const int *gxq, *gyq, *guq, *gvq;
+                            float *gzq;
+                            switch (c2) {
+                            case 0: gxq=&gx[jj][kk];   gyq=&gy[jj][kk];
+                                     guq=&gu[jj][kk];   gvq=&gv[jj][kk];
+                                     gzq=&gz[jj][kk];   break;
+                            case 1: gxq=&gx[jj][kk+1]; gyq=&gy[jj][kk+1];
+                                     guq=&gu[jj][kk+1]; gvq=&gv[jj][kk+1];
+                                     gzq=&gz[jj][kk+1]; break;
+                            case 2: gxq=&gx[jj+1][kk]; gyq=&gy[jj+1][kk];
+                                     guq=&gu[jj+1][kk]; gvq=&gv[jj+1][kk];
+                                     gzq=&gz[jj+1][kk]; break;
+                            default: gxq=&gx[jj+1][kk+1]; gyq=&gy[jj+1][kk+1];
+                                     guq=&gu[jj+1][kk+1]; gvq=&gv[jj+1][kk+1];
+                                     gzq=&gz[jj+1][kk+1]; break;
+                            }
+                            RVert *o = &q->v[c2];
+                            o->sx = (float)(*gxq) * R->enginePixScale;
+                            o->sy = (float)(*gyq) * R->enginePixScaleY;
+                            o->z  = *gzq;
+                            o->u  = (float)(*guq) / 256.0f;
+                            o->v  = (float)(*gvq) / 256.0f;
+                            o->vcol[0] = o->vcol[1] = o->vcol[2] = var_s2;
+                            o->ocol[0] = o->ocol[1] = o->ocol[2] = 0;
+                        }
+                        q->tex = tex;
+                        q->bright = var_s2;
+                        /* the sub-quad OTZ: MAX corner SZ (Q8) >> 3 */
+                        float zm = fmaxf(fmaxf(q->v[0].z, q->v[1].z),
+                                         fmaxf(q->v[2].z, q->v[3].z));
+                        int bucket = (int)floorf(zm * 256.0f + 0.5f) >> 3;
+                        if (!(bucket > 0 && bucket < 2047)) continue;
+                        PostEnt pe;
+                        memset(&pe, 0, sizeof(pe));
+                        pe.bucket = bucket; pe.seq = (*seq)++;
+                        pe.kind = 5; pe.item = -1; pe.tri0 = (*nTvq) - 1;
+                        pe.ntri = 0;
+                        post[(*nPost)++] = pe;
+                    }
+                }
+            } else {
+                /* the small screen: ONE POLY_FT4 (func_800D88C8:1294-1325) */
+                if (*nTvq >= maxTvq || *nPost >= maxPost) continue;
+                TvQuad *q = &tvq[(*nTvq)++];
+                for (int c = 0; c < 4; c++) {
+                    q->v[c] = rv[c];
+                    q->v[c].u = (float)(c == 1 || c == 3 ? u1 : u0) / 256.0f;
+                    q->v[c].v = (float)(c >= 2 ? v1 : v0) / 256.0f;
+                }
+                q->tex = tex;
+                q->bright = var_s2;
+                float zm = fmaxf(fmaxf(rv[0].z, rv[1].z),
+                                 fmaxf(rv[2].z, rv[3].z));
+                int bucket = (int)floorf(zm * 256.0f + 0.5f) >> 3;
+                if (!(bucket > 0 && bucket < 2047)) {
+                    (*nTvq)--;               /* the engine drops this quad */
+                    continue;
+                }
+                PostEnt pe;
+                memset(&pe, 0, sizeof(pe));
+                pe.bucket = bucket; pe.seq = (*seq)++;
+                pe.kind = 5; pe.item = -1; pe.tri0 = (*nTvq) - 1;
+                pe.ntri = 0;
+                post[(*nPost)++] = pe;
+            }
+        }
+        break;      /* ONE tvNoise anim per overlay carries the tvPaint */
+    }
+    return 0;
+}
+
+/* draw one collected TV paint quad (the OT walk's kind 5) */
+static void sh_tvpaint_draw_quad(Frame *fb, const Renderer *R,
+                                 const TvQuad *q) {
+    if (!q->tex) return;
+    raster_tri(fb, &q->v[0], &q->v[1], &q->v[2], q->tex, 256, 256,
+               RP_OPAQUE, &R->opts, R->opts.ps1, R->dither,
+               R->enginePixScale, R->enginePixScaleY);
+    raster_tri(fb, &q->v[0], &q->v[2], &q->v[3], q->tex, 256, 256,
+               RP_OPAQUE, &R->opts, R->opts.ps1, R->dither,
+               R->enginePixScale, R->enginePixScaleY);
+}
+
 static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
     const Scene *sc = R->sc;
     if (g_lightDump && R->env) {
@@ -11038,6 +11514,20 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
             }
         }
         if (R->snowDump) fprintf(R->snowDump, "frame end nFlake=%d\n", nFlake);
+    }
+
+    /* ---- v36: the TV paint quads (func_800D88C8) — collected AFTER the
+     * weather flakes, BEFORE the mesh quads: the engine's add order is
+     * particles (game_sys_states.c:172) -> the map update's TV prims
+     * (func_800DA3E0 -> func_800D7718) -> WorldGfx_Draw's mesh quads
+     * (:189), so on an OT bucket tie the TV quads sit BETWEEN the flakes
+     * and the room geometry (LIFO: last-added draws first/below).     */
+    TvQuad tvq[24];
+    int nTvq = 0;
+    if (R->dbgItem < 0) {
+        sh_tvpaint_collect(&sc->sh1x, &viewProj, &view, fb, R,
+                           post, &nPost, &seq, tvq, &nTvq, 24,
+                           nQuadMax + SNOW_COUNT_MAX + 1);
     }
 
     /* ---- v14/v15: collect the QUADS (ALL materials) as per-quad OT entries --
@@ -11427,6 +11917,11 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
         }
         if (post[bi].kind == 4) {           /* v8: rain drip streak    */
             rain_blit_streak(fb, &post[bi].rfd);
+            continue;
+        }
+        if (post[bi].kind == 5) {           /* v36: the TV paint quad   */
+            if (post[bi].tri0 >= 0 && post[bi].tri0 < nTvq)
+                sh_tvpaint_draw_quad(fb, R, &tvq[post[bi].tri0]);
             continue;
         }
         /* kind 0: one OT quad — draw ITS triangles (v13 per-tri culls kept
