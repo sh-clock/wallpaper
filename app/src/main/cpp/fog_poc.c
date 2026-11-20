@@ -135,6 +135,7 @@
  * the func_8008E5B4 scroll source (left 64x64) + the static right-half
  * tiles; extracted by tools/extract_dr_wave_tim.py. */
 #include "dr_wave_data.h"
+#include "water_tim_data.h"
 #include "tv_tim_data.h"
 /* the engine's VERBATIM sine LUT (g_SineTable from libkmath.s) — v8:
  * Math_Sin/Math_Cos are RAW 4096-entry lookups (no interpolation); needed
@@ -1201,6 +1202,23 @@ typedef struct {
     int dx, dz;                     /* grid delta to this neighbor         */
     char room[16];                  /* neighbor room name (probe file)      */
 } Sh1xMapLinkNb;
+/* v39: one waterfall stream segment — the s_MapOverlayHdr_94 emitter
+ * table VERBATIM (include/bodyprog/map/map.h:341-360; the values from
+ * map1_s02.c:1488-1522 Map_WorldObjectsInit). All raw Q12 (game y-down
+ * frame); heading = raw Q12 angle (4096/rev; 0=+Z, 90=+X). Fields follow
+ * the decomp struct (field_0/10/18/28/30/34/3C/44/4C/5C/64/6c). */
+typedef struct {
+    int x, y, z;          /* field_0/field_10/field_18 (seg start)      */
+    int len;              /* field_28 (segment length; 0 = terminator)  */
+    int horiz;            /* field_30: 1 = horizontal, else vertical     */
+    int heading;          /* field_34 (flow heading, Q12 angle)          */
+    int width;            /* field_3C (surface strip width)             */
+    int tileLen;          /* field_44 (strip tile length = scroll wrap)  */
+    int scrollSpd;        /* field_4C (scroll speed, Q12/s)              */
+    int spread;           /* field_5C (droplet lateral spread)          */
+    int rampHalf;         /* field_64 (sprite ramp half-distance)       */
+    int flowBase;         /* field_6c (droplet flow speed base)         */
+} Sh1xWaterSeg;
 typedef struct {
     int driver;                     /* 0 spin 1 fanArray 2 tvNoise 3 translate */
     char object[16];
@@ -1316,7 +1334,25 @@ typedef struct {
     /* waterfall droplets (water.c:20-107 logic): alive, x/y/z raw Q12,
      * vy velocity, emitter idx 0..1 (map1_s02.c:1488-1526 VERBATIM)     */
     int wfAlive[16], wfX[16], wfY[16], wfZ[16], wfVy[16], wfEm[16];
+    /* v39: the VERBATIM school waterfall (water.c:20-107 + 109-444 +
+     * 446-711). The stream table (s_MapOverlayHdr_94, map1_s02.c:1488-
+     * 1522) parsed from the GLB's propAnims[].stream block (the v39
+     * ripper) — wfSegCount/wfDrops default to the SAME verbatim values
+     * so pre-v39 GLBs render identically. All positions/lengths raw Q12
+     * (game y-down frame); headings raw Q12 angles (4096/rev).       */
+    Sh1xWaterSeg wfSeg[4];
+    int wfSegCount;                /* field_78 (2)                            */
+    int wfDrops;                   /* field_74 (10)                           */
+    int wfHasStream;               /* 1 = parsed/initialized                  */
+    int wfSurfaceOn;               /* D_800C4414 bit 3 (the surface enabled)  */
+    int wfScroll[4];               /* field_54 per-seg scroll phase (raw Q12) */
+    int wfSel[16];                 /* field_C.s_1.field_0 (seg<<2 | sprite)    */
+    int wfAlong[16];               /* field_10.s_0.field_0 (pos along, Q12)   */
+    int wfVyAcc[16];               /* field_C.s_2.field_2 (the vertical fall's
+                                    * gravity-accelerated velocity, raw Q12) */
+    double wfLastT;                /* the tick's own session-clock dt base   */
 } Sh1xPropAnim;
+
 typedef struct {
     char tag[8];
     int chunkX, chunkZ, activeChunks, isExterior;
@@ -1484,6 +1520,9 @@ typedef struct {
      * 'H'-name-suffix split). */
     int hasWaterFloorClut;
     unsigned short waterFloorClut[16];
+    /* v39: SH1X.waterTex parsed (the school Water rooms — the sheet is
+     * global; this flag is the boot-print/audit marker) */
+    int hasWaterTex;
 } Sh1x;
 
 static void sh1x_free(Sh1x *sx) {
@@ -1518,6 +1557,55 @@ static unsigned short g_waterTile15[32][32];  /* v37: the same composite as RAW
                                           * Apply field_10=0 CLUT (0,0)) */
 static void fx_water_tile_update(int ctr);   /* fwd: called by fx_pass   */
 static int g_waterTileEverUpdated;             /* fwd: first-composite gate */
+
+/* v39: the SCHOOL water sheet (WATER.TIM — the school Water effect,
+ * Map_EffectTexturesLoad env_effects.c:137-139/205-207). The compiled-in
+ * water_tim_data.h carries the VERBATIM sheet; the GLB's SH1X.waterTex
+ * EXTRAs (the v39 ripper block) OVERRIDE it at load (the unbiased
+ * EXTRAs contract — the same default/override pattern as waterFloor).
+ * g_waterTexIdx[v][u] = the 4bpp nibble index per texel; clut rows 0/1
+ * = the (224,0)/(224,1) banks (droplets/spray row 0, strip row 1). */
+static unsigned char g_waterTexIdx[128][128];
+static unsigned short g_waterTexClut[2][16];
+static int g_waterTexInit = 0;   /* 0 = not yet; 1 = defaults; 2 = EXTRAs */
+
+static void sh_watertex_default(void) {
+    if (g_waterTexInit) return;
+    memcpy(g_waterTexIdx, g_waterTimIdx, sizeof(g_waterTexIdx));
+    memcpy(g_waterTexClut, g_waterTimClut, sizeof(g_waterTexClut));
+    g_waterTexInit = 1;
+}
+
+/* standard base64 decode (RFC 4648) — the waterTex EXTRAs carry the
+ * 8192-byte 4bpp sheet base64-encoded (the compact verbatim form). */
+static int sh_b64_decode(const char *s, unsigned char *out, int outMax) {
+    static const char tbl[64] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    int vals[4], nv = 0, n = 0;
+    for (const char *p = s; *p; p++) {
+        if (*p == '=') break;      /* padding: the pending vals process below */
+        int v = -1;
+        for (int k = 0; k < 64; k++) if (tbl[k] == *p) { v = k; break; }
+        if (v < 0) continue;          /* whitespace/unknown skipped        */
+        vals[nv++] = v;
+        if (nv == 4) {
+            if (n + 3 > outMax) return -1;
+            out[n++] = (unsigned char)((vals[0] << 2) | (vals[1] >> 4));
+            out[n++] = (unsigned char)((vals[1] << 4) | (vals[2] >> 2));
+            out[n++] = (unsigned char)((vals[2] << 6) | vals[3]);
+            nv = 0;
+        }
+    }
+    if (nv == 2) {
+        if (n + 1 > outMax) return -1;
+        out[n++] = (unsigned char)((vals[0] << 2) | (vals[1] >> 4));
+    } else if (nv == 3) {
+        if (n + 2 > outMax) return -1;
+        out[n++] = (unsigned char)((vals[0] << 2) | (vals[1] >> 4));
+        out[n++] = (unsigned char)((vals[1] << 4) | (vals[2] >> 2));
+    }
+    return n;
+}
 
 static int sh_sin_q12(int angle) {
     /* v27.2 (B-13): the ENGINE's own LUT — kSineTable is the verbatim
@@ -1702,6 +1790,44 @@ static void sh1x_load(Sh1x *sx, const JValue *json) {
             }
         }
     }
+    /* v39: SH1X.waterTex — the WATER.TIM school sheet (128x128 4bpp +
+     * 2 CLUT rows), the UNBIASED verbatim effect texture. It OVERRIDES
+     * the compiled-in default (water_tim_data.h — the same bytes for
+     * the authentic TIM). Absent (older GLBs / non-Water rooms) = the
+     * compiled-in defaults (sh_watertex_default at first use). */
+    const JValue *wtx = jget(sh, "waterTex");
+    if (wtx && wtx->type == JV_OBJ) {
+        const char *b64 = jstr(wtx, "pixels", "");
+        unsigned char sheet[8192];
+        int nb = sh_b64_decode(b64, sheet, sizeof(sheet));
+        const JValue *cl = jarr(wtx, "clut");
+        int clRows = jcount(cl);
+        if (nb == 8192 && clRows >= 2) {
+            /* 4bpp: 2 texels/byte, low nibble = even u (TimFile layout) */
+            for (int v = 0; v < 128; v++) {
+                const unsigned char *row = sheet + (size_t)v * 64;
+                for (int ub = 0; ub < 64; ub++) {
+                    g_waterTexIdx[v][ub * 2]     = row[ub] & 0xF;
+                    g_waterTexIdx[v][ub * 2 + 1] = row[ub] >> 4;
+                }
+            }
+            for (int r = 0; r < 2; r++) {
+                const JValue *cr = jat(cl, r);
+                for (int k = 0; k < 16 && cr; k++) {
+                    const JValue *cv = jat(cr, k);
+                    if (cv)
+                        g_waterTexClut[r][k] =
+                            (unsigned short)((int)cv->num & 0xFFFF);
+                }
+            }
+            g_waterTexInit = 2;
+            sx->hasWaterTex = 1;
+        } else if (nb >= 0) {
+            fprintf(stderr, "sh1x: waterTex: decoded %d bytes (expect "
+                            "8192) — using the compiled-in default sheet\n",
+                    nb);
+        }
+    }
     const JValue *ml = jget(sh, "mapLink");
     if (ml && ml->type == JV_OBJ) {
         sx->hasMapLink = 1;
@@ -1828,6 +1954,74 @@ static void sh1x_load(Sh1x *sx, const JValue *json) {
             a->rot0[0] = (float)jat(r0, 0)->num;
             a->rot0[1] = (float)jat(r0, 1)->num;
             a->rot0[2] = (float)jat(r0, 2)->num;
+        }
+        /* v39: the particles/<waterfall> stream block — the VERBATIM
+         * s_MapOverlayHdr_94 emitter table (the v39 ripper's
+         * propAnims[].stream; map1_s02.c:1488-1522). The DEFAULTS below
+         * are the SAME verbatim raw Q12 values (the C Q12() truncation
+         * toward zero: -16.4f->-67174, 0.1f->409, -51.2f->-209715,
+         * 1.6f->6553, 0.4f->1638, 0.5f->2048, 0.05f->204; Q12_ANGLE
+         * 90deg->1024, 270deg->3072) so pre-v39 GLBs (no stream block)
+         * render identically. The terminator slot 2 carries ONLY the
+         * fields map1_s02.c:1516-1521 sets (len 0, y 409, width 1638,
+         * spread 1638, rampHalf 2048); the rest stay BSS-zero. */
+        if (a->driver == 22) {
+            static const int defSeg[3][12] = {
+                /* x, y, z, len, horiz, heading, width, tileLen, scroll,
+                 * spread, rampHalf, flowBase                                */
+                {-67174, 409, -209715, 6553, 1, 1024, 1638, 2048, 204,
+                 1638, 2048, 204},
+                {-60620, 409, -209715, 6553, 1, 3072, 1638, 2048, 204,
+                 1638, 2048, 204},
+                {0, 409, 0, 0, 0, 0, 1638, 0, 0, 1638, 2048, 0},
+            };
+            for (int sg = 0; sg < 4; sg++) {
+                Sh1xWaterSeg *w = &a->wfSeg[sg];
+                const int *d = defSeg[sg < 3 ? sg : 3 - 1];
+                w->x = d[0]; w->y = d[1]; w->z = d[2]; w->len = d[3];
+                w->horiz = d[4]; w->heading = d[5]; w->width = d[6];
+                w->tileLen = d[7]; w->scrollSpd = d[8]; w->spread = d[9];
+                w->rampHalf = d[10]; w->flowBase = d[11];
+            }
+            a->wfSegCount = 2;
+            a->wfDrops = 10;
+            const JValue *st = jget(e, "stream");
+            if (st && st->type == JV_OBJ) {
+                const JValue *segs = jarr(st, "segments");
+                int nsg = jcount(segs);
+                if (nsg > 4) nsg = 4;
+                for (int sg = 0; sg < nsg; sg++) {
+                    const JValue *s = jat(segs, sg);
+                    if (!s) continue;
+                    Sh1xWaterSeg *w = &a->wfSeg[sg];
+                    w->x = (int)(jnum(s, "x", w->x / 4096.0) * 4096.0);
+                    w->y = (int)(jnum(s, "y", w->y / 4096.0) * 4096.0);
+                    w->z = (int)(jnum(s, "z", w->z / 4096.0) * 4096.0);
+                    w->len = (int)(jnum(s, "len", w->len / 4096.0) * 4096.0);
+                    w->horiz = jintb(s, "horizontal", w->horiz);
+                    w->heading = (int)(jnum(s, "heading",
+                                            w->heading * 360.0 / 4096.0)
+                                       * 4096.0 / 360.0);
+                    w->width = (int)(jnum(s, "width",
+                                           w->width / 4096.0) * 4096.0);
+                    w->tileLen = (int)(jnum(s, "tileLen",
+                                             w->tileLen / 4096.0) * 4096.0);
+                    w->scrollSpd = (int)(jnum(s, "scrollSpeed",
+                                              w->scrollSpd / 4096.0)
+                                         * 4096.0);
+                    w->spread = (int)(jnum(s, "spread",
+                                           w->spread / 4096.0) * 4096.0);
+                    w->rampHalf = (int)(jnum(s, "rampHalf",
+                                              w->rampHalf / 4096.0) * 4096.0);
+                    w->flowBase = (int)(jnum(s, "flowBase",
+                                              w->flowBase / 4096.0) * 4096.0);
+                }
+                a->wfSegCount = jint(st, "segmentCount", a->wfSegCount);
+                a->wfDrops = jint(st, "droplets", a->wfDrops);
+                if (a->wfDrops > 16) a->wfDrops = 16;
+                if (a->wfSegCount > 3) a->wfSegCount = 3;
+            }
+            a->wfHasStream = 1;
         }
         a->rate = (float)jnum(e, "rate", jnum(e, "rngBase", 0.0));
         a->rngBase = (float)jnum(e, "rngBase", -180.0);
@@ -4950,15 +5144,23 @@ static void sh_light_build_table(ShLight *L, int intensity) {
     }
 }
 
-/* func_80055D78 — position-query light value (verbatim; engine-space
- * Q12 positions; kept for audits/future actors — the MESH path below is
- * what the room rendering uses).                                          */
+/* func_80055D78 — position-query light value (VERBATIM; GAME-frame Q12
+ * positions — see the v39 FRAME FIX inside; the MESH path below is what
+ * the room rendering uses). */
 static int sh_light_query_pos(const ShEnv *env, int posX, int posY, int posZ) {
     const ShLight *L = &env->light;
     int pos[3];
+    /* v39 FRAME FIX: the query is the VERBATIM game-frame func_80055D78
+     * (game y-down, game +z) but the engine stores L->pos in the ENGINE
+     * frame (camPos y-up, -z — sh_env_update_pose). The light position
+     * converts HERE (negate y/z) so every caller passes GAME-frame
+     * positions exactly like the decomp (the droplets' wfX/wfY/wfZ, the
+     * surface rows, the map5_s00 ripple probe). The axis-falloff table
+     * itself is game-frame (sh_light_build_table is called with the
+     * y/z-flipped direction — the MINOR-1 note at its call site). */
     pos[0] = (posX >> 4) - (L->pos[0] >> 4);
-    pos[1] = (posY >> 4) - (L->pos[1] >> 4);
-    pos[2] = (posZ >> 4) - (L->pos[2] >> 4);
+    pos[1] = (posY >> 4) - ((-L->pos[1]) >> 4);
+    pos[2] = (posZ >> 4) - ((-L->pos[2]) >> 4);
     int var_a3 = 0xFF;
     if (env->field_0 != SHENUM_0) {
         for (int i = 0; i < 3; i++) {
@@ -5704,12 +5906,13 @@ static void sh_env_tick(ShEnv *env, int dtQ12, v3 camPos, Quat camQ) {
     sh_env_update_pose(env, camPos, camQ);
 
     if (env->envDump) {
-        /* func_80055D78 probe grid: 0/2/5/10 m along the beam + straight
-         * down (engine y-down frame: pos.y = light.y + d for 'below')     */
+        /* func_80055D78 probe grid: 2 m along the beam. v39: the query
+         * takes GAME-frame positions (the in-query light-pos conversion)
+         * — this ENGINE-frame probe position converts at the call.        */
         int probe = sh_light_query_pos(env,
             env->light.pos[0] + (env->light.dir[0] * 8192 >> 12),
-            env->light.pos[1] + (env->light.dir[1] * 8192 >> 12),
-            env->light.pos[2] + (env->light.dir[2] * 8192 >> 12));
+            -(env->light.pos[1] + (env->light.dir[1] * 8192 >> 12)),
+            -(env->light.pos[2] + (env->light.dir[2] * 8192 >> 12)));
         fprintf(env->envDump,
             "env tick=%d fi=%d on=%d night=%d fog=%d fdQ12=%d fc=(%d,%d,%d) "
             "wLI=%d tint=(%d,%d,%d) spot=%d enum=%d maxB=%d br=%d "
@@ -9317,6 +9520,161 @@ static void sh_tv_state3(Sh1xPropAnim *a, int si, int dtRaw) {
     }
 }
 
+/* v39: sharedFunc_800CBA4C_1_s02 (water.c:20-68) VERBATIM — the droplet
+ * spawn/respawn. arg1=2 (initial spawn: a RANDOM segment + the scatter
+ * along the heading); arg1=3 (respawn at segment arg2, NO scatter).
+ * The engine stores the segment in wfSel>>2 (field_C.s_1.field_0),
+ * the position-along in wfAlong (field_10.s_0.field_0), the flow speed
+ * in wfVy (field_10.s_0.field_2). Rng_GenerateUInt(a,b) = a + Rng%(b-a+1)
+ * (rng.c); Math_Sin/Cos = the verbatim LUT (sh_sin_q12/sh_cos_q12). */
+static void sh_wf_spawn(Sh1xPropAnim *a, int q, int arg1, int arg2) {
+    int var_s2 = arg2;
+    if (arg1 == 2) {
+        var_s2 = (int)(sh_rng_next() % a->wfSegCount);         /* :30 */
+        a->wfAlong[q] = (int)(sh_rng_next() % a->wfSeg[var_s2].len); /* :31 */
+    } else {
+        var_s2 = var_s2 % a->wfSegCount;                        /* :35 */
+        a->wfAlong[q] = 0;                                      /* :36 */
+    }
+    a->wfX[q] = a->wfSeg[var_s2].x;                            /* :39 */
+    a->wfY[q] = a->wfSeg[var_s2].y;                            /* :40 */
+    a->wfZ[q] = a->wfSeg[var_s2].z;                            /* :41 */
+    if (a->wfSeg[var_s2].horiz) {
+        if (arg1 == 2) {
+            a->wfX[q] += (int)(((int64_t)a->wfAlong[q] *
+                    sh_sin_q12(a->wfSeg[var_s2].heading)) >> 12); /* :47 */
+            a->wfZ[q] += (int)(((int64_t)a->wfAlong[q] *
+                    sh_cos_q12(a->wfSeg[var_s2].heading)) >> 12); /* :48 */
+        }
+        /* :51 — (field_6c * Rng_GenerateUInt(96, 159)) >> 7             */
+        a->wfVy[q] = (int)(((int64_t)a->wfSeg[var_s2].flowBase *
+                (96 + (sh_rng_next() % 64))) >> 7);
+    } else {
+        if (arg1 == 2) a->wfY[q] += a->wfAlong[q];              /* :57 */
+        a->wfVy[q] = 112 + (int)(sh_rng_next() % 32);           /* :60 */
+        a->wfVyAcc[q] = 0;                                      /* :61 */
+    }
+    /* :64-67 — (Rng%3 ? Rng%3+1 : 0) + segment*4 (the sprite selector) */
+    {
+        int t = (int)(sh_rng_next() % 3);
+        a->wfSel[q] = (t ? (t + 1) : 0) + (var_s2 * 4);
+    }
+    a->wfAlive[q] = 1;
+}
+
+/* v39: the school waterfall per-tick — the PLAYER_IN_MAP_CHUNK(-1,-2)
+ * gate (map1_s02.c:1537-1562: spawn on entering the chunk with the
+ * drain flag set, despawn on leaving — the engine's camera stands in
+ * for the player, the waterRipple precedent) + the VERBATIM spawn
+ * (water.c:70-92), the droplet advance (water.c:154-180 horizontal /
+ * 326-340 vertical) and the surface scroll (water.c:702-707 — the
+ * scroll advance runs after the func_9C draw in the game; the engine's
+ * tick/draw split advances it in the tick — a documented one-frame
+ * scroll lead of dt*scrollSpd ~ 0.0017 m).
+ * MAP_CHUNK_IDX(pos) = trunc(pos/40m) + sign (game.h:41-42) on the
+ * GAME-frame camera position (engine x = game x, game z = -engine z);
+ * MAP_CHUNK_IDX_FROM_GRID(n) = n>=0 ? n+1 : n (game.h:44-46).
+ * dt derives from the SESSION clock (the animsLastSessionT discipline
+ * — v38's fix class; wfLastT is the waterfall's own base so the sync
+ * and this tick stay independent).                                 */
+static void sh1x_waterfall_tick(Sh1x *sx, const CamPose *cam,
+                                 double sessionT) {
+    if (!sx || !cam) return;
+    for (int i = 0; i < sx->nAnims; i++) {
+        Sh1xPropAnim *a = &sx->anims[i];
+        if (a->driver != 22 || !a->wfHasStream) continue;
+        int camXgame = (int)(cam->pos.x * 4096.0f);
+        int camZgame = (int)(-cam->pos.z * 4096.0f);
+        int idxX = camXgame / 163840 + (camXgame > 0 ? 1 : -1);
+        int idxZ = camZgame / 163840 + (camZgame > 0 ? 1 : -1);
+        int gateX = (a->chunkGate[0] >= 0) ? a->chunkGate[0] + 1
+                                           : a->chunkGate[0];
+        int gateZ = (a->chunkGate[1] >= 0) ? a->chunkGate[1] + 1
+                                           : a->chunkGate[1];
+        int inChunk = (idxX == gateX && idxZ == gateZ);
+        if (getenv("FOGPOC_WFDBG"))
+            fprintf(stderr,
+                    "WFDBG tick t=%.3f cam=(%.2f,%.2f,%.2f) chunk=(%d,%d) "
+                    "gate=(%d,%d) in=%d gated=%d seeded=%d drops=%d\n",
+                    sessionT, cam->pos.x, cam->pos.y, cam->pos.z,
+                    idxX, idxZ, gateX, gateZ, inChunk, a->gated,
+                    a->seeded, a->wfDrops);
+        if (!inChunk || a->gated) {
+            /* the despawn (water.c:94-107 / map1_s02.c:1560-1563)      */
+            if (a->seeded) {
+                for (int q = 0; q < 16; q++) a->wfAlive[q] = 0;
+                a->seeded = 0;
+                a->wfSurfaceOn = 0;      /* D_800C4414 &= ~(1 << 3)     */
+            }
+            a->wfLastT = sessionT;
+            continue;
+        }
+        double dt = sessionT - a->wfLastT;
+        if (dt < 0) dt = 0;
+        if (dt > 0.1) dt = 0.1;         /* clamp like the env tick       */
+        a->wfLastT = sessionT;
+        const int dtRaw = (int)(dt * 4096.0);
+        if (!a->seeded) {
+            a->seeded = 1;              /* sharedFunc_800CBC98         */
+            a->wfSurfaceOn = 1;         /* D_800C4414 |= 1 << 3        */
+            for (int q = 0; q < a->wfDrops; q++)
+                sh_wf_spawn(a, q, 2, 0);              /* water.c:75-84  */
+            for (int sgi = 0; sgi < a->wfSegCount; sgi++)
+                a->wfScroll[sgi] = 0;                /* water.c:86-89  */
+        }
+        /* the surface scroll (water.c:702-707)                         */
+        for (int sgi = 0; sgi < a->wfSegCount; sgi++) {
+            a->wfScroll[sgi] += (int)(((int64_t)dtRaw *
+                    a->wfSeg[sgi].scrollSpd) >> 12);
+            while (a->wfScroll[sgi] >= a->wfSeg[sgi].tileLen)
+                a->wfScroll[sgi] -= a->wfSeg[sgi].tileLen;
+        }
+        /* the droplet advance                                            */
+        for (int q = 0; q < a->wfDrops; q++) {
+            if (!a->wfAlive[q]) continue;
+            int idx0 = a->wfSel[q] >> 2;               /* water.c:154  */
+            if (idx0 < 0 || idx0 > 2) idx0 = 0;
+            if (a->wfSeg[idx0].horiz) {
+                /* water.c:158-180 VERBATIM                                */
+                int temp_s4 = (int)(((int64_t)dtRaw *
+                        a->wfVy[q]) >> 12);
+                if (a->wfAlong[q] + temp_s4 < a->wfSeg[idx0].len) {
+                    a->wfX[q] += (int)(((int64_t)temp_s4 *
+                            sh_sin_q12(a->wfSeg[idx0].heading)) >> 12);
+                    a->wfZ[q] += (int)(((int64_t)temp_s4 *
+                            sh_cos_q12(a->wfSeg[idx0].heading)) >> 12);
+                } else if (a->wfAlong[q] + temp_s4 >=
+                        a->wfSeg[idx0].len + a->wfSeg[idx0].rampHalf) {
+                    sh_wf_spawn(a, q, 3, idx0 + 1);     /* water.c:167  */
+                    continue;
+                } else if (a->wfAlong[q] < a->wfSeg[idx0].len) {
+                    int d = a->wfSeg[idx0].len - a->wfAlong[q];
+                    a->wfX[q] += (int)(((int64_t)d *
+                            sh_sin_q12(a->wfSeg[idx0].heading)) >> 12);
+                    a->wfZ[q] += (int)(((int64_t)d *
+                            sh_cos_q12(a->wfSeg[idx0].heading)) >> 12);
+                }
+                a->wfAlong[q] += temp_s4;              /* water.c:180  */
+            } else {
+                /* water.c:328-340 — the vertical fall (map1_s03's drain
+                 * cutscene; 1336 = the engine's per-tick g_GravitySpeed
+                 * raw — the prior session's documented value)          */
+                a->wfVyAcc[q] += (1336 * a->wfVy[q]) >> 7;
+                if (a->wfVyAcc[q] > 24576) a->wfVyAcc[q] = 24576;
+                int temp_s4 = (int)(((int64_t)dtRaw *
+                        a->wfVyAcc[q]) >> 12);
+                if (a->wfAlong[q] + temp_s4 >=
+                        a->wfSeg[idx0].len + a->wfSeg[idx0].rampHalf) {
+                    sh_wf_spawn(a, q, 3, idx0 + 1);
+                    continue;
+                }
+                a->wfAlong[q] += temp_s4;
+                a->wfY[q] += temp_s4;
+            }
+        }
+    }
+}
+
 static void sh1x_anims_tick(Sh1x *sx, double dt) {
     const int dtRaw = (int)(dt * 4096.0);
     for (int i = 0; i < sx->nAnims; i++) {
@@ -9886,46 +10244,13 @@ n                    * STONE3_H — NOT ported: one GLB model per entry);
                     * seeded=1 on the RIPPLE anim — the waterfall tick —
                     * so the ripple spawn never ran and t stayed 0).   */
             break;
-        case 22: { /* particles/<waterfall> (water.c:20-107 logic): the
-                    * 10 recycling droplets (field_74) from the 2 VERBATIM
-                    * emitters (map1_s02.c:1488-1526: (-16.4,0.1,-51.2)
-                    * spread 1.6m @90deg / (-14.8,0.1,-51.2) @270deg —
-                    * scatter along the emitter angle: x + sin(ang)*s /
-                    * z + cos(ang)*s, water.c:38-45). The band interp of
-                    * sharedFunc_800CBDA8_1_s02 (:110-231) is PSX-scratchpad
-                    * GTE code — ported as: spawn at emitter + scatter, fall
-                    * vy += g*dt, recycle ~8m below (documented deviation). */
-            if (a->seeded) {
-                for (int q = 0; q < 10; q++) {
-                    if (!a->wfAlive[q]) {
-                        int em = (int)(sh_rng_next() & 1);
-                        int spread = (int)(sh_rng_next() % 6553); /*Q12(1.6)*/
-                        a->wfEm[q] = em;
-                        /* emitter 0 @90deg: x + spread; emitter 1 @270deg:
-                         * x - spread (sin(90)=1, sin(270)=-1; cos = 0)   */
-                        a->wfX[q] = (em ? -60620 : -67174)
-                                    + (em ? -spread : spread);
-                        a->wfY[q] = 409;                  /* Q12(0.1)     */
-                        a->wfZ[q] = -209715;              /* Q12(-51.2)  */
-                        a->wfVy[q] = 0;
-                        a->wfAlive[q] = 1;
-                    } else {
-                        /* fall: vel capped Q12(6.0) (water.c:334-337),
-                         * vy += dt*vel; recycle at the band end
-                         * field_28+field_64 = Q12(1.6)+Q12(0.5) below    */
-                        a->wfVy[q] += 1336;               /* g raw        */
-                        if (a->wfVy[q] > 24576) a->wfVy[q] = 24576;
-                        a->wfY[q] += (int)(((int64_t)dtRaw *
-                                            a->wfVy[q]) >> 12);
-                        if (a->wfY[q] > 409 + 8601)       /* band end     */
-                            a->wfAlive[q] = 0;
-                    }
-                }
-            } else {
-                a->seeded = 1;            /* sharedFunc_800CBC98 spawn */
-            }
+        case 22:  /* particles/<waterfall> — the school water. The tick
+                   * lives in sh1x_waterfall_tick (the PLAYER_IN_MAP_CHUNK
+                   * camera-proxy gate needs the cam; the tick trio calls
+                   * it next to sh1x_water_ripple_tick). See water.c:20-107
+                   * (the spawn), 154-180 (the droplet advance) and
+                   * 702-707 (the surface scroll) — all VERBATIM there. */
             break;
-        }
         case 7:   /* cutscene: idle (engine-true default)                  */
         default:
             break;
@@ -10897,6 +11222,613 @@ static void fx_blit_water_quad(Frame *fb, const int sx[4], const int sy[4],
     }
 }
 
+/* v39: the WATER-sheet tile fetch — g_waterTexIdx[v][u] through the CLUT
+ * row (the 4bpp nibble + (224,0)/(224,1) palette banks, water.c's tpage
+ * 45 / clut 0xE/0x4E). Returns the 15-bit color. */
+static unsigned short sh_wspr_texel(int clutRow, int u, int v) {
+    if (u < 0) u = 0;
+    if (u > 127) u = 127;
+    if (v < 0) v = 0;
+    if (v > 127) v = 127;
+    return g_waterTexClut[clutRow & 1][g_waterTexIdx[v][u]];
+}
+
+/* v39: the WATER-sheet FT4 blit — affine UV over the 128x128 sheet, a
+ * flat prim color (the setRGB0 modulation), TPAGE-45 ABR-1 ADDITIVE
+ * (B5+F5 clamp 31). Corner order = the POLY_FT4's (u0,v0)(u1,v1)
+ * (u2,v2)(u3,v3): u spans corner0->corner1, v spans corner0->corner2.
+ * depthM = the prim's own projected depth + 1.0m (the OT (z+0x100)>>3
+ * bias, water.c:439) — occluded by nearer opaque geometry. */
+static int g_wfsampl[16];
+static int g_wdbgWrote;
+static void fx_blit_wsheet_ft4(Frame *fb, const int sx[4], const int sy[4],
+                               int clutRow, int u0, int v0, int u1, int v1,
+                               int primR, int primG, int primB,
+                               float depthM) {
+    int mnx = sx[0], mxx = sx[0], mny = sy[0], mxy = sy[0];
+    for (int i = 1; i < 4; i++) {
+        if (sx[i] < mnx) mnx = sx[i];
+        if (sx[i] > mxx) mxx = sx[i];
+        if (sy[i] < mny) mny = sy[i];
+        if (sy[i] > mxy) mxy = sy[i];
+    }
+    if (mxx < 0 || mnx >= (int)fb->w || mxy < 0 || mny >= (int)fb->h) return;
+    if (mnx < 0) mnx = 0;
+    if (mny < 0) mny = 0;
+    if (mxx >= (int)fb->w) mxx = (int)fb->w - 1;
+    if (mxy >= (int)fb->h) mxy = (int)fb->h - 1;
+    /* the affine UV solve for ROTATED quads (the stream quads' flow
+     * axis can be any heading): the parametric (a, b) in the
+     * parallelogram P = P0 + a*(P1-P0) + b*(P2-P0) — the PS1's own
+     * screen-space linear interpolation (affine, no perspective div). */
+    double ax1 = (double)sx[1] - sx[0], ay1 = (double)sy[1] - sy[0];
+    double ax2 = (double)sx[2] - sx[0], ay2 = (double)sy[2] - sy[0];
+    double det = ax1 * ay2 - ax2 * ay1;
+    if (fabs(det) < 1e-9) return;            /* degenerate quad          */
+    double ia =  ay2 / det, ib = -ax2 / det; /* inv [[ax1 ax2][ay1 ay2]] */
+    double ic = -ay1 / det, id2 =  ax1 / det;
+    for (int py = mny; py <= mxy; py++) {
+        for (int px = mnx; px <= mxx; px++) {
+            double rx = px + 0.5 - sx[0], ry = py + 0.5 - sy[0];
+            double a = ia * rx + ib * ry;    /* along the u axis (0->1)  */
+            double b = ic * rx + id2 * ry;   /* along the v axis (0->1)  */
+            if (a < -0.01 || a > 1.01 || b < -0.01 || b > 1.01) continue;
+            int u = u0 + (int)((u1 - u0) * a);
+            int v = v0 + (int)((v1 - v0) * b);
+            if (u < 0 || u > 127 || v < 0 || v > 127) continue;
+            size_t pi = (size_t)py * fb->w + px;
+            if (depthM > 0.0f && fb->z && fb->z[pi] < depthM)
+                continue;
+            unsigned short tc = sh_wspr_texel(clutRow, u, v);
+            if ((tc & 0x7FFF) == 0) continue;   /* the PS1 0x0000 hole    */
+            int fr = ((int)(tc & 31u) * primR) >> 7;
+            int fg = (int)(((tc >> 5) & 31u) * primG) >> 7;
+            int fbv = (int)(((tc >> 10) & 31u) * primB) >> 7;
+            if (getenv("FOGPOC_WFSAMPL")) {
+                extern int g_wfsampl[16];
+                g_wfsampl[g_waterTexIdx[v][u] & 0xF]++;
+            }
+            if (fr > 31) fr = 31;
+            if (fg > 31) fg = 31;
+            if (fbv > 31) fbv = 31;
+            uint8_t *p = fb->rgb + pi * 3;
+            int orr = (p[0] >> 3) + fr; if (orr > 31) orr = 31;
+            int ogg = (p[1] >> 3) + fg; if (ogg > 31) ogg = 31;
+            int obb = (p[2] >> 3) + fbv; if (obb > 31) obb = 31;
+            p[0] = (uint8_t)((orr << 3) | (orr >> 2));
+            p[1] = (uint8_t)((ogg << 3) | (ogg >> 2));
+            p[2] = (uint8_t)((obb << 3) | (obb >> 2));
+            g_wdbgWrote++;
+        }
+    }
+}
+
+/* v39: the WATER-sheet GT4 blit — per-corner GOURAUD colors (the strip
+ * quads' setRGB0..3, water.c:688-691), additive, the same affine
+ * discipline as the FT4 (the PS1 GTE raster is affine — no per-fragment
+ * perspective division). The corner colors interpolate bilinearly over
+ * the parallelogram spanned by corner0->1 (u) and corner0->2 (v). */
+static void fx_blit_wsheet_gt4(Frame *fb, const int sx[4], const int sy[4],
+                               int clutRow, int u0, int v0, int u1, int v1,
+                               const int cr[4], const int cg[4],
+                               const int cb[4], float depthM) {
+    int mnx = sx[0], mxx = sx[0], mny = sy[0], mxy = sy[0];
+    for (int i = 1; i < 4; i++) {
+        if (sx[i] < mnx) mnx = sx[i];
+        if (sx[i] > mxx) mxx = sx[i];
+        if (sy[i] < mny) mny = sy[i];
+        if (sy[i] > mxy) mxy = sy[i];
+    }
+    if (mxx < 0 || mnx >= (int)fb->w || mxy < 0 || mny >= (int)fb->h) return;
+    if (mnx < 0) mnx = 0;
+    if (mny < 0) mny = 0;
+    if (mxx >= (int)fb->w) mxx = (int)fb->w - 1;
+    if (mxy >= (int)fb->h) mxy = (int)fb->h - 1;
+    /* the affine solve for ROTATED quads — same as the FT4 (the PS1's
+     * screen-space linear interpolation; the Gouraud corners ride the
+     * same (a, b) parametric coords). */
+    double ax1 = (double)sx[1] - sx[0], ay1 = (double)sy[1] - sy[0];
+    double ax2 = (double)sx[2] - sx[0], ay2 = (double)sy[2] - sy[0];
+    double det = ax1 * ay2 - ax2 * ay1;
+    if (fabs(det) < 1e-9) return;            /* degenerate quad          */
+    double ia =  ay2 / det, ib = -ax2 / det;
+    double ic = -ay1 / det, id2 =  ax1 / det;
+    for (int py = mny; py <= mxy; py++) {
+        for (int px = mnx; px <= mxx; px++) {
+            double rx = px + 0.5 - sx[0], ry = py + 0.5 - sy[0];
+            double a = ia * rx + ib * ry;
+            double b = ic * rx + id2 * ry;
+            if (a < -0.01 || a > 1.01 || b < -0.01 || b > 1.01) continue;
+            int u = u0 + (int)((u1 - u0) * a);
+            int v = v0 + (int)((v1 - v0) * b);
+            if (u < 0 || u > 127 || v < 0 || v > 127) continue;
+            size_t pi = (size_t)py * fb->w + px;
+            if (depthM > 0.0f && fb->z && fb->z[pi] < depthM)
+                continue;
+            unsigned short tc = sh_wspr_texel(clutRow, u, v);
+            if ((tc & 0x7FFF) == 0) continue;   /* the PS1 0x0000 hole    */
+            /* the Gouraud corner modulation (0..255 corners)            */
+            double aac = a < 0 ? 0 : (a > 1 ? 1 : a);
+            double bbc = b < 0 ? 0 : (b > 1 ? 1 : b);
+            int pr = (int)((cr[0] * (1.0 - aac) * (1.0 - bbc) +
+                            cr[1] * aac * (1.0 - bbc) +
+                            cr[2] * (1.0 - aac) * bbc +
+                            cr[3] * aac * bbc) + 0.5);
+            int pg = (int)((cg[0] * (1.0 - aac) * (1.0 - bbc) +
+                            cg[1] * aac * (1.0 - bbc) +
+                            cg[2] * (1.0 - aac) * bbc +
+                            cg[3] * aac * bbc) + 0.5);
+            int pb = (int)((cb[0] * (1.0 - aac) * (1.0 - bbc) +
+                            cb[1] * aac * (1.0 - bbc) +
+                            cb[2] * (1.0 - aac) * bbc +
+                            cb[3] * aac * bbc) + 0.5);
+            int fr = ((int)(tc & 31u) * pr) >> 7;
+            int fg = (int)(((tc >> 5) & 31u) * pg) >> 7;
+            int fbv = (int)(((tc >> 10) & 31u) * pb) >> 7;
+            if (fr > 31) fr = 31;
+            if (fg > 31) fg = 31;
+            if (fbv > 31) fbv = 31;
+            uint8_t *p = fb->rgb + pi * 3;
+            int orr = (p[0] >> 3) + fr; if (orr > 31) orr = 31;
+            int ogg = (p[1] >> 3) + fg; if (ogg > 31) ogg = 31;
+            int obb = (p[2] >> 3) + fbv; if (obb > 31) obb = 31;
+            p[0] = (uint8_t)((orr << 3) | (orr >> 2));
+            p[1] = (uint8_t)((ogg << 3) | (ogg >> 2));
+            p[2] = (uint8_t)((obb << 3) | (obb >> 2));
+        }
+    }
+}
+
+/* v39: project one school-water world point with the MESH pipeline
+ * (render_frame's mat4_perspective + mat4_view_from_quat -> NDC -> fb,
+ * the SAME math sh_tvpaint_project uses) so the water quads composite
+ * EXACTLY over the courtyard floor geometry at any authored fov. */
+static int sh_wspr_project(const mat4 *mvp, const mat4 *view,
+                            float wx, float wy, float wz, Frame *fb,
+                            float *sx, float *sy, float *zm) {
+    float cx = mvp->m[0]*wx + mvp->m[4]*wy + mvp->m[8]*wz  + mvp->m[12];
+    float cy = mvp->m[1]*wx + mvp->m[5]*wy + mvp->m[9]*wz  + mvp->m[13];
+    float cw = mvp->m[3]*wx + mvp->m[7]*wy + mvp->m[11]*wz + mvp->m[15];
+    if (cw <= 1e-6f) return 0;
+    float vz = view->m[2]*wx + view->m[6]*wy + view->m[10]*wz + view->m[14];
+    if (-vz <= 0.05f) return 0;
+    *sx = ((cx / cw) + 1.0f) * 0.5f * (float)fb->w;
+    *sy = (1.0f - ((cy / cw) + 1.0f) * 0.5f) * (float)fb->h;
+    *zm = -vz;
+    return 1;
+}
+
+/* v39: THE SCHOOL WATER DRAW — water.c:109-444 (the droplet quads) +
+ * 446-711 (the stream surface strips), VERBATIM. References:
+ *   - the spawn/update state: sh1x_anims_tick case 22 (water.c:20-107,
+ *     154-180, 702-707);
+ *   - the droplet band state (the v-window stretch field_17C/17D, the
+ *     height interp field_174/176, the brightness field_180, the across
+ *     offsets field_164/168 and the elongation field_16C/170):
+ *     water.c:183-302;
+ *   - the droplet quad vertices: water.c:306-324 (game Q12, the exact
+ *     (-field_164 >> 12) arithmetic-shift semantics);
+ *   - the cull (water.c:404-419): avgZ <= 0, avgZ>>3 >= 2048,
+ *     |sx| > 200, |sy| > 160 (PSX origin-centered, engine-scaled);
+ *   - the droplet UVs (water.c:423-433): u 64/96 + ((sel&2)*16), the
+ *     v-window field_17C + ((sel&1)<<6) + field_17D, clut row 0;
+ *   - the brightness (field_180 * func_80055D78) >> 7 (water.c:436) via
+ *     sh_light_query_pos (the exact port) with the GAME Q12 position;
+ *   - the OT insert (z + 0x100) >> 3 (water.c:439) = depthM + 1.0 m;
+ *   - the surface rows: the walk 0 -> scroll -> scroll+tileLen .. len
+ *     (water.c:524-655), the heights interp (water.c:532-547), the
+ *     leading window v [127-t, 127] with t = 64*scroll/tileLen and the
+ *     body tiles v 64..127 (water.c:657-696), the Gouraud corner
+ *     brightness Q12_MULT_PRECISE(cos(var_s2>>2), light) (water.c:578),
+ *     the neighbor tapers (water.c:580-618), clut ROW 1 (the 0x4E word),
+ *     the OT ((avg4z + 0x100) >> 3) (water.c:698).
+ * The engine-axis map: game (x, y-down, z) -> glTF (x, -y, -z)/4096 m.
+ * DuckStation's signed DIV-by-zero (cpu_core.cpp:745-751: LO = (num>=0)
+ * ? -1 : 1) covers water.c:229's 0/0 (the terminator len 0) — ported
+ * via sh_div_ds. */
+/* v39: the camera's yaw in degrees (the vertical branch's view-angle
+ * analog — vwGetViewAngle's vy; water.c:507-510 uses it for the
+ * vertical stream strips, map1_s03's drain cutscene only). */
+static float cam_yaw_deg(const CamPose *cam) {
+    mat4 view = mat4_view_from_quat(cam->pos, cam->q);
+    /* the view-space -Z forward in world space = the view matrix's 3rd
+     * row; the yaw = atan2(fx, fz) (0 = +Z, 90 = +X, degrees).        */
+    float fx = -view.m[2], fz = -view.m[10];
+    return atan2f(fx, fz) * (180.0f / (float)M_PI);
+}
+
+static int sh_div_ds(int num, int denom) {
+    if (denom == 0) return (num >= 0) ? -1 : 1;
+    if (num == (-2147483647 - 1) && denom == -1) return num;
+    return num / denom;
+}
+
+static void sh1x_school_water_draw(Frame *fb, const Renderer *R,
+                                    const CamPose *cam, Sh1xPropAnim *a) {
+    if (!a->seeded || !a->wfHasStream) return;
+    if (getenv("FOGPOC_NOWATER")) return;  /* the A/B kill switch */
+    g_wdbgWrote = 0;
+    sh_watertex_default();        /* the compiled-in sheet if no EXTRAs */
+    float aspect = (float)fb->w / (float)fb->h;
+    mat4 view = mat4_view_from_quat(cam->pos, cam->q);
+    mat4 proj = mat4_perspective(cam->fovDeg, aspect, 0.05f, 100.0f);
+    mat4 mvp = mat4_mul(&proj, &view);
+    const float cullX = 200.0f * (float)fb->w / 320.0f;
+    const float cullY = 160.0f * (float)fb->h / 224.0f;
+
+    /* ---------------- the stream surface (water.c:446-711) ---------- */
+    if (a->wfSurfaceOn) {
+        for (int sgi = 0; sgi < a->wfSegCount; sgi++) {
+            const Sh1xWaterSeg *sg = &a->wfSeg[sgi];
+            int temp_s0 = sg->width >> 1;               /* water.c:494  */
+            int s25C = 0, s25E = 0;
+            int f264[2][2];
+            if (sg->horiz) {
+                s25C = sh_sin_q12(sg->heading);
+                s25E = sh_cos_q12(sg->heading);
+                f264[0][0] = (int)(((int64_t)temp_s0 * s25E) >> 12);
+                f264[0][1] = -f264[0][0];
+                f264[1][0] = (int)(((int64_t)-temp_s0 * s25C) >> 12);
+                f264[1][1] = -f264[1][0];
+            } else {
+                /* the vertical branch rides the VIEW yaw (field_0.field_
+                 * 30.vy, vwGetViewAngle) — the camera's yaw analog.    */
+                float yawDeg = cam_yaw_deg(cam);
+                int vy = (int)(yawDeg * 4096.0f / 360.0f);
+                f264[0][0] = (int)(((int64_t)temp_s0 *
+                        sh_sin_q12(vy - 1024)) >> 12);
+                f264[1][0] = (int)(((int64_t)temp_s0 *
+                        sh_cos_q12(vy - 1024)) >> 12);
+                f264[0][1] = (int)(((int64_t)temp_s0 *
+                        sh_sin_q12(vy + 1024)) >> 12);
+                f264[1][1] = (int)(((int64_t)temp_s0 *
+                        sh_cos_q12(vy + 1024)) >> 12);
+            }
+            /* the last segment's end-taper bound (water.c:513-520):
+             * field_26E = len[i] - len[terminator].                          */
+            int f26E = (sgi == a->wfSegCount - 1)
+                       ? (a->wfSeg[a->wfSegCount].len)
+                       : -1;    /* 0xFFFF sentinel (no taper)           */
+            if (sgi == a->wfSegCount - 1)
+                f26E = sg->len - a->wfSeg[a->wfSegCount].len;
+            if (f26E < 0) f26E = -1;
+            int sp14 = 0;
+            float rowsX[16][2], rowsYm[16][2], rowsZ[16][2];
+            int rowsB[16][2];
+            int j = 0, var_s4 = 0;
+            for (;; j++) {
+                if (j >= 16) break;
+                int var_s2 = 0;
+                int f26C = sg->y;
+                if (sg->horiz) {
+                    if (var_s4 != 0) {
+                        if (var_s4 == sg->len) f26C = a->wfSeg[sgi + 1].y;
+                        else if (sg->len != 0)
+                            f26C = sg->y + ((a->wfSeg[sgi + 1].y - sg->y) *
+                                            var_s4) / sg->len;
+                    }
+                    if (f26E >= 0 && f26E < var_s4) {
+                        /* the end taper (water.c:549-560) — dead for the
+                         * map1_s02 terminator len 0 (var_s4 <= len); the
+                         * division rides sh_div_ds (DuckStation 0/0).   */
+                        var_s2 = sh_div_ds((var_s4 - f26E) << 12,
+                                           a->wfSeg[a->wfSegCount].len);
+                        temp_s0 = (int)((((4096 - var_s2) *
+                                (sg->width >> 1)) >> 12) +
+                                (((int64_t)var_s2 *
+                                  (a->wfSeg[sgi + 1].width >> 1)) >> 12));
+                        f264[0][0] = (int)(((int64_t)temp_s0 * s25E) >> 12);
+                        f264[0][1] = -f264[0][0];
+                        f264[1][0] = (int)(((int64_t)-temp_s0 * s25C) >> 12);
+                        f264[1][1] = -f264[1][0];
+                    }
+                }
+                for (int k = 0; k < 2; k++) {
+                    int var_fp, sp18, sp1C;
+                    if (sg->horiz) {
+                        var_fp = sg->x + f264[0][k] +
+                                 (int)(((int64_t)var_s4 * s25C) >> 12);
+                        sp18 = f26C;
+                        sp1C = sg->z + f264[1][k] +
+                               (int)(((int64_t)var_s4 * s25E) >> 12);
+                    } else {
+                        var_fp = sg->x + f264[0][k];
+                        sp18 = sg->y + var_s4;
+                        sp1C = sg->z + f264[1][k];
+                    }
+                    /* the Gouraud corner brightness (water.c:578)      */
+                    int br = (int)(((int64_t)sh_cos_q12(var_s2 >> 2) *
+                            sh_light_query_pos(R->env, var_fp, sp18, sp1C))
+                            >> 12);
+                    if (br < 0) br = 0;
+                    if (br > 255) br = 255;
+                    rowsB[j][k] = br;
+                    /* the neighbor tapers (water.c:580-618)            */
+                    if (sgi < a->wfSegCount - 1 && sg->horiz &&
+                        a->wfSeg[sgi + 1].horiz) {
+                        int tv0_8 = sh_sin_q12(sg->heading -
+                                               a->wfSeg[sgi + 1].heading);
+                        int vs2 = (int)(((int64_t)a->wfSeg[sgi + 1].spread *
+                                         tv0_8) >> 12);
+                        if (k == 0) vs2 = -vs2;
+                        int tv1_3 = sg->len - var_s4;
+                        if (tv1_3 < vs2)
+                            rowsB[j][k] = (int)(((int64_t)
+                                    (tv1_3 >= 0
+                                     ? ((tv1_3 << 12) / (vs2 ? vs2 : 1))
+                                     : 0) * rowsB[j][k]) >> 12);
+                    }
+                    if (sgi > 0 && sg->horiz && a->wfSeg[sgi - 1].horiz) {
+                        int vs2 = (int)(((int64_t)a->wfSeg[sgi - 1].spread *
+                                sh_sin_q12(a->wfSeg[sgi - 1].heading -
+                                           sg->heading)) >> 12);
+                        if (k == 0) vs2 = -vs2;
+                        int vs1 = sg->rampHalf -
+                                  (vs2 < 0 ? -vs2 : vs2);
+                        if (var_s4 < vs1)
+                            rowsB[j][k] = (int)(((int64_t)
+                                    ((var_s4 << 12) / (vs1 ? vs1 : 1)) *
+                                    rowsB[j][k]) >> 12);
+                    }
+                    rowsX[j][k] = var_fp;
+                    rowsYm[j][k] = sp18;
+                    rowsZ[j][k] = sp1C;
+                }
+                /* the row advance (water.c:632-655)                    */
+                if (var_s4 != sg->len) {
+                    if (j != 0) {
+                        if (sg->len < var_s4 + sg->tileLen) {
+                            sp14 = sg->len - var_s4;
+                            var_s4 = sg->len;
+                        } else {
+                            var_s4 += sg->tileLen;
+                        }
+                    } else {
+                        var_s4 += a->wfScroll[sgi];
+                    }
+                } else break;
+            }
+            /* the strip quads (water.c:657-700)                          */
+            for (int k = 0; k < j; k++) {
+                if (k + 1 >= 16) break;
+                int vNear, vSpan;
+                if (k == 0) {
+                    int t = (sg->tileLen != 0)
+                            ? (a->wfScroll[sgi] << 6) / sg->tileLen : 0;
+                    vNear = 0x7F - t;              /* water.c:661-663   */
+                    vSpan = t;
+                } else {
+                    vNear = 0x40;                  /* water.c:668        */
+                    if (k + 1 == j)
+                        vSpan = (sg->tileLen != 0)
+                                ? (sp14 << 6) / sg->tileLen : 0;
+                    else
+                        vSpan = 0x3F;
+                }
+                int sxq[4], syq[4], vis = 1;
+                float zq[4];
+                for (int c = 0; c < 4; c++) {
+                    int rj = (c < 2) ? k : k + 1;
+                    int rk = (c & 1) ? 1 : 0;
+                    float px, py, zm;
+                    /* game Q12 -> engine meters (x, -y, -z)/4096        */
+                    if (!sh_wspr_project(&mvp, &view,
+                            rowsX[rj][rk] / 4096.0f,
+                            -rowsYm[rj][rk] / 4096.0f,
+                            -rowsZ[rj][rk] / 4096.0f,
+                            fb, &px, &py, &zm)) { vis = 0; break; }
+                    sxq[c] = (int)px;
+                    syq[c] = (int)py;
+                    zq[c] = zm;
+                }
+                if (!vis) continue;
+                float avgZ = (zq[0] + zq[1] + zq[2] + zq[3]) * 0.25f;
+                if (avgZ <= 0.0f || avgZ * 256.0f >= 16384.0f) continue;
+                if (fabsf((float)sxq[3] - (float)fb->w * 0.5f) > cullX)
+                    continue;
+                if (fabsf((float)syq[3] - (float)fb->h * 0.5f) > cullY)
+                    continue;
+                int cr[4], cg[4], cb[4];
+                cr[0] = cg[0] = cb[0] = rowsB[k][0];
+                cr[1] = cg[1] = cb[1] = rowsB[k][1];
+                cr[2] = cg[2] = cb[2] = rowsB[k + 1][0];
+                cr[3] = cg[3] = cb[3] = rowsB[k + 1][1];
+                fx_blit_wsheet_gt4(fb, sxq, syq, 1, 64, vNear, 95,
+                                   vNear + vSpan, cr, cg, cb,
+                                   avgZ);   /* own depth (the v37 gate) */
+            }
+        }
+    }
+
+    /* ---------------- the droplets (water.c:109-443) ------------------ */
+    for (int q = 0; q < a->wfDrops; q++) {
+        if (!a->wfAlive[q]) continue;
+        int sel = a->wfSel[q];
+        int idx0 = sel >> 2;                             /* water.c:154 */
+        if (idx0 < 0 || idx0 > 2) idx0 = 0;
+        const Sh1xWaterSeg *sg = &a->wfSeg[idx0];
+        int along = a->wfAlong[q];
+        int v17C = 0, v17D = 63, f174 = sg->y, f176 = sg->y;
+        int var_s3 = 4096;
+        if (sg->horiz) {
+            if (along < sg->rampHalf) {
+                var_s3 = (sg->rampHalf != 0)
+                         ? (along << 12) / sg->rampHalf : 0;
+                v17C = 0;
+                v17D = var_s3 >> 6;
+                f174 = sg->y;
+            } else if (along > sg->len) {
+                var_s3 = (sg->rampHalf != 0)
+                         ? ((sg->len + sg->rampHalf - along) << 12) /
+                           sg->rampHalf : 0;
+                v17C = 63 - (var_s3 >> 6);
+                v17D = var_s3 >> 6;
+                f176 = a->wfSeg[idx0 + 1].y;
+            } else {
+                var_s3 = 4096;
+                v17C = 0;
+                v17D = 63;
+            }
+            if (along >= sg->rampHalf) {
+                int dl = (sg->len != 0) ? sg->len : 1;
+                f174 = sg->y + ((a->wfSeg[idx0 + 1].y - sg->y) *
+                                (along - sg->rampHalf)) / dl;
+            }
+            if (along <= sg->len) {
+                int dl = (sg->len != 0) ? sg->len : 1;
+                f176 = sg->y + ((a->wfSeg[idx0 + 1].y - sg->y) * along) / dl;
+            }
+        } else {
+            if (along < sg->rampHalf) {
+                var_s3 = (sg->rampHalf != 0)
+                         ? (along << 12) / sg->rampHalf : 0;
+                v17C = 0;
+                v17D = var_s3 >> 6;
+            } else if (along > sg->len) {
+                var_s3 = (sg->rampHalf != 0)
+                         ? ((sg->len + sg->rampHalf - along) << 12) /
+                           sg->rampHalf : 0;
+                v17C = 63 - (var_s3 >> 6);
+                v17D = var_s3 >> 6;
+            } else {
+                var_s3 = 4096;
+                v17C = 0;
+                v17D = 63;
+            }
+        }
+        int f180, f164, f168, f16C, f170;
+        if (idx0 == a->wfSegCount - 1 &&
+            (sg->len - a->wfSeg[a->wfSegCount].len) < along) {
+            /* the last-segment end taper (water.c:224-243) — the
+             * division by the terminator len 0 rides sh_div_ds
+             * (DuckStation's 0/0 = -1).
+             * NOTE the fixed-point scale: field_164/168/16C/170 stay
+             * Q24 (the env_effects.c:498-504 scratchpad cache is a
+             * PLAIN Q12*Q12 product; Q12_MULT_PRECISE(var_s3, Q24)
+             * also stays Q24) — the vertex math's >> 12 (water.c:307-
+             * 324) is the Q24->Q12 conversion.                              */
+            int term = a->wfSeg[a->wfSegCount].len;
+            int minLA = (sg->len >= along) ? along : sg->len;
+            int var_s1 = sh_div_ds((minLA - (sg->len - term)) << 12,
+                                   term);
+            f180 = (int)(((int64_t)(var_s3 >> 5) *
+                    sh_cos_q12(var_s1 >> 2)) >> 12);
+            int f178 = (int)((((4096 - var_s1) *
+                    (sg->spread >> 1)) >> 12) +
+                    (((int64_t)var_s1 *
+                      (a->wfSeg[idx0 + 1].spread >> 1)) >> 12));
+            int f17A = (int)((((4096 - var_s1) * sg->rampHalf) >> 12) +
+                    (((int64_t)var_s1 *
+                      a->wfSeg[idx0 + 1].rampHalf) >> 12));
+            f164 = f178 * sh_sin_q12(sg->heading);
+            f168 = f178 * sh_cos_q12(sg->heading);
+            f16C = (int)(((int64_t)var_s3 *
+                    (f17A * sh_sin_q12(sg->heading))) >> 12);
+            f170 = (int)(((int64_t)var_s3 *
+                    (f17A * sh_cos_q12(sg->heading))) >> 12);
+        } else {
+            f180 = var_s3 >> 5;
+            f164 = (sg->spread >> 1) * sh_sin_q12(sg->heading);
+            f168 = (sg->spread >> 1) * sh_cos_q12(sg->heading);
+            f16C = (int)(((int64_t)var_s3 *
+                    (sg->rampHalf * sh_sin_q12(sg->heading))) >> 12);
+            f170 = (int)(((int64_t)var_s3 *
+                    (sg->rampHalf * sh_cos_q12(sg->heading))) >> 12);
+        }
+        /* the neighbor brightness tapers (water.c:256-302)               */
+        if (idx0 < a->wfSegCount - 1 &&
+            a->wfSeg[idx0 + 1].horiz) {
+            int var_s1 = abs((int)(((int64_t)a->wfSeg[idx0 + 1].spread *
+                    sh_sin_q12(sg->heading -
+                               a->wfSeg[idx0 + 1].heading)) >> 12));
+            int var_v1 = sg->len - along;
+            if (var_v1 < var_s1) {
+                int tv = (var_v1 >= 0)
+                         ? ((var_v1 << 12) / (var_s1 ? var_s1 : 1)) : 0;
+                f180 = (int)(((int64_t)tv * f180) >> 12);
+            }
+        }
+        if (idx0 > 0 && a->wfSeg[idx0 - 1].horiz) {
+            int vs3 = sg->rampHalf;
+            int cross = (int)(((int64_t)a->wfSeg[idx0 - 1].spread *
+                    sh_sin_q12(a->wfSeg[idx0 - 1].heading -
+                               sg->heading)) >> 12);
+            int var_s1 = (cross < 0) ? vs3 + cross : vs3 - cross;
+            if (along < var_s1)
+                f180 = (int)(((int64_t)((along << 12) /
+                        (var_s1 ? var_s1 : 1)) * f180) >> 12);
+        }
+        /* the quad vertices (water.c:306-324) — game Q12, the exact
+         * (-f164 >> 12) arithmetic-shift semantics                        */
+        int xv[4], yv[4], zv[4];
+        xv[0] = a->wfX[q] + (f168 >> 12);
+        yv[0] = f174;
+        zv[0] = a->wfZ[q] + (-f164 >> 12);
+        xv[1] = a->wfX[q] + (-f168 >> 12);
+        yv[1] = f174;
+        zv[1] = a->wfZ[q] + (f164 >> 12);
+        xv[2] = a->wfX[q] + ((f168 - f16C) >> 12);
+        yv[2] = f176;
+        zv[2] = a->wfZ[q] + ((-f164 - f170) >> 12);
+        xv[3] = a->wfX[q] + ((-f168 - f16C) >> 12);
+        yv[3] = f176;
+        zv[3] = a->wfZ[q] + ((f164 - f170) >> 12);
+        int sxq[4], syq[4], vis = 1;
+        float zq[4];
+        for (int c = 0; c < 4; c++) {
+            float px, py, zm;
+            if (!sh_wspr_project(&mvp, &view, xv[c] / 4096.0f,
+                                 -yv[c] / 4096.0f, -zv[c] / 4096.0f,
+                                 fb, &px, &py, &zm)) { vis = 0; break; }
+            sxq[c] = (int)px;
+            syq[c] = (int)py;
+            zq[c] = zm;
+        }
+        if (!vis) continue;
+        int f160 = (int)((zq[0] + zq[1] + zq[2] + zq[3]) *
+                         (256.0f * 0.25f));   /* the GTE avg z (Q8)      */
+        if (f160 <= 0 || (f160 >> 3) >= 2048) continue;  /* water.c:406 */
+        if (fabsf((float)sxq[3] - (float)fb->w * 0.5f) > cullX)
+            continue;                       /* water.c:411             */
+        if (fabsf((float)syq[3] - (float)fb->h * 0.5f) > cullY)
+            continue;                       /* water.c:416             */
+        /* the UVs (water.c:423-433): u 64/96 + (sel&2)*16, the window
+         * v17C + (sel&1)*64, span v17D; clut ROW 0                       */
+        int u0 = 64 + ((sel & 0x2) * 16);
+        int u1 = 95 + ((sel & 0x2) * 16);
+        int vv0 = v17C + ((sel & 0x1) << 6);
+        /* the brightness (water.c:436) = (f180 * light) >> 7           */
+        int br = (int)(((int64_t)f180 *
+                sh_light_query_pos(R->env, a->wfX[q], a->wfY[q],
+                                   a->wfZ[q])) >> 7);
+        if (br < 0) br = 0;
+        if (br > 255) br = 255;
+        if (getenv("FOGPOC_BRDBG"))
+            fprintf(stderr, "BRDBG q=%d f180=%d light=%d br=%d "
+                    "pos=(%d,%d,%d)\n", q, f180,
+                    sh_light_query_pos(R->env, a->wfX[q], a->wfY[q],
+                                       a->wfZ[q]), br,
+                    a->wfX[q], a->wfY[q], a->wfZ[q]);
+        /* depthM = the prim's OWN average depth — the engine's
+         * established water-family gate (v37 W1-5: the ripple mesh/
+         * sprites pass dsum*0.25 with the (zQ8+128)>>3 OT note; the
+         * game's own +0x100 bucket bias (water.c:439) documents the
+         * OT-slot granularity, the painter gate uses the plain depth). */
+        fx_blit_wsheet_ft4(fb, sxq, syq, 0, u0, vv0, u1, vv0 + v17D,
+                           br, br, br,
+                           (float)f160 / 256.0f);
+    }
+    if (getenv("FOGPOC_WFDBG"))
+        fprintf(stderr, "WFDBG total ft4 writes this frame: %d\n",
+                g_wdbgWrote);
+    if (getenv("FOGPOC_WFSAMPL")) {
+        fprintf(stderr, "WFSAMPL idx histogram:");
+        for (int k = 0; k < 16; k++)
+            fprintf(stderr, " %d:%d", k, g_wfsampl[k]);
+        fprintf(stderr, "\n");
+    }
+}
+
 /* the water FX draw pass — the map5_s00 waterRipple (mesh + 12 ripple
  * sprites, func_800CB25C VERBATIM math) + the map1_s02 waterfall
  * droplets. GATE (map5_s00.c:72-84): player.vx > Q12(-80) -> off,
@@ -11053,55 +11985,11 @@ static void sh1x_water_fx_draw(Frame *fb, const Renderer *R,
                         g_waterTileRGB[0][0][1], g_waterTileRGB[0][0][2]);
             }
         }
-        else if (a->driver == 22) {  /* the waterfall droplets          */
-            if (!a->seeded) continue;
-            mat4 view = mat4_view_from_quat(cam->pos, cam->q);
-            /* the engine droplet (sharedFunc_800CBDA8_1_s02): a textured
-             * FT4 sampling the DR_WAVE right-half tile (u 64..95, the
-             * u0/u1 sums 0x40/0x5F at water.c:444-449) with tpage field
-             * 45 = ADDITIVE, size/brightness interpolated over the fall
-             * band (field_174..180 scratchpad GTE). PoC: 0.5 m quads,
-             * brightness fading with the fall progress (documented
-             * approximation of the band interpolation).               */
-            static unsigned char dropTile[32][32][3];
-            static int dropTileInit = 0;
-            if (!dropTileInit) {
-                fx_water_static_tile(0, dropTile);
-                dropTileInit = 1;
-            }
-            for (int q = 0; q < 10; q++) {
-                if (!a->wfAlive[q]) continue;
-                float gx = (float)a->wfX[q] / 4096.0f;
-                float gy = -(float)a->wfY[q] / 4096.0f;  /* y-down flip */
-                float gz = -(float)a->wfZ[q] / 4096.0f;
-                float prog = (float)(a->wfY[q] - 409) / 8601.0f;
-                if (prog < 0.0f) prog = 0.0f;
-                int brt = (int)(180.0f * (1.0f - 0.6f * prog)) + 20;
-                int sxq[4], syq[4], vis = 1;
-                float sM = 0.25f;               /* half-size ~0.5 m    */
-                float wx[4] = { gx - sM, gx + sM, gx - sM, gx + sM };
-                float wy[4] = { gy - sM, gy + sM, gy - sM, gy + sM };
-                float wz[4] = { gz + sM, gz + sM, gz - sM, gz - sM };
-                for (int k = 0; k < 4; k++) {
-                    float px = view.m[0] * wx[k] + view.m[4] * wy[k]
-                             + view.m[8] * wz[k] + view.m[12];
-                    float py = view.m[1] * wx[k] + view.m[5] * wy[k]
-                             + view.m[9] * wz[k] + view.m[13];
-                    float pz = view.m[2] * wx[k] + view.m[6] * wy[k]
-                             + view.m[10] * wz[k] + view.m[14];
-                    float d = -pz;
-                    if (d <= 0.05f) { vis = 0; break; }
-                    float iv = 240.0f / d;
-                    sxq[k] = (int)(px * iv) + (int)(fb->w / 2);
-                    syq[k] = (int)(py * iv) + (int)(fb->h / 2);
-                }
-                if (!vis) continue;
-                fx_blit_water_quad(fb, sxq, syq, dropTile, 0, 0, 31, 31,
-                                   brt, brt, brt, 1, -1.0f);  /* tpage 45 =
-                                   ADD; droplet bucket = its own z
-                                   (water.c) — gate left off: the droplet
-                                   OT formula not yet decomp-verified */
-            }
+        else if (a->driver == 22) {  /* the school waterfall — water.c
+                                      * 109-711 (v39: the VERBATIM surface
+                                      * strips + droplets; see
+                                      * sh1x_school_water_draw)          */
+            sh1x_school_water_draw(fb, R, cam, a);
         }
     }
     (void)sx;
@@ -13148,6 +14036,8 @@ static CamPose live_advance(LiveApp *A, double dt) {
         sh1x_anims_sync((Sh1x *)&A->R.sc->sh1x, A->play.sessionT);
         fx_water_scroll_sync(&A->R.sc->sh1x, &A->env, &cp);
         sh1x_water_ripple_tick((Sh1x *)&A->R.sc->sh1x, &A->env, &cp);
+        sh1x_waterfall_tick((Sh1x *)&A->R.sc->sh1x, &cp,
+                            A->play.sessionT); /* v39: the school water */
     }
     /* between ticks (and while paused): hold the tick state — the engine
      * renders nothing in between. The env sync still runs each frame for
@@ -13183,6 +14073,8 @@ static void live_render(LiveApp *A) {
     sh1x_anims_sync((Sh1x *)&A->R.sc->sh1x, A->play.sessionT); /* v38 */
     fx_water_scroll_sync(&A->R.sc->sh1x, &A->env, &cp); /* v34: scroll per tick */
     sh1x_water_ripple_tick((Sh1x *)&A->R.sc->sh1x, &A->env, &cp); /* v37: the ripple walk per tick */
+    sh1x_waterfall_tick((Sh1x *)&A->R.sc->sh1x, &cp,
+                        A->play.sessionT); /* v39: the school water per tick */
     render_frame(&A->fb, &A->R, &cp);
 }
 
@@ -16713,6 +17605,7 @@ int main(int argc, char **argv) {
             sh1x_anims_sync((Sh1x *)&R.sc->sh1x, tSim);  /* v38: the session clock (the phase wraps) */
             fx_water_scroll_sync(&R.sc->sh1x, &Es, &cp); /* v34: scroll per tick */
             sh1x_water_ripple_tick((Sh1x *)&R.sc->sh1x, &Es, &cp); /* v37: ripple walk per tick */
+            sh1x_waterfall_tick((Sh1x *)&R.sc->sh1x, &cp, tSim); /* v39 */
             tSim += tickDt;
             haveCp = 1;
         }
@@ -16865,6 +17758,7 @@ int main(int argc, char **argv) {
             sh1x_anims_sync((Sh1x *)&R.sc->sh1x, tSim);  /* v38: the session clock (the phase wraps) */
             fx_water_scroll_sync(&R.sc->sh1x, &Es, &cp); /* v34: scroll per tick */
             sh1x_water_ripple_tick((Sh1x *)&R.sc->sh1x, &Es, &cp); /* v37: ripple walk per tick */
+            sh1x_waterfall_tick((Sh1x *)&R.sc->sh1x, &cp, tSim); /* v39 */
             tSim += tickDt;
             haveCp = 1;
         }
