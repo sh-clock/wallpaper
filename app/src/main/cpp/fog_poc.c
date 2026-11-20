@@ -1973,7 +1973,9 @@ static void sh1x_load(Sh1x *sx, const JValue *json) {
                  1638, 2048, 204},
                 {-60620, 409, -209715, 6553, 1, 3072, 1638, 2048, 204,
                  1638, 2048, 204},
-                {0, 409, 0, 0, 0, 0, 1638, 0, 0, 1638, 2048, 0},
+                {0, 409, 0, 0, 1, 0, 1638, 0, 0, 1638, 2048, 0},
+                /* ^horiz=1 (audit A6): field_30==0 IS the horizontal
+                 * branch — BSS-zero reads as horizontal, not vertical */
             };
             for (int sg = 0; sg < 4; sg++) {
                 Sh1xWaterSeg *w = &a->wfSeg[sg];
@@ -2020,6 +2022,9 @@ static void sh1x_load(Sh1x *sx, const JValue *json) {
                 a->wfDrops = jint(st, "droplets", a->wfDrops);
                 if (a->wfDrops > 16) a->wfDrops = 16;
                 if (a->wfSegCount > 3) a->wfSegCount = 3;
+                if (a->wfSegCount < 1) a->wfSegCount = 1;  /* audit A5: an
+                                             authored 0 would hit Rng%0
+                                             (SIGFPE) and OOB wfSeg reads */
             }
             a->wfHasStream = 1;
         }
@@ -11237,10 +11242,9 @@ static unsigned short sh_wspr_texel(int clutRow, int u, int v) {
  * flat prim color (the setRGB0 modulation), TPAGE-45 ABR-1 ADDITIVE
  * (B5+F5 clamp 31). Corner order = the POLY_FT4's (u0,v0)(u1,v1)
  * (u2,v2)(u3,v3): u spans corner0->corner1, v spans corner0->corner2.
- * depthM = the prim's own projected depth + 1.0m (the OT (z+0x100)>>3
- * bias, water.c:439) — occluded by nearer opaque geometry. */
-static int g_wfsampl[16];
-static int g_wdbgWrote;
+ * depthM = the prim's OWN projected depth — the engine's established
+ * water-family painter gate (v37 W1-5; the game's own OT bucket bias
+ * (z+0x100)>>3, water.c:439, is documented at the call sites). */
 static void fx_blit_wsheet_ft4(Frame *fb, const int sx[4], const int sy[4],
                                int clutRow, int u0, int v0, int u1, int v1,
                                int primR, int primG, int primB,
@@ -11284,10 +11288,6 @@ static void fx_blit_wsheet_ft4(Frame *fb, const int sx[4], const int sy[4],
             int fr = ((int)(tc & 31u) * primR) >> 7;
             int fg = (int)(((tc >> 5) & 31u) * primG) >> 7;
             int fbv = (int)(((tc >> 10) & 31u) * primB) >> 7;
-            if (getenv("FOGPOC_WFSAMPL")) {
-                extern int g_wfsampl[16];
-                g_wfsampl[g_waterTexIdx[v][u] & 0xF]++;
-            }
             if (fr > 31) fr = 31;
             if (fg > 31) fg = 31;
             if (fbv > 31) fbv = 31;
@@ -11298,7 +11298,6 @@ static void fx_blit_wsheet_ft4(Frame *fb, const int sx[4], const int sy[4],
             p[0] = (uint8_t)((orr << 3) | (orr >> 2));
             p[1] = (uint8_t)((ogg << 3) | (ogg >> 2));
             p[2] = (uint8_t)((obb << 3) | (obb >> 2));
-            g_wdbgWrote++;
         }
     }
 }
@@ -11447,7 +11446,6 @@ static void sh1x_school_water_draw(Frame *fb, const Renderer *R,
                                     const CamPose *cam, Sh1xPropAnim *a) {
     if (!a->seeded || !a->wfHasStream) return;
     if (getenv("FOGPOC_NOWATER")) return;  /* the A/B kill switch */
-    g_wdbgWrote = 0;
     sh_watertex_default();        /* the compiled-in sheet if no EXTRAs */
     float aspect = (float)fb->w / (float)fb->h;
     mat4 view = mat4_view_from_quat(cam->pos, cam->q);
@@ -11559,15 +11557,19 @@ static void sh1x_school_water_draw(Frame *fb, const Renderer *R,
                                      : 0) * rowsB[j][k]) >> 12);
                     }
                     if (sgi > 0 && sg->horiz && a->wfSeg[sgi - 1].horiz) {
+                        /* water.c:602-618 VERBATIM (audit v39-A1: no
+                         * rampHalf, no abs — the OLD rampHalf-|vs2| form
+                         * inverted the ± branch, dropped the k=0 sign
+                         * flip AND invented the rampHalf term, producing
+                         * a spurious row-0 fade pumping with the scroll
+                         * period on the default data).                    */
                         int vs2 = (int)(((int64_t)a->wfSeg[sgi - 1].spread *
                                 sh_sin_q12(a->wfSeg[sgi - 1].heading -
                                            sg->heading)) >> 12);
                         if (k == 0) vs2 = -vs2;
-                        int vs1 = sg->rampHalf -
-                                  (vs2 < 0 ? -vs2 : vs2);
-                        if (var_s4 < vs1)
+                        if (var_s4 < vs2)
                             rowsB[j][k] = (int)(((int64_t)
-                                    ((var_s4 << 12) / (vs1 ? vs1 : 1)) *
+                                    ((var_s4 << 12) / (vs2 ? vs2 : 1)) *
                                     rowsB[j][k]) >> 12);
                     }
                     rowsX[j][k] = var_fp;
@@ -11622,12 +11624,11 @@ static void sh1x_school_water_draw(Frame *fb, const Renderer *R,
                     zq[c] = zm;
                 }
                 if (!vis) continue;
+                /* audit v39-A3: water.c:657-700 addPrims EVERY strip quad
+                 * unconditionally (the GPU clips) — the invented
+                 * avgZ/corner culls are removed; the blit clips to the
+                 * framebuffer itself.                                       */
                 float avgZ = (zq[0] + zq[1] + zq[2] + zq[3]) * 0.25f;
-                if (avgZ <= 0.0f || avgZ * 256.0f >= 16384.0f) continue;
-                if (fabsf((float)sxq[3] - (float)fb->w * 0.5f) > cullX)
-                    continue;
-                if (fabsf((float)syq[3] - (float)fb->h * 0.5f) > cullY)
-                    continue;
                 int cr[4], cg[4], cb[4];
                 cr[0] = cg[0] = cb[0] = rowsB[k][0];
                 cr[1] = cg[1] = cb[1] = rowsB[k][1];
@@ -11650,6 +11651,8 @@ static void sh1x_school_water_draw(Frame *fb, const Renderer *R,
         int along = a->wfAlong[q];
         int v17C = 0, v17D = 63, f174 = sg->y, f176 = sg->y;
         int var_s3 = 4096;
+        int f180V = 0, f16CV = 0;   /* the vertical branch (water.c:369-370) */
+        int xv[4], yv[4], zv[4];    /* the quad vertices (game Q12)     */
         if (sg->horiz) {
             if (along < sg->rampHalf) {
                 var_s3 = (sg->rampHalf != 0)
@@ -11679,6 +11682,9 @@ static void sh1x_school_water_draw(Frame *fb, const Renderer *R,
                 f176 = sg->y + ((a->wfSeg[idx0 + 1].y - sg->y) * along) / dl;
             }
         } else {
+            /* water.c:344-367 — the vertical fall's v-window (the same
+             * ramp band; no height interps — the LIVE vy carries the
+             * descent, water.c:374-391)                              */
             if (along < sg->rampHalf) {
                 var_s3 = (sg->rampHalf != 0)
                          ? (along << 12) / sg->rampHalf : 0;
@@ -11695,8 +11701,13 @@ static void sh1x_school_water_draw(Frame *fb, const Renderer *R,
                 v17C = 0;
                 v17D = 63;
             }
+            /* water.c:369-370 — field_180 = var_s3>>5; field_16C =
+             * Q12_MULT_PRECISE(var_s3, rampHalf) — the VERTICAL
+             * elongation (no trig), audit v39-A4.                    */
+            f180V = var_s3 >> 5;
+            f16CV = (int)(((int64_t)var_s3 * sg->rampHalf) >> 12);
         }
-        int f180, f164, f168, f16C, f170;
+        int f180 = 0, f164 = 0, f168 = 0, f16C = 0, f170 = 0;
         if (idx0 == a->wfSegCount - 1 &&
             (sg->len - a->wfSeg[a->wfSegCount].len) < along) {
             /* the last-segment end taper (water.c:224-243) — the
@@ -11735,7 +11746,35 @@ static void sh1x_school_water_draw(Frame *fb, const Renderer *R,
             f170 = (int)(((int64_t)var_s3 *
                     (sg->rampHalf * sh_cos_q12(sg->heading))) >> 12);
         }
-        /* the neighbor brightness tapers (water.c:256-302)               */
+        if (!sg->horiz) {
+            /* the vertical fall's state (water.c:369-370, audit v39-A4):
+             * field_180 = var_s3>>5; field_16C (the VERTICAL elongation,
+             * Q12 — added to vy_8 UNshifted) = Q12_MULT_PRECISE(var_s3,
+             * rampHalf); the cross pair = the EC/FC view-yaw +-90 pair
+             * (env_effects.c:505-510), NOT the segment heading.         */
+            f180 = f180V;
+            int vy = (int)(cam_yaw_deg(cam) * 4096.0f / 360.0f);
+            int ecx0 = (int)(((int64_t)(sg->spread >> 1) *
+                    sh_sin_q12(vy - 1024)) >> 12);
+            int ecy0 = (int)(((int64_t)(sg->spread >> 1) *
+                    sh_sin_q12(vy + 1024)) >> 12);
+            int fcx0 = (int)(((int64_t)(sg->spread >> 1) *
+                    sh_cos_q12(vy - 1024)) >> 12);
+            int fcy0 = (int)(((int64_t)(sg->spread >> 1) *
+                    sh_cos_q12(vy + 1024)) >> 12);
+            /* water.c:374-391: the LIVE vy_8 heights (the droplet
+             * DESCENDS on screen) + the vertical elongation.             */
+            xv[0] = a->wfX[q] + ecx0; yv[0] = a->wfY[q];
+            zv[0] = a->wfZ[q] + fcx0;
+            xv[1] = a->wfX[q] + ecy0; yv[1] = a->wfY[q];
+            zv[1] = a->wfZ[q] + fcy0;
+            xv[2] = a->wfX[q] + ecx0; yv[2] = a->wfY[q] + f16CV;
+            zv[2] = a->wfZ[q] + fcx0;
+            xv[3] = a->wfX[q] + ecy0; yv[3] = a->wfY[q] + f16CV;
+            zv[3] = a->wfZ[q] + fcy0;
+        } else
+        /* the neighbor brightness tapers (water.c:256-302 — the
+         * HORIZONTAL branch only; water.c:259/282 gate on field_30==0)  */
         if (idx0 < a->wfSegCount - 1 &&
             a->wfSeg[idx0 + 1].horiz) {
             int var_s1 = abs((int)(((int64_t)a->wfSeg[idx0 + 1].spread *
@@ -11749,18 +11788,25 @@ static void sh1x_school_water_draw(Frame *fb, const Renderer *R,
             }
         }
         if (idx0 > 0 && a->wfSeg[idx0 - 1].horiz) {
+            /* water.c:284-295 VERBATIM (audit v39-A2): the product < 0
+             * branch SUBTRACTS the (negative) product and the else ADDS
+             * — var_s1 = rampHalf + |product| in BOTH branches (the old
+             * code inverted the ±, shortening the fade distance).       */
             int vs3 = sg->rampHalf;
             int cross = (int)(((int64_t)a->wfSeg[idx0 - 1].spread *
                     sh_sin_q12(a->wfSeg[idx0 - 1].heading -
                                sg->heading)) >> 12);
-            int var_s1 = (cross < 0) ? vs3 + cross : vs3 - cross;
+            int var_s1 = (cross < 0) ? vs3 - cross : vs3 + cross;
             if (along < var_s1)
                 f180 = (int)(((int64_t)((along << 12) /
                         (var_s1 ? var_s1 : 1)) * f180) >> 12);
         }
         /* the quad vertices (water.c:306-324) — game Q12, the exact
-         * (-f164 >> 12) arithmetic-shift semantics                        */
-        int xv[4], yv[4], zv[4];
+         * (-f164 >> 12) arithmetic-shift semantics (the HORIZONTAL
+         * branch; the vertical computed its own above)                  */
+        if (!sg->horiz) {
+            /* filled by the vertical branch above */
+        } else {
         xv[0] = a->wfX[q] + (f168 >> 12);
         yv[0] = f174;
         zv[0] = a->wfZ[q] + (-f164 >> 12);
@@ -11773,6 +11819,7 @@ static void sh1x_school_water_draw(Frame *fb, const Renderer *R,
         xv[3] = a->wfX[q] + ((-f168 - f16C) >> 12);
         yv[3] = f176;
         zv[3] = a->wfZ[q] + ((f164 - f170) >> 12);
+        }
         int sxq[4], syq[4], vis = 1;
         float zq[4];
         for (int c = 0; c < 4; c++) {
@@ -11817,15 +11864,6 @@ static void sh1x_school_water_draw(Frame *fb, const Renderer *R,
         fx_blit_wsheet_ft4(fb, sxq, syq, 0, u0, vv0, u1, vv0 + v17D,
                            br, br, br,
                            (float)f160 / 256.0f);
-    }
-    if (getenv("FOGPOC_WFDBG"))
-        fprintf(stderr, "WFDBG total ft4 writes this frame: %d\n",
-                g_wdbgWrote);
-    if (getenv("FOGPOC_WFSAMPL")) {
-        fprintf(stderr, "WFSAMPL idx histogram:");
-        for (int k = 0; k < 16; k++)
-            fprintf(stderr, " %d:%d", k, g_wfsampl[k]);
-        fprintf(stderr, "\n");
     }
 }
 
