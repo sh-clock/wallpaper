@@ -337,7 +337,18 @@ SH1_JNI_FN(start)(JNIEnv *env, jclass clz, jstring filesDir,
 
     g_started = 1;
     g_thread_valid = 1;
-    if (pthread_create(&g_thread, NULL, engine_thread, ma) != 0) {
+    /* v38 (audit-B): the engine thread now carries a ~300 KB Scene (the
+     * v38 animsFresh[64] engine-fresh snapshot doubled the stack-local
+     * struct) plus realtime call depth (render -> bind's Grp grps[64] ~
+     * 17 KB nested, raster/fx locals, the Vulkan backend chain). The
+     * bionic default ~1 MB stack leaves an untracked margin — give the
+     * engine thread an explicit 4 MB so the peak (~0.5 MB) sits far from
+     * the guard page. */
+    pthread_attr_t engAttr;
+    pthread_attr_init(&engAttr);
+    pthread_attr_setstacksize(&engAttr, 4u << 20);
+    if (pthread_create(&g_thread, &engAttr, engine_thread, ma) != 0) {
+        pthread_attr_destroy(&engAttr);
         ALOGE("start: pthread_create failed");
         g_started = 0;
         g_thread_valid = 0;
@@ -346,6 +357,7 @@ SH1_JNI_FN(start)(JNIEnv *env, jclass clz, jstring filesDir,
         pthread_mutex_unlock(&g_start_lock);
         return;
     }
+    pthread_attr_destroy(&engAttr);   /* v38: success path cleanup */
     ALOGI("start: scene %s track %d preset %d weather %d res %s fps %d wobble %s dither %s backend %d",
           glbName, g_track, bootPreset, bootWeather,
           useRes ? resBuf : "default(320x224)", (int)(fps + 0.5),
