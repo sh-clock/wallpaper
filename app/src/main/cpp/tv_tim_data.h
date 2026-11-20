@@ -1,13 +1,19 @@
 /* v36: TV1/TV2/TV3.TIM (TIM dir) — the town-center TV screen
- * textures, VERBATIM 8bpp texel indices + CLUT rows. Upload
+ * textures. v41 audit D-1 relabel: the TIMs are 4bpp + 16-entry CLUTs
+ * (flags 0x08, PMODE bits 0-1 = 0) and this array is a faithful
+ * BYTE-IMAGE OF RAW VRAM (each halfword byte-split into 2 entries —
+ * the round-trip is exact; the old "8bpp texel indices" label was the
+ * D-1 modeling error, the data was never corrupted). Upload
  * (engine): func_800D7450 (map4_s03.c:415-465) +
  * Fs_QueuePostLoadTim (fs_queue.c:643-682) with the static
- * D_800DB91C clutX=448: TV1 -> pixels (832..863, rows
- * 256..511), CLUT rows 0..2; TV2 -> pixels (800..863, rows
+ * D_800DB91C clutX=448: TV1 -> pixels (832..895, rows
+ * 256..511 — v41 D-2: the full 64-halfword rect, was clipped
+ * 832..863), CLUT rows 0..2; TV2 -> pixels (800..863, rows
  * 0..255), CLUT rows 5..6; TV3 -> pixels (768..831, rows
  * 384..511), CLUT rows 10..11. Sampled by func_800D88C8
- * (map4_s03.c:1252-1409) through the SwanStation Palette8Bit
- * path (gpu_sw_backend.cpp ShadePixel). */
+ * (map4_s03.c:1252-1409) through the SwanStation Palette4Bit
+ * path (gpu_sw_backend.cpp ShadePixel — the paint tpage word's
+ * mode bits 7-8 are 0; |0x20 is ABR-1, inert: opaque prims). */
 static const unsigned char g_tv1Idx[256][128] = {
     {255,255,255,255,255,206,204,122,86,67,67,34,37,51,36,35,54,67,50,98,51,100,102,134,153,203,220,221,238,222,238,238,238,237,221,222,237,237,238,238,237,238,237,238,237,237,255,255,255,255,255,255,222,204,185,70,67,71,132,70,102,118,52,71,118,119,119,119,119,119,119,23,50,18,20,34,50,34,52,68,49,33,19,35,35,35,34,50,35,52,51,82,99,87,169,153,169,172,169,187,155,187,187,153,170,123,85,35,36,35,35,122,70,70,51,50,66,36,35,67,51,34,35,52,51,36,67,100},
     {255,255,255,255,255,221,157,70,70,100,36,50,100,68,52,67,51,70,34,99,52,52,36,68,134,153,234,237,221,238,238,222,238,238,222,221,237,221,221,205,221,237,222,222,237,221,255,255,255,255,255,255,222,189,121,52,67,36,67,68,52,68,100,70,118,119,119,119,119,119,119,119,118,55,35,51,52,34,18,34,19,35,51,19,18,51,34,35,49,49,50,18,20,66,67,68,100,102,115,102,116,100,118,52,66,118,54,36,35,51,18,51,50,49,66,67,51,36,50,51,52,52,34,52,35,68,50,66},
