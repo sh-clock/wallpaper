@@ -78,10 +78,21 @@
 HwBatch g_hwBatch;
 
 typedef struct {
-    int kind;              /* 1 snow, 2/4 rain streak/drip, 3 splash */
+    int kind;              /* 1 snow, 2/4 rain streak/drip, 3 splash,
+                            * 5 TV paint quad (tri0 = g_hwTvq index)  */
+    int tri0;              /* kind 5: the tvq[] index (SW: post[bi].tri0) */
     SnowFlakeDraw fd;
     RainFlakeDraw rfd;
 } HwSprite;
+
+/* WA2-3 seam: the batch-owned TV paint quad copy — the SW's tvq[24] is
+ * stack-local to render_frame; the HW kind-5 blit is deferred to
+ * hw_replay_sprites (after the GPU readback), so the quads must outlive
+ * hw_build_batch. Filled by sh_tvpaint_collect each frame (24 max, the
+ * engine's per-anim TV_MAX_QUADS class; g_hwNTvq == 0 when the GLB has
+ * no tvPaint extras or dbgItem >= 0).                                */
+static TvQuad g_hwTvq[24];
+static int g_hwNTvq;
 
 static HwSprite *g_hwSprites = NULL;
 static size_t g_hwNSprite = 0, g_hwCapSprite = 0;
@@ -128,7 +139,7 @@ static void hw_batch_free(void) {
 }
 
 static int hw_sprite_push(int kind, const SnowFlakeDraw *fd,
-                          const RainFlakeDraw *rfd) {
+                          const RainFlakeDraw *rfd, int tri0) {
     if (g_hwNSprite >= g_hwCapSprite) {
         size_t cap = g_hwCapSprite ? g_hwCapSprite * 2 : 1024;
         HwSprite *s = (HwSprite *)realloc(g_hwSprites,
@@ -139,6 +150,7 @@ static int hw_sprite_push(int kind, const SnowFlakeDraw *fd,
     HwSprite *s = &g_hwSprites[g_hwNSprite++];
     memset(s, 0, sizeof(*s));
     s->kind = kind;
+    s->tri0 = tri0;
     if (fd) s->fd = *fd;
     if (rfd) s->rfd = *rfd;
     return 1;
@@ -646,6 +658,22 @@ static void hw_push_tri(const RVert *vA, const RVert *vB, const RVert *vC,
  * (the OT-build block copied line-for-line; raster_tri redirected to
  * hw_push_tri; the snow/rain sprite blits deferred to hw_replay_sprites).
  * The clear is the GPU clear; the CPU fb is written by the readback.
+ *
+ * v43 re-port (WA2-3): the v36 TV paint block (sh_tvpaint_collect at the
+ * engine's position — after the weather flakes, before the mesh quads —
+ * so on an OT bucket tie the TV quads sit between the flakes and the
+ * room geometry) + the OT walk's kind-5 arm are re-ported. The stale
+ * v9.x copy had NO TV collection at all: the deferred sprite list carried
+ * kinds 1-4 only, so the TV noise was entirely missing from both hardware
+ * backends. SEAM: the SW's tvq[24] is stack-local to render_frame; the
+ * kind-5 blit (sh_tvpaint_draw_quad, a CPU raster_tri pair) is DEFERRED
+ * to hw_replay_sprites after the GPU readback like the weather sprites,
+ * so the batch owns the copy (g_hwTvq/g_hwNTvq) and the SW's
+ * `tri0 >= 0 && tri0 < nTvq` bounds check runs at the replay. Known
+ * bounded residual (the documented sprite divergence class): a deferred
+ * entry composites over ALL GPU-batched quads instead of only the
+ * farther ones — for the TV quads this only matters where nearer mesh
+ * geometry overlaps a screen (it would have painted over the TV).
  * ========================================================================*/
 static int hw_build_batch(Frame *fb, const Renderer *R, const CamPose *cam) {
     const Scene *sc = R->sc;
@@ -888,6 +916,24 @@ static int hw_build_batch(Frame *fb, const Renderer *R, const CamPose *cam) {
         if (R->snowDump) fprintf(R->snowDump, "frame end nFlake=%d\n", nFlake);
     }
 
+/* ---- v36: the TV paint quads (func_800D88C8) — collected AFTER the
+     * weather flakes, BEFORE the mesh quads: the engine's add order is
+     * particles (game_sys_states.c:172) -> the map update's TV prims
+     * (func_800DA3E0 -> func_800D7718) -> WorldGfx_Draw's mesh quads
+     * (:189), so on an OT bucket tie the TV quads sit BETWEEN the flakes
+     * and the room geometry (LIFO: last-added draws first/below).
+     * HW SEAM (WA2-3): the SW's tvq[] is stack-local to render_frame;
+     * the kind-5 blit (sh_tvpaint_draw_quad) is a CPU raster that runs
+     * AFTER the GPU readback (hw_replay_sprites), so the batch owns the
+     * copy (g_hwTvq) — the collect fills it directly.                  */
+    g_hwNTvq = 0;                    /* the batch-owned count (the replay
+                                      * bounds-checks against this)        */
+    if (R->dbgItem < 0) {
+        sh_tvpaint_collect(&sc->sh1x, &viewProj, &view, fb, R,
+                           post, &nPost, &seq, g_hwTvq, &g_hwNTvq, 24,
+                           nQuadMax + SNOW_COUNT_MAX + 1);
+    }
+
     /* ---- collect the QUADS (ALL materials) as per-quad OT entries ------ */
     for (int i = 0; i < nItems; i++) {
         if (R->dbgItem >= 0 && i != R->dbgItem) continue;
@@ -972,10 +1018,22 @@ static int hw_build_batch(Frame *fb, const Renderer *R, const CamPose *cam) {
         return 0;
     }
     for (int bi = 0; bi < nPost; bi++) {
+        if (post[bi].kind == 5) {           /* v36: the TV paint quad   */
+            /* DEFERRED like the weather sprites — the engine's own blit
+             * (sh_tvpaint_draw_quad) runs on the CPU after the GPU
+             * readback, against the batch-owned g_hwTvq copy; the SW's
+             * `tri0 < nTvq` bounds check lives at the replay (g_hwNTvq) */
+            if (!hw_sprite_push(5, NULL, NULL, post[bi].tri0)) {
+                free(xv); free(post);
+                return 0;
+            }
+            continue;
+        }
         if (post[bi].kind != 0) {
             /* DEFERRED sprite entry — the engine's own blit runs on the
              * CPU after the GPU readback (see the header comment)        */
-            if (!hw_sprite_push(post[bi].kind, &post[bi].fd, &post[bi].rfd)) {
+            if (!hw_sprite_push(post[bi].kind, &post[bi].fd, &post[bi].rfd,
+                                post[bi].tri0)) {
                 free(xv); free(post);
                 return 0;
             }
@@ -1011,14 +1069,21 @@ static int hw_build_batch(Frame *fb, const Renderer *R, const CamPose *cam) {
 }
 
 /* the deferred sprite replay — the engine's own blit functions, in their
- * OT order, z-tested against the GPU-readback fb->z                   */
-static void hw_replay_sprites(Frame *fb) {
+ * OT order, z-tested against the GPU-readback fb->z. The kind-5 arm is
+ * the SW OT walk's TV arm verbatim (the bounds check against the
+ * batch-owned count) — sh_tvpaint_draw_quad is the engine's own
+ * raster_tri pair.                                                     */
+static void hw_replay_sprites(Frame *fb, const Renderer *R) {
     for (size_t i = 0; i < g_hwNSprite; i++) {
         const HwSprite *s = &g_hwSprites[i];
         if (s->kind == 1) snow_blit_flake(fb, &s->fd);
         else if (s->kind == 2) rain_blit_streak(fb, &s->rfd);
         else if (s->kind == 3) rain_blit_splash(fb, &s->rfd);
         else if (s->kind == 4) rain_blit_streak(fb, &s->rfd);
+        else if (s->kind == 5) {           /* v36: the TV paint quad   */
+            if (s->tri0 >= 0 && s->tri0 < g_hwNTvq)
+                sh_tvpaint_draw_quad(fb, R, &g_hwTvq[s->tri0]);
+        }
     }
 }
 
@@ -1114,7 +1179,7 @@ void sh1_hw_render(LiveApp *A, const CamPose *cam) {
     }
     /* the engine's own CPU tail: sprites (z-tested against the readback
      * z), the WorldGfx_2dEffectsDraw brightness overlay, the diag counter */
-    hw_replay_sprites(fb);
+    hw_replay_sprites(fb, R);
     if (R->env && R->env->screenBrightness > 0) {
         int br5 = R->env->screenBrightness >> 3;
         uint8_t *rgb = fb->rgb;
