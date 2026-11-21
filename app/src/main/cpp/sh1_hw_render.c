@@ -78,7 +78,9 @@
 HwBatch g_hwBatch;
 
 typedef struct {
-    int kind;              /* 1 snow, 2/4 rain streak/drip, 3 splash */
+    int kind;              /* 1 snow, 2/4 rain streak/drip, 3 splash,
+                            * 5 TV paint quad (tri0 = g_hwTvq index)  */
+    int tri0;              /* kind 5: the tvq[] index (SW: post[bi].tri0) */
     SnowFlakeDraw fd;
     RainFlakeDraw rfd;
 } HwSprite;
@@ -128,7 +130,7 @@ static void hw_batch_free(void) {
 }
 
 static int hw_sprite_push(int kind, const SnowFlakeDraw *fd,
-                          const RainFlakeDraw *rfd) {
+                          const RainFlakeDraw *rfd, int tri0) {
     if (g_hwNSprite >= g_hwCapSprite) {
         size_t cap = g_hwCapSprite ? g_hwCapSprite * 2 : 1024;
         HwSprite *s = (HwSprite *)realloc(g_hwSprites,
@@ -139,6 +141,7 @@ static int hw_sprite_push(int kind, const SnowFlakeDraw *fd,
     HwSprite *s = &g_hwSprites[g_hwNSprite++];
     memset(s, 0, sizeof(*s));
     s->kind = kind;
+    s->tri0 = tri0;
     if (fd) s->fd = *fd;
     if (rfd) s->rfd = *rfd;
     return 1;
@@ -646,6 +649,26 @@ static void hw_push_tri(const RVert *vA, const RVert *vB, const RVert *vC,
  * (the OT-build block copied line-for-line; raster_tri redirected to
  * hw_push_tri; the snow/rain sprite blits deferred to hw_replay_sprites).
  * The clear is the GPU clear; the CPU fb is written by the readback.
+ *
+ * v43 re-port (WA2-5): the v43 pre-walk FX collect + the v26/v32 tail
+ * passes. (1) fx_lens_exec + fx_water_zone_collect run at the engine's
+ * position (after the quad collection, before the OT walk sort) — the
+ * caustic ring + the glint join post[] at the ENGINE OT buckets 641/639;
+ * their blits (kind 6) are DEFERRED to hw_replay_sprites like the
+ * weather/TV sprites — both blits z-gate against fb->z themselves
+ * (fx_blit_gouraud_tri's depthM gate / the glint's 20.0625 m gate), and
+ * the readback z (nearest opaque) reproduces the walk-time opaque
+ * occlusion; the documented sprite divergence class (nearer STP/BLEND
+ * quads painting over a farther entry) bounds the residue. The FxPrim
+ * array is the engine's own global (g_fxPrims/g_nFxPrims) — stable from
+ * the collect until the next frame's collect, so the replay reads it
+ * directly (no batch-owned copy). (2) The TAIL: fx_pass +
+ * sh1x_water_fx_draw + the FOGPOC_FXDBG dump run between the sprite
+ * replay and the brightness overlay — exactly the SW's post-walk
+ * position (lens flare sprites + the water FX over geometry, under the
+ * overlay). The stale v9.x copy had neither: no fx_pass, no water FX,
+ * no ring/glint — lens flare, water shimmer and the S18 water
+ * particles were absent from both hardware backends.
  * ========================================================================*/
 static int hw_build_batch(Frame *fb, const Renderer *R, const CamPose *cam) {
     const Scene *sc = R->sc;
@@ -707,7 +730,7 @@ static int hw_build_batch(Frame *fb, const Renderer *R, const CamPose *cam) {
             nQuadMax += sc->item[i].icount / 3 + 1;
     }
     PostEnt *post = (PostEnt *)malloc(sizeof(PostEnt) *
-                                      (size_t)(nQuadMax + SNOW_COUNT_MAX + 1));
+                                      (size_t)(nQuadMax + SNOW_COUNT_MAX + 65));
     if (!xv || !post) { free(xv); free(post); return 0; }
     int nPost = 0, seq = 0;
     int nFlake = 0;
@@ -963,6 +986,19 @@ static int hw_build_batch(Frame *fb, const Renderer *R, const CamPose *cam) {
         }
     }
 
+    /* v43: the engine's WorldGfx_Draw order (draw.c:431-446): objects ->
+     * chunks -> 2dEffects — shLensFlareExec's compute half (the light
+     * screen info + the flare target rate) and the water shimmer prims
+     * (the caustic ring + the glint at OT buckets 641/639) join the OT
+     * AFTER the mesh quads and BEFORE the GPU walk. The painter walk then
+     * layers the ring/glint UNDER the nearer water-floor quads exactly
+     * like the engine's far->near OT walk — the v42 bug painted them
+     * AFTER the walk = ON TOP of the water floor (the octagonal blob
+     * 'lens effect above the water'). */
+    fx_lens_exec(fb, R, cam);
+    fx_water_zone_collect(fb, R, cam, post, &nPost, &seq,
+                          nQuadMax + SNOW_COUNT_MAX + 65);
+
     qsort(post, (size_t)nPost, sizeof(PostEnt), postent_cmp);
 
     /* reserve the batch for the worst case, then walk the OT */
@@ -972,10 +1008,25 @@ static int hw_build_batch(Frame *fb, const Renderer *R, const CamPose *cam) {
         return 0;
     }
     for (int bi = 0; bi < nPost; bi++) {
+        if (post[bi].kind == 6) {           /* v43: the water ring/glint */
+            /* DEFERRED like the weather sprites/TV quads — the engine's
+             * own blits (fx_water_glint_blit / fx_blit_gouraud_tri) run
+             * on the CPU after the GPU readback; both z-gate against
+             * fb->z themselves (the readback's nearest-opaque depth
+             * reproduces the walk-time opaque occlusion — see the header
+             * comment). The FxPrim record lives in the engine's own
+             * g_fxPrims global (stable until the next frame's collect). */
+            if (!hw_sprite_push(6, NULL, NULL, post[bi].tri0)) {
+                free(xv); free(post);
+                return 0;
+            }
+            continue;
+        }
         if (post[bi].kind != 0) {
             /* DEFERRED sprite entry — the engine's own blit runs on the
              * CPU after the GPU readback (see the header comment)        */
-            if (!hw_sprite_push(post[bi].kind, &post[bi].fd, &post[bi].rfd)) {
+            if (!hw_sprite_push(post[bi].kind, &post[bi].fd, &post[bi].rfd,
+                                post[bi].tri0)) {
                 free(xv); free(post);
                 return 0;
             }
@@ -1011,14 +1062,32 @@ static int hw_build_batch(Frame *fb, const Renderer *R, const CamPose *cam) {
 }
 
 /* the deferred sprite replay — the engine's own blit functions, in their
- * OT order, z-tested against the GPU-readback fb->z                   */
-static void hw_replay_sprites(Frame *fb) {
+ * OT order, z-tested against the GPU-readback fb->z. The kind-6 arm is
+ * the SW OT walk's water-FX arm verbatim (the bounds check against the
+ * engine's own g_fxPrims count) — fx_water_glint_blit /
+ * fx_blit_gouraud_tri are the engine's own CPU blits and z-gate
+ * themselves against fb->z.                                             */
+static void hw_replay_sprites(Frame *fb, const Renderer *R) {
     for (size_t i = 0; i < g_hwNSprite; i++) {
         const HwSprite *s = &g_hwSprites[i];
         if (s->kind == 1) snow_blit_flake(fb, &s->fd);
         else if (s->kind == 2) rain_blit_streak(fb, &s->rfd);
         else if (s->kind == 3) rain_blit_splash(fb, &s->rfd);
         else if (s->kind == 4) rain_blit_streak(fb, &s->rfd);
+        else if (s->kind == 6) {           /* v43: the water ring/glint */
+            if (s->tri0 >= 0 && s->tri0 < g_nFxPrims) {
+                const FxPrim *fp = &g_fxPrims[s->tri0];
+                if (fp->kind == 2)
+                    fx_water_glint_blit(fb, fp->x[0], fp->y[0],
+                                        fp->c[0][0], fp->c[1][0],
+                                        fp->c[2][0]);
+                else
+                    fx_blit_gouraud_tri(fb, fp->x[0], fp->y[0], fp->c[0],
+                                       fp->x[1], fp->y[1], fp->c[1],
+                                       fp->x[2], fp->y[2], fp->c[2],
+                                       fp->kind, fp->depthM);
+            }
+        }
     }
 }
 
@@ -1114,7 +1183,33 @@ void sh1_hw_render(LiveApp *A, const CamPose *cam) {
     }
     /* the engine's own CPU tail: sprites (z-tested against the readback
      * z), the WorldGfx_2dEffectsDraw brightness overlay, the diag counter */
-    hw_replay_sprites(fb);
+    hw_replay_sprites(fb, R);
+    /* ---- v26 SH1X v3: LENS FLARE + WATER SHIMMER pass --------------------
+     * Engine order: shLensFlareExec runs INSIDE WorldGfx_2dEffectsDraw
+     * (before the GPU walk) computing the target rate + the occlusion
+     * seed; shLensFlareDraw runs AFTER DrawSync (game_main.c:223) adding
+     * the sprites at the FRONT OT slots (org[1], depth_ot+7). In the PoC
+     * the whole flare paint happens here — after the mesh OT walk, before
+     * the brightness overlay — which preserves the engine's LAYERING
+     * (flare sprites paint OVER the scene). Water shimmer quads ride
+     * org[641]/org[639] = behind the brightness overlay, over geometry:
+     * drawn here as well (the PoC OT is depth-sorted only for meshes).
+     * All gated by the GLB's SH1X v3 fields (absent = off).            */
+    fx_pass(fb, R, cam);
+    /* v32 (S18): the water FX pass (the map5_s00 ripple mesh/sprites +
+     * the map1_s02 waterfall droplets) — drawn after the flare pass,
+     * before the brightness overlay (the engine draws the water
+     * particles in the env-effect dispatch, over geometry). */
+    sh1x_water_fx_draw(fb, R, cam);
+    if (getenv("FOGPOC_FXDBG"))
+        fprintf(stderr, "[fx] field_0=%d lensFlareInt=%d lightModeGate=%d "
+                "fi=%d spotInt=%d nowRate=%d tgt=%d sync=%d\n",
+                R->env->field_0, R->env->cur.flashlightLensFlareIntensity,
+                (R->env->field_0 == SHENUM_1) &&
+                (R->env->cur.flashlightLensFlareIntensity != 0),
+                R->env->flashlightIntensity, R->env->light.intensity,
+                g_flaresys.nowEffRate, g_flaresys.tgtEffRate,
+                g_flaresys.syncDrawExecF);
     if (R->env && R->env->screenBrightness > 0) {
         int br5 = R->env->screenBrightness >> 3;
         uint8_t *rgb = fb->rgb;
