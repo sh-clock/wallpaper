@@ -11114,15 +11114,12 @@ static int fx_water_zone_collect(Frame *fb, const Renderer *R,
                         }
                     }
                 }
-                /* v43: the glint joins the OT at bucket 641 BEFORE the
-                 * ring segments (the engine's add order — func_8008E794
-                 * runs before func_8008EA68) = the LOWEST water seq =
-                 * painted LAST within 641 = ON TOP of the ring's opaque
-                 * pair (W1-13). */
-                if (glintOn)
-                    fx_emit_glint(post, nPost, seq, maxPost,
-                                  glintPx, glintPy,
-                                  glintR, glintG, glintB);
+                /* (the glint was ALREADY emitted above at its engine
+                 * position — BEFORE the ring segments: the v43 conversion
+                 * of this old tail blit left a SECOND fx_emit_glint here,
+                 * a double-additive glint against the engine's single
+                 * quad; found by the V42-gate re-review of PR #52 — the
+                 * duplicate emission deleted.) */
             break;      /* first matching zone wins (engine returns it) */
         }
     }
