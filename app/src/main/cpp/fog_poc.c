@@ -15048,6 +15048,21 @@ static int live_action(LiveApp *A, LiveKey k, int down) {
         sh1x_anims_reset((Sh1x *)&A->R.sc->sh1x); /* v38: drivers fresh    */
         sh1x_anims_bind_invalidate();      /* v38-audit-A1: re-seed drvr 9 */
         A->animsPrimed = 0;               /* v38: re-prime the gate state */
+        g_propRngSeed = 1u;               /* v41-E3: RNG stream fresh     */
+        g_flaresys.counter = 0;           /* v41-E3: D_800AFDAC phase     */
+        g_waterTileEverUpdated = 0;       /* v41-E3: lazy tile gate       */
+        g_sh1xBeltScroll = 0;             /* v41-E3: belt accumulator     */
+        g_tvpaint_pad = 0;                /* v41-E3: TV flicker pad       */
+        g_flaresys.nowEffRate = 0;        /* v41-E2 mirror: the per-shot
+                                          * six-globals list also resets
+                                          * the flare easing accumulator
+                                          * (restart == fresh session) */
+        /* v41 (audit A-3): the room-reload WorldObjectsInit — the engine
+         * re-enters Map_WorldObjectsInit -> func_800CB0D8 on every map
+         * load, so the restart re-runs the ripple spawn AFTER the fresh
+         * stream resets above (the fresh-load order: seed=1, then spawn —
+         * the same order as the per-shot site). */
+        sh1x_water_ripple_spawn((Sh1x *)&A->R.sc->sh1x);
         break;
     case K_PLUS:  if (A->play.speed < 8.0)    A->play.speed *= 2.0; break;
     case K_MINUS: if (A->play.speed > 0.125)  A->play.speed *= 0.5; break;
