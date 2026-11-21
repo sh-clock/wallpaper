@@ -937,7 +937,7 @@ static int hw_build_batch(Frame *fb, const Renderer *R, const CamPose *cam) {
                     cz /= (float)nv;
                     int cq8 = (int)floorf(cz * 256.0f + 0.5f);
                     int cq6 = cq8 >> 2;
-                    if (cq6 > 32 && cq8 <= farCullQ8)
+                    if (cq6 > 32 && (cq8 & ~3) < farCullQ8) /* engine: >32, STRICT far cull */
                         bucket = cq6 >> 1;
                 } else {
                     int mz = 0;
