@@ -301,6 +301,30 @@ public class Sh1WallpaperService extends WallpaperService {
       // v11.0 (aim 7): DYNAMIC corpus — every file currently bundled in
       // assets/sh1 (GLBs, the IPD/PLM, camdat.json); no hardcoded array
       String[] assets = listSceneAssets(context);
+      // V42 E-1: version-keyed refresh — APK updates CHANGE bundled assets
+      // (e.g. the v1.7.1 night-only camdat re-derivation); the old
+      // exists()-only check left upgraders on stale data-dir copies
+      // forever (new files copied, CHANGED files never refreshed).
+      long currentVersion = -1;
+      try {
+        currentVersion = context.getPackageManager()
+            .getPackageInfo(context.getPackageName(), 0).versionCode;
+      } catch (Exception e) {
+        Log.w(TAG, "asset copy: versionCode read failed", e);
+      }
+      File marker = new File(dst, ".asset_version");
+      long copiedVersion = -1;
+      try {
+        java.io.DataInputStream mi = new java.io.DataInputStream(
+            new java.io.FileInputStream(marker));
+        try {
+          copiedVersion = mi.readLong();
+        } finally {
+          mi.close();
+        }
+      } catch (Exception ignored) {
+      }
+      boolean refreshAll = currentVersion != copiedVersion;
       boolean missing = false;
       for (String f : assets) {
         if (!new File(dst, f).exists()) {
@@ -308,7 +332,7 @@ public class Sh1WallpaperService extends WallpaperService {
           break;
         }
       }
-      if (!missing) {
+      if (!missing && !refreshAll) {
         sAssetsReady = true;
         return;
       }
@@ -318,7 +342,7 @@ public class Sh1WallpaperService extends WallpaperService {
       }
       for (String f : assets) {
         File out = new File(dst, f);
-        if (out.exists()) {
+        if (out.exists() && !refreshAll) {
           continue;
         }
         try (InputStream in = context.getAssets().open("sh1/" + f);
@@ -332,6 +356,20 @@ public class Sh1WallpaperService extends WallpaperService {
           Log.e(TAG, "asset copy failed: " + f, e);
           return;   // v10.6: NEVER throw here — the watchdog degrades to
                     // the bundled scene; a boot-time crash dialog is worse
+        }
+      }
+      // V42 E-1: record the version this copy corresponds to
+      if (currentVersion >= 0) {
+        try {
+          java.io.DataOutputStream mo = new java.io.DataOutputStream(
+              new java.io.FileOutputStream(marker));
+          try {
+            mo.writeLong(currentVersion);
+          } finally {
+            mo.close();
+          }
+        } catch (Exception e) {
+          Log.w(TAG, "asset copy: version marker write failed", e);
         }
       }
       sAssetsReady = true;
