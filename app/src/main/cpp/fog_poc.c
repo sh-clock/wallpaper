@@ -1386,23 +1386,26 @@ typedef struct {
 /*   tvPaint emission). The corner cross-wiring is func_800D761C        */
 /*   VERBATIM (c1 takes (B.x, A.y, B.z), c2 (A.x, B.y, A.z)).           */
 /* The 3 TV TIMs (TV1/TV2/TV3) upload via func_800D7450 +              */
-/* Fs_QueuePostLoadTim: TV1 pixels (832..863, 256..511) CLUT rows 0..2; */
+/* Fs_QueuePostLoadTim: TV1 pixels (832..895, 256..511) CLUT rows 0..2; */
 /* TV2 pixels (800..863, 0..255) CLUT rows 5..6; TV3 pixels             */
 /* (768..831, 384..511) CLUT rows 10..11 — the CLUT bank at x 448.      */
-/* Sampling is SwanStation's Palette8Bit path VERBATIM (gpu_sw_backend.  */
-/* cpp ShadePixel): texel(u,v) -> halfword(tpX + u/2, tpY + v) -> the    */
-/* byte -> palette VRAM (448 + idx, clutRow). The palette STRIP rows     */
-/* 0..11 span x 448..703: entry 0..15 = the TV's own CLUT row;          */
-/* 16..255 = the engine's other VRAM (the room's streamed texture slots */
-/* at tpages 8..10 x 512..703, map.c:152-167 Texture_Init slots, plus    */
-/* the tpage-7 region) — the ripper emits the reconstructed strip from   */
-/* the room's own first three TIMs (the runtime LRU stream content      */
-/* VARIES in-game; the approximation is documented in the EXTRAs src).  */
+/* Sampling is SwanStation's Palette4Bit path VERBATIM (gpu_sw_backend.  */
+/* cpp ShadePixel, v41 audit D-1: the engine's tpage word is 4bpp —     */
+/* map4_s03.c:1281-1283 |0x20 sets ABR-1, mode bits 7-8 stay 0; the     */
+/* old Palette8Bit model read the wrong halfwords): texel(u,v) ->       */
+/* halfword(tpX + u/4, tpY + v) -> the nibble -> palette VRAM           */
+/* (448 + idx, clutRow). The palette STRIP rows 0..11 span x 448..703:  */
+/* entry 0..15 = the TV's own CLUT row; 16..255 = dead data under 4bpp  */
+/* (kept for GLB compat — the ripper's reconstruction of the room's     */
+/* streamed texture slots at tpages 8..10, unreachable: a 4bpp idx      */
+/* is <= 15, so only strip columns 0..15 are ever fetched).             */
 /* ==================================================================== */
 #define TV_SCREENS 10
 #define TV_STYLES  16
 typedef struct {
-    int tp;                 /* tpage bits (field_0 & 0x1F; |0x20 = 8bpp) */
+    int tp;   /* tpage bits (field_0 & 0x1F; |0x20 = ABR-1 (inert — the
+                 paint prims are opaque, no setSemiTrans; v41 D-1:
+                 mode bits 7-8 = 0 -> 4bpp, NOT 8bpp)                     */
     int clutWord;           /* the RAW clut id (field_2): x=(w&0x3F)<<4=448, row=w>>6 */
     int u0, v0;             /* field_4 / field_5 (the UV window base)   */
     int du, dv;             /* field_6 / field_7 (the window size)      */
@@ -1428,7 +1431,12 @@ static void sh_tvpaint_free(TvPaint *tvp) {
 /* the modeled VRAM halfwords the paint's UV windows can touch — the TV
  * TIM uploads (everything else = 0: fresh-boot stale VRAM) */
 static unsigned short sh_tvpaint_vram(int x, int y) {
-    if (x >= 832 && x < 864 && y >= 256 && y < 512) {
+    /* v41 audit D-2: TV1's pixel rect is 64 halfwords x 256 rows
+     * (fs_queue.c:657 x = 0 + 13*64 = 832..895) — the old `< 864`
+     * clip left the right 32 halfwords unmodeled (style 4's u 128..255
+     * window reads hw 864..895 at 4bpp). The k-indexing already spans
+     * the full row (g_tv1Idx[256][128], k <= 126). */
+    if (x >= 832 && x < 896 && y >= 256 && y < 512) {
         int k = (x - 832) * 2;
         return (unsigned short)(g_tv1Idx[y - 256][k] |
                                 (g_tv1Idx[y - 256][k + 1] << 8));
@@ -1460,9 +1468,15 @@ static const unsigned char *sh_tvpaint_plane(TvPaint *tvp, int st) {
     for (int v = 0; v < 256; v++) {
         int y = by + v;
         for (int u = 0; u < 256; u++) {
-            int x = bx + (u >> 1);
+            /* v41 audit D-1: the paint tpage is 4bpp (map4_s03.c:1281-
+             * 1283 — |0x20 = ABR-1, mode bits 7-8 = 0); SwanStation's
+             * Palette4Bit branch: x = tpX + u/4, nibble = (hw >>
+             * ((u%4)*4)) & 0x0F, palette at clutX + idx. The old 8bpp
+             * sampler (u/2 + byte idx) read wrong halfwords and idx
+             * >15 — the strip's 16-entry CLUT row only. */
+            int x = bx + (u >> 2);
             unsigned short hw = sh_tvpaint_vram(x, y);
-            int idx = (hw >> ((u & 1) * 8)) & 0xFF;
+            int idx = (hw >> ((u & 3) * 4)) & 0xF;
             unsigned short c15 = tvp->strip[row][idx];
             unsigned char *px = p + ((size_t)v * 256 + u) * 4;
             if (c15 == 0) {           /* the 0x0000 texel hole (engine)   */
