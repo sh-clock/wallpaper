@@ -1302,6 +1302,18 @@ typedef struct {
     int eventGateAlt;               /* 'clear-or' second flag (map1_s03 102) */
     int eventGatePol;               /* 0=set 1=clear 2=clear-or (rip field)  */
     int cutsceneOnly;               /* engine-fresh: NOT drawn (map7_s02 beans) */
+    /* ---- v40: the STATIC WorldObjects catalog (R5) ----
+     * eventGate "a|b|c" OR-strings (map3_s03's colorsPos flags 265-268)
+     * and the AND second flag eventGate2 (+ its polarity) — e.g.
+     * map1_s02 KEY_HIDE 114-clear AND 113-set, map1_s01 HAKO_HID
+     * 76-set AND 77-clear. Semantics at engine-fresh (all flags CLEAR):
+     * pol clear = live, pol set = hidden, OR-list = any-flag(polarity),
+     * gate2 = AND. driver 23 ("static") = the posed node holds rot0/
+     * pos, no tick; gated statics are NOT drawn (the add never fired). */
+    int eventGateOr[4];             /* the OR-list flags (<=4)              */
+    int eventGateOrN;               /* 0 = plain eventGate, else the list   */
+    int eventGate2;                 /* the AND second flag (0=none)         */
+    int eventGate2Pol;              /* 0=set 1=clear                       */
     int hasRng;                     /* rngBase/rngMask authored (not defaults) */
     int fanAng[16];                 /* fanArray per-instance raw Q12 angles  */
     int fanSplit;                   /* fanArray: i<split subtracts (map4_s02) */
@@ -1947,6 +1959,9 @@ static void sh1x_load(Sh1x *sx, const JValue *json) {
         else if (!strcmp(drv, "waterRipple")) a->driver = 21; /* map5_s00 */
         else if (!strcmp(drv, "particles")) a->driver = 22;  /* waterfall */
         else if (!strcmp(drv, "cutscene"))  a->driver = 7;  /* idle default */
+        else if (!strcmp(drv, "static"))   a->driver = 23; /* v40: the static
+                    WorldObjects catalog — pose at rot0/pos (the pose fn's
+                    default), no tick; the gate hides un-added objects. */
         else continue;                    /* unknown driver: not played */
         const JValue *p = jarr(e, "pos");
         if (p && p->count >= 3) {
@@ -2196,6 +2211,31 @@ static void sh1x_load(Sh1x *sx, const JValue *json) {
         a->durationShift = jint(e, "durationShift", 5);
         a->durationBase = jint(e, "durationBase", 0x555);
         a->eventGate = jint(e, "eventGate", 0);
+        /* v40: the statics' eventGate "a|b|c" OR-string (map3_s03's
+         * colorsPos flags 265-268) + the AND second flag eventGate2. */
+        {
+            const JValue *egv = jget(e, "eventGate");
+            a->eventGateOrN = 0;
+            if (egv && egv->type == JV_STR) {
+                const char *s = egv->str;
+                const char *p = s;
+                for (int q = 0; q < 4; q++) {
+                    char *end = NULL;
+                    long v = strtol(p, &end, 10);
+                    if (end == p) break;
+                    a->eventGateOr[q] = (int)v;
+                    a->eventGateOrN = q + 1;
+                    p = (*end == '|') ? end + 1 : end;
+                    if (!*p) break;
+                }
+                if (a->eventGateOrN) a->eventGate = a->eventGateOr[0];
+            }
+            a->eventGate2 = jint(e, "eventGate2", 0);
+            if (a->eventGate2) {
+                const char *p2 = jstr(e, "eventGate2Polarity", "set");
+                a->eventGate2Pol = !strcmp(p2, "clear") ? 1 : 0;
+            }
+        }
         const JValue *cg = jarr(e, "chunkGate");
         a->hasChunkGate = 0;
         if (cg && cg->count >= 2) {
@@ -5070,7 +5110,9 @@ static const v3 SH_LIGHT_OFFSET_CAM = { -0.08f, 0.28f, -0.12f };  /* engine ref 
  * engine's NULL-bone-coord native mode, Gfx_FlashlightPositionUpdate
  * bodyprog_80055028.c:244-275); --userlight-ahead D puts it D meters
  * ahead of the camera (the trailing-camera geometry the engine's flare
- * needs: gate 2 requires vz > 120 Q8 = 0.47m). -1 flags "engine anchor"
+ * needs: gate 2 requires vz > 112 Q8 = 0.4375m — v40: the NTSC
+ * SCREEN_GEOM_DIST 224/2; the old 120/0.47m was the PAL branch).
+ * -1 flags "engine anchor"
  * (the Harry offset default). Disableable with --userlight off (then the
  * engine anchor applies — the camera-coincident light that engine-true
  * never flares). Day suppression is preset-driven (Spot-only presets). */
@@ -8036,10 +8078,12 @@ static int fd_depth_ge_z(float depth, const Frame *fb, int px, int py) {
  *                                        a raster cell, which the hardware
  *                                        does not do)
  * so every vertex lands on the INTEGER grid of the console framebuffer:
- * 320 columns x 240 rows (SCREEN_WIDTH/SCREEN_HEIGHT, game.h; vcInitCamera
- * sets the projection from the 240-line screen). This PoC reproduces the
- * exact raster quantization mapped onto its own framebuffer: x quantizes on
- * the fb_w/320 grid, y on the fb_h/240 grid (each engine raster row/col),
+ * 320 columns x 224 rows on NTSC (SCREEN_WIDTH + gsScreenHeight=
+ * FRAMEBUFFER_HEIGHT_PROGRESSIVE=224, game.h + data.h; vcInitCamera sets
+ * the projection from that screen height — v40 note). This PoC
+ * reproduces the exact raster quantization mapped onto its own
+ * framebuffer: x quantizes on
+ * the fb_w/320 grid, y on the fb_h/224 grid (each engine raster row/col),
  * with FLOOR (truncation) semantics — floorf() equals the s64 arithmetic
  * >>16 for all sign combinations. The flake center projection uses the same
  * snap (engine Particle_SnowDraw: gte_rtps + gte_stsxy -> integer sXY2).
@@ -9230,7 +9274,22 @@ static int anim_gate_on(const Sh1x *sx, const Sh1xPropAnim *a) {
     if (g_animsDemo) return 1;          /* demo: every event gate is open  */
     if (a->eventGate) {
         /* engine-fresh: all savegame flags CLEAR. */
-        if (a->eventGatePol == 1) return 1;         /* clear: live at fresh */
+        /* v40: the OR-list (map3_s03's "265|266|267|268" set-polarity
+         * colorsPos flags) — live while ANY listed flag carries the
+         * polarity; engine-fresh (all clear) a SET-polarity list is
+         * hidden, a CLEAR-polarity list live. */
+        if (a->eventGateOrN) {
+            /* fresh: all flags clear -> set-list hidden, clear-list live */
+            return (a->eventGatePol == 1) ? 1 : 0;
+        }
+        if (a->eventGatePol == 1) {
+            /* v40: the AND second flag (map1_s02 KEY_HIDE 114-clear AND
+             * 113-set): live requires BOTH — at fresh the clear first
+             * flag is satisfied, the second decides (set=hidden). */
+            if (a->eventGate2 && a->eventGate2Pol == 0) return 0;
+            return 1;               /* clear: live at fresh (gate2 clear
+                                     * or absent — both live)            */
+        }
         if (a->eventGatePol == 2) {
             if (!a->eventGateAlt) return 1;
             /* clear-or: live while EITHER flag is clear (map1_s03
@@ -10489,10 +10548,12 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
         float vz = view.m[2] * lx + view.m[6] * ly + view.m[10] * lz + view.m[14];
         float d = -vz;                       /* forward depth            */
         if (d > 0.05f) {
-            /* project with the ENGINE geom screen H=240 (GTE constant
-             * ReadGeomScreen at boot; the flare's own bounds use the
-             * 320x224 screen halves)                                   */
-            float invd = 240.0f / d;
+            /* project with the ENGINE geom screen H=224 — v40: SCREEN_GEOM_DIST
+             * is gsScreenHeight = 224 on NTSC (draw.c:35 + game_main.c:84
+             * Screen_Init(320,false)); the old 240 was the PAL SCREEN_HEIGHT
+             * branch (data.h:40-47). ReadGeomScreen at boot; the flare's own
+             * bounds use the 320x224 screen halves)                   */
+            float invd = 224.0f / d;
             scrLPos[0] = (int)(vx * invd);          /* screen-centered px */
             scrLPos[1] = (int)(vy * invd);
             scrLPos[2] = (int)(d * 256.0f);          /* Q8-ish depth       */
@@ -10539,15 +10600,16 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
                       & 4095;
 
             /* ---- GATE 2 (lens_flare.c:59-75): scr z > proj/2 ----------
-             * proj = ReadGeomScreen() = SCREEN_GEOM_DIST = 240 (screen
-             * height, data.h:44) — so the gate is vz > 120 in the SAME
+             * proj = ReadGeomScreen() = SCREEN_GEOM_DIST = gsScreenHeight
+             * = 224 on NTSC (v40 fix; the old 240/120 was the PAL branch,
+             * data.h:40-47) — so the gate is vz > 112 in the SAME
              * units as ws_l_pos: Q8 view meters (RotTrans of the Q8-
              * translated light; lighting.c:226). The light must be more
-             * than 0.47m AHEAD of the camera — the engine's Harry light
+             * than 0.4375m AHEAD of the camera — the engine's Harry light
              * seen from the trailing camera (~2-5m), never a coincident
              * camera light. The dist-rate table 204..3328 (0.8..13m) is
              * in the SAME Q8 units — passed as-is below.               */
-            if (scrLPos[2] > 120) {
+            if (scrLPos[2] > 112) {
                 g_flaresys.syncDrawExecF = 1;
                 g_flaresys.scrLPos[0] = scrLPos[0];
                 g_flaresys.scrLPos[1] = scrLPos[1];
@@ -10588,7 +10650,12 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
         float ez = -(float)g_fxLightPos[2] * (1.0f / 4096.0f); /* not camera */
         for (int z = 0; z < sx->nWaterZones; z++) {
             const Sh1xWaterZone *wz = &sx->waterZones[z];
-            if (!wz->enabled) continue;
+            /* v40 (audit B3): engine search (lens_flare.c:504-523)
+             * `for (cur = zones; cur->isEnabled; cur++)` — the loop
+             * TERMINATES at the first disabled entry; a later zone is
+             * unreachable. The old `continue` skipped past disabled
+             * entries and could match a later one — not verbatim.   */
+            if (!wz->enabled) break;
             if (ex >= wz->minX && ex < wz->maxX && ez >= wz->minZ && ez < wz->maxZ) {
                 /* inside: draw the wave tiles + glint + caustics.
                  * v32 (S18): DR_WAVE.TIM is NOW locally available — the
@@ -10632,8 +10699,9 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
                 int glintOn = 0, glintPx = 0, glintPy = 0;
                 int glintR = 0, glintG = 0, glintB = 0;
                 if (d > 0.5f) {
-                    /* the engine glint projection: the mirrored point     */
-                    float invd = 240.0f / d;
+                    /* the engine glint projection: the mirrored point
+                     * (v40: NTSC GTE H=224)                             */
+                    float invd = 224.0f / d;
                     glintPx = (int)(vx * invd);
                     glintPy = (int)(vy * invd);
                     /* brightness: sin(clamp(angle-40°,<=90°)) — the
@@ -10694,7 +10762,7 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
                         float cpz = view.m[2] * cwx + view.m[6] * posY + view.m[10] * cwz + view.m[14];
                         float cdd = -cpz;
                         if (cdd > 0.05f) {
-                            float civ = 240.0f / cdd;
+                            float civ = 224.0f / cdd;  /* v40: NTSC 224 */
                             cScx = (int)(cpx * civ) + (int)(fb->w / 2);
                             cScy = (int)(cpy * civ) + (int)(fb->h / 2);
                             cVis = 1;
@@ -10742,7 +10810,7 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
                             float pz = view.m[2] * wx + view.m[6] * wy + view.m[10] * wz2 + view.m[14];
                             float dd = -pz;
                             if (dd <= 0.05f) { vis = 0; break; }
-                            float iv = 240.0f / dd;
+                            float iv = 224.0f / dd;    /* v40: NTSC 224 (RotTransPers4) */
                             sxp[k] = (int)(px * iv) + (int)(fb->w / 2);
                             syp[k] = (int)(py * iv) + (int)(fb->h / 2);
                         }
@@ -11129,11 +11197,34 @@ static void fx_water_scroll_sync(const Sh1x *sx, const ShEnv *env,
             wz -= Z.z * extraAhead;
         }
     }
+    /* GATE 2 + the water branch's own inhibit (lens_flare.c:59-93
+     * structure — the maintainer's reimplementation of audit A-F3;
+     * PR #3's hunk was rejected for the stale PAL constant 120):
+     * the whole water branch is reachable only past the flare branch's
+     * `scr_l_pos.vz > DIV_FAST(ReadGeomScreen(), 2)` gate — the early
+     * `return` skips func_8008E5B4 and its D_800AFDAC++ too. proj =
+     * ReadGeomScreen() = SCREEN_GEOM_DIST = gsScreenHeight = 224 on
+     * NTSC (v40; data.h:40-47, draw.c:35, game_main.c:84) — the SAME
+     * `> 112` Q8 gate as the fx_pass draw side, where the light must
+     * be more than 0.4375m ahead of the camera. flare_inhibit_f set
+     * bypasses the entire first block (the gate does not apply then);
+     * water_inhibit_f gates the water branch itself (:78).           */
+    if (!g_flaresys.flareInhibit) {
+        mat4 view = mat4_view_from_quat(cam->pos, cam->q);
+        float vzq = view.m[2] * wx + view.m[6] * wy +
+                    view.m[10] * wz + view.m[14];
+        float d = -vzq;                   /* forward depth (m)          */
+        if (!(d > 0.05f) || !((int)(d * 256.0f) > 112))
+            return;                       /* lens_flare.c:73-75        */
+    }
+    if (g_flaresys.waterInhibit) return; /* lens_flare.c:78            */
     /* the zone test (LensFlare_WaterZoneGet on the LIGHT position):
      * engine x = glTF x; engine z = -glTF z (meters) */
     for (int zi = 0; zi < sx->nWaterZones; zi++) {
         const Sh1xWaterZone *wzp = &sx->waterZones[zi];
-        if (!wzp->enabled) continue;
+        /* v40 (audit B3): engine loop terminates at the first disabled
+         * entry (lens_flare.c:513) — `break`, not `continue`.       */
+        if (!wzp->enabled) break;
         if (wx >= wzp->minX && wx < wzp->maxX &&
             -wz >= wzp->minZ && -wz < wzp->maxZ) {
             g_flaresys.counter++;          /* D_800AFDAC++ per frame */
@@ -11970,7 +12061,11 @@ static void sh1x_water_fx_draw(Frame *fb, const Renderer *R,
              * func_80055D78 port); the old hardcoded `8' was the
              * documented approximation. mesh quads tpage 43 bits 5-6 =
              * 01 = ADDITIVE (B+F saturating — v32.2 relabel).          */
-            int sel = a->wrSel[0];
+            /* v40 (A-F4): the mesh reads its OWN selector (slot 12) —
+             * map5_s00.c:226-231 draws the mesh's quads with
+             * g_Particle_Buffer[idx].field_C.s_1.field_2, the MESH
+             * particle's own value (field_B=0), NOT sprite 0's.     */
+            int sel = a->wrSel[12];
             unsigned char tile[32][32][3];
             if (sel == 2) memcpy(tile, g_waterTileRGB, sizeof(tile));
             else fx_water_static_tile(sel, tile);
@@ -11996,11 +12091,26 @@ static void sh1x_water_fx_draw(Frame *fb, const Renderer *R,
                         float d = -pz;
                         if (d <= 0.05f) { vis = 0; break; }
                         dsum += d;
-                        float iv = 240.0f / d;
+                        float iv = 224.0f / d;      /* v40: NTSC 224 (gte_rtpt) */
                         sxq[k] = (int)(px * iv) + (int)(fb->w / 2);
                         syq[k] = (int)(py * iv) + (int)(fb->h / 2);
                     }
                     if (!vis) continue;
+                    /* v40 (audit B2): the engine's PER-QUAD culls
+                     * (map5_s00.c:203-211) the mesh loop was missing —
+                     * `if (sp78[i][j] <= 0 || (sp78[i][j] >> 3) >=
+                     * ORDERING_TABLE_SIZE) continue; if (ABS(sp10[i][j].vx)
+                     * > 200 || ABS(sp10[i][j].vy) > 160) continue;` on the
+                     * quad's FIRST projected corner (screen-centered px +
+                     * Q8 z, ORDERING_TABLE_SIZE = 2048, data.h:53).       */
+                    {
+                        int m0x = sxq[0] - (int)(fb->w / 2);
+                        int m0y = syq[0] - (int)(fb->h / 2);
+                        int mzQ8 = (int)(dsum * 0.25f * 256.0f);
+                        if (mzQ8 <= 0 || (mzQ8 >> 3) >= 2048) continue;
+                        if (m0x > 200 || m0x < -200 ||
+                            m0y > 160 || m0y < -160) continue;
+                    }
                     /* v37 (W1-5): the engine OT bucket ((zQ8+128)>>3,
                      * map5_s00.c:166) — occluded by nearer opaque geometry */
                     fx_blit_water_quad(fb, sxq, syq, tile,
@@ -12042,7 +12152,7 @@ static void sh1x_water_fx_draw(Frame *fb, const Renderer *R,
                     float d = -pz;
                     if (d <= 0.05f) { vis = 0; break; }
                     dsum += d;
-                    float iv = 240.0f / d;
+                    float iv = 224.0f / d;          /* v40: NTSC 224 (gte_rtps) */
                     sxq[k] = (int)(px * iv) + (int)(fb->w / 2);
                     syq[k] = (int)(py * iv) + (int)(fb->h / 2);
                     if (k == 3) {
@@ -12053,9 +12163,14 @@ static void sh1x_water_fx_draw(Frame *fb, const Renderer *R,
                 if (!vis) continue;
                 if (pxi3 > 200 || pxi3 < -200 || pyi3 > 160 || pyi3 < -160)
                     continue;      /* map5_s00.c:140-143                  */
-                {   /* the OT bucket bound (field_148.vx>>3 >= OT size)  */
+                {   /* the OT bucket bound — v40 (audit B1): engine
+                     * map5_s00.c:135 `field_148.vx <= 0 || (field_148.vx >> 3)
+                     * >= ORDERING_TABLE_SIZE` with ORDERING_TABLE_SIZE=2048
+                     * (data.h:53) and NO +128 bias — the old `+128>>3>=1024`
+                     * culled at Q8 8064 (31.5 m) instead of 16384 (64 m). */
                     float avgZQ8 = dsum * 0.25f * 256.0f;
-                    if (((int)avgZQ8 + 128) >> 3 >= 1024) continue;
+                    int az = (int)avgZQ8;
+                    if (az <= 0 || (az >> 3) >= 2048) continue;
                 }
                 int b = ((4096 - a->wrT[q]) * 32) >> 12;
                 if (b < 0) b = 0;
@@ -12109,6 +12224,17 @@ static void sh1x_water_ripple_tick(Sh1x *sx, const ShEnv *env,
             return;
         if (!a->seeded) {
             a->seeded = 1;
+            /* v40 (A-F4, the maintainer's reimplementation — PR #4's
+             * hunk was rejected as incomplete: it added this draw but
+             * never updated the read site): func_800CB0D8 draws the
+             * MESH particle's OWN selector FIRST (map5_s00.c:31-35:
+             * field_B=0 mesh, field_C.s_1.field_2 = Rng_GenerateInt
+             * (0,2)) BEFORE the 12 sprite spawns (:36-51). The old
+             * spawn drew only 48 of the 49 values and the mesh draw
+             * read wrSel[0] (sprite 0's selector) — every downstream
+             * RNG consumer sat one draw off the engine stream. Slot
+             * 12 holds the mesh's own selector (wrSel[16]). */
+            a->wrSel[12] = (int)(sh_rng_next() % 3);
             for (int q = 0; q < 12; q++) {
                 a->wrX[q] = -379904 + (int)(sh_rng_next() % 6144);
                 /* Rng(Q12(-92.75), Q12(-91.25)-1) = the 1.5m box         */
@@ -12910,22 +13036,24 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
                      * Q8 view depth (256/m). The WorldMap call passes
                      * nearPlane = Q8(25.0f) = 6400 (25 m — the TRUE far
                      * cull; all 8 corners beyond 25 m => invisible) and
-                     * farPlane = SCREEN_GEOM_DIST = 240 (0.94 m — the
-                     * near-plane guard: corners closer than 0.94 m or
+                     * farPlane = SCREEN_GEOM_DIST = 224 (0.875 m — the
+                     * near-plane guard: corners closer than 0.875 m or
                      * behind the camera get region-flagged for the
-                     * near-plane span test instead).                    */
+                     * near-plane span test instead; v40: NTSC 224 not the
+                     * PAL 240).                                    */
                     if (szQ8 > 6400) nOutNear++;    /* all-beyond-25m cull  */
-                    if (szQ8 < 240) nOutFar++;     /* near-guard sliver    */
+                    if (szQ8 < 224) nOutFar++;     /* v40: farPlane = SCREEN_GEOM_DIST = 224 (map.c:1479) */
                     else {
                         /* on-screen region flags (screen center +/- 160/120
                          * px; the PoC screen grid = enginePixScale x 320) */
                         /* v24.1 FIX (audit #3): GTE projection bounds —
-                         * H = SCREEN_GEOM_DIST 240, screen half 160/120 px
-                         * => |vx| <= d*2/3, |vy| <= d*1/2 (engine's OWN
-                         * frustum; fov-independent). */
+                         * v40: H = SCREEN_GEOM_DIST = gsScreenHeight = 224
+                         * (NTSC; draw.c:35 + game_main.c:84), screen half
+                         * 160/112 px => |vx| <= d*160/224, |vy| <= d*112/224
+                         * (engine's OWN frustum; fov-independent). */
                         if (d > 0.05f) {
-                            float bx = d * (160.0f / 240.0f);
-                            float by = d * (120.0f / 240.0f);
+                            float bx = d * (160.0f / 224.0f);  /* v40: GTE H=224 */
+                            float by = d * (112.0f / 224.0f);  /* v40: gsScreenHeight>>1=112 over H=224 (vw_calc.c:635-665) */
                             if (vx >= -bx && vx <= bx && vy >= -by && vy <= by)
                                 visible = 1;
                         }
@@ -12958,8 +13086,8 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
                         float d = -vz;
                         if (d <= 0.05f) { side[ci][0] = -9; side[ci][1] = -9; continue; }
                         /* v24.1 (audit #3): same GTE bounds. */
-                        float bx = d * (160.0f / 240.0f);
-                        float by = d * (120.0f / 240.0f);
+                        float bx = d * (160.0f / 224.0f);      /* v40: GTE H=224 */
+                        float by = d * (112.0f / 224.0f);      /* v40: gsScreenHeight>>1=112 over H=224 (vw_calc.c:635-665) */
                         side[ci][0] = (vx < -bx) ? 0 : (vx > bx ? 2 : 1);
                         side[ci][1] = (vy < -by) ? 0 : (vy > by ? 2 : 1);
                     }
@@ -13002,6 +13130,18 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
                         ? &sc->sh1x.anims[it->animIdx] : NULL;
                 int dropLive = ca && !ca->gated && ca->kickPhase >= 1;
                 if (!dropLive) { sh1xItemMask[i] = 0; continue; }
+            }
+            /* v40: STATIC WorldObjects (driver 23) — the posed scenery
+             * the game WorldObjects_Add's only when its gate is live
+             * (chunk + event polarity). A GATED static = the add never
+             * fired at this state -> NOT drawn (e.g. engine-fresh:
+             * KEY_HIDE 113-set hidden, MAL6_28_ 327-set hidden while
+             * MAL6_27_ 327-clear shows; --anims-demo opens all). */
+            if (it->animIdx >= 0 && it->animIdx < sc->sh1x.nAnims) {
+                const Sh1xPropAnim *ca = &sc->sh1x.anims[it->animIdx];
+                if (ca->driver == 23 && ca->gated) {
+                    sh1xItemMask[i] = 0; continue;
+                }
             }
             /* v24.1 FIX (audit #4): billboard anchor meshes ('BILLBOARDS_g{g}_{j}',
              * extras {ot_base:0, billboard:true}, NO SH1X buffer tag) inherit
@@ -17415,6 +17555,20 @@ int main(int argc, char **argv) {
                     g_userLightWorld[1] = cd.lightPos[1];
                     g_userLightWorld[2] = cd.lightPos[2];
                 }
+                /* v40 (A-F3 follow-up): the camdat's light.ahead was DEAD
+                 * — the value loaded into g_userLightAheadM but mode stayed
+                 * 0/1, and only mode 2 consumes it (fx_water_scroll_sync /
+                 * fx_pass's extraAhead). The engine-true consequence: the
+                 * verbatim Gate-2 (vz > 112 Q8 — the light must be >0.4375m
+                 * ahead of the camera) freezes the water scroll for the
+                 * default 0.32m camera anchor (an engine-impossible
+                 * geometry — the engine's Harry light sits 2-5m ahead of
+                 * the trailing camera). "follow":"camera" + ahead>0 now
+                 * selects mode 2 (the CLI --userlight ahead:D geometry).
+                 * "follow":"world" keeps mode 1 (ahead is a camera-relative
+                 * extension; a world light ignores it).                    */
+                if (cd.lightAhead > 0.0f && !cd.lightFollow)
+                    g_userLightMode = 2;
                 g_userLightAheadM = cd.lightAhead;
                 if (cd.hasLightRot) {
                     g_userLightHasRot = 1;
