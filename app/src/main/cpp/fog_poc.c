@@ -1296,7 +1296,17 @@ typedef struct {
     int mvPend[4], mvPendVel[4];    /* ferrisWheel cabin pendulum states    */
     int mvVel;                      /* gravityScatter fall velocity          */
     int mvState;                    /* stoneChoreo state / cutscene sub-state */
-    int mvTimer;                    /* stoneChoreo/translate accum           */
+    float mvTimer;                  /* the discrete-step accumulator (v43:
+                                     * was INT — the per-tick += (float)
+                                     * (dt*30.0) with dt=1/30 adds 0.9999
+                                     * -> TRUNCATES TO +0 EVERY TICK, so the
+                                     * while (mvTimer >= 1.0f) step loops of
+                                     * doorRattle/kickSwing/gravityScatter/
+                                     * fallOnce NEVER RAN (the rattle never
+                                     * kicked, the kick never stepped; only
+                                     * the 0.1-clamped seek ticks ever
+                                     * fired). FLOAT restores the engine's
+                                     * one-step-per-30Hz-frame discipline)   */
     int posPerInstN;                /* fanArray posed positions (glTF m)     */
     float posPerInst[16][3];
     int rotY180From;                /* fanArray: i>=this gets +180 deg y     */
@@ -7924,6 +7934,9 @@ typedef struct {
     int scrLAngZ;         /* Q12 angle */
     int centerVisible;
     int counter;          /* D_800AFDAC (water wave scroll counter) */
+    int skipWater;        /* v43: the Gate-2 verdict (lens_flare.c:73-75) —
+                              the z<=proj/2 early-return skips the water
+                              branch; carried by the exec for the collect */
 } LensFlareWork;
 
 static LensFlareWork g_flaresys;
@@ -9849,6 +9862,23 @@ static void sh1x_waterfall_tick(Sh1x *sx, const CamPose *cam,
 }
 
 static void sh1x_anims_tick(Sh1x *sx, double dt) {
+    /* FOGPOC_ANIMDBG (S20): the per-tick driver-state proof — one line per
+     * anim whenever the state MOVED (rawVy/rwVy/cur/master differ from the
+     * last print). The camera-independent animation evidence. */
+    static double lastPrint = -1;
+    if (getenv("FOGPOC_ANIMDBG") && sx->animsLastSessionT != lastPrint) {
+        lastPrint = sx->animsLastSessionT;
+        for (int ai = 0; ai < sx->nAnims; ai++) {
+            const Sh1xPropAnim *a = &sx->anims[ai];
+            fprintf(stderr, "ANIMDBG t=%.3f drv=%d obj=%s rawVy=%d rawVel=%d "
+                    "cur=(%.3f,%.3f,%.3f) master=%d kick=%d gated=%d "
+                    "fl=(%d,%d,%d,%d)\n",
+                    sx->animsLastSessionT, a->driver, a->object,
+                    a->rawVy, a->rawVel, a->cur[0], a->cur[1], a->cur[2],
+                    a->mvMaster, a->kickPhase, a->gated,
+                    a->flAmp, a->flT0, a->flPer0, a->flT1);
+        }
+    }
     const int dtRaw = (int)(dt * 4096.0);
     for (int i = 0; i < sx->nAnims; i++) {
         Sh1xPropAnim *a = &sx->anims[i];
@@ -10528,54 +10558,12 @@ static void fx_water_glint_blit(Frame *fb, int px0, int py0,
         }
 }
 
-/* ==================================================================== */
-/* v26 fx_pass — the SH1X v3 FX paint (flare + shimmer + anims).        */
-/* Engine references (VERBATIM, silent-hill-decomp):
- *  shLensFlareExec/Draw/SetLightSeed/Effect_Draw/LightCenterIsVisible/
- *  MakeEffectTargetRate/SpriteXYSet/GreySet + func_8008E5B4/E794/EA68 +
- *  LensFlare_WaterZoneGet — src/bodyprog/gfx/lens_flare.c.
- *  WorldEnvRender_LightScreenInfoGet/AngleGet/PositionGet — src/bodyprog/
- *  world/lighting.c:203-292. Prop drivers — map overlay scripts (see
- *  docs/SH1X_EXTRAS_V3_FX.md). Screen geometry: engine 320x224 NTSC.    */
-/* -------------------------------------------------------------------- */
-static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
-    const Sh1x *sx = &R->sc->sh1x;
-    const ShEnv *env = R->env;
-    if (!env) return;
-
-    /* ---- GATE 1 (shLensFlareExec trigger, bodyprog_80055028.c:102-106):
-     * lightMode == Spot AND lensFlareIntensity != 0 — this gates the
-     * WHOLE shLensFlareExec call: the flare branch AND the water shimmer
-     * branch (M7b). flareInhibit only gates the flare branch inside
-     * (lens_flare.c:63), waterInhibit only the water branch (:78).
-     * The PoC env's Spot mode = field_0 == SHENUM_1;
-     * flashlightLensFlareIntensity is env's flashlightLensFlareIntensity
-     * (preset flag EnableLensFlare).                                      */
-    int execOn = (env->field_0 == SHENUM_1) &&
-                 (env->cur.flashlightLensFlareIntensity != 0);
-    int spotOn = execOn && !g_flaresys.flareInhibit;
-    /* M7c: the engine's z <= proj/2 early-return (lens_flare.c:63-75)
-     * skips the water branch too — set when the flare branch is entered
-     * but the screen-depth gate refuses.                                    */
-    int skipWater = 0;
-
-    /* the light = the env's ShLight direction; the POSITION for the FX
-     * pass is the ENGINE ANCHOR: camera frame * (-0.08,-0.28,0.12)
-     * UNPITCHED (Game_FlashlightAttribsSet, effects.c:210-218 — the
-     * verbatim Harry anchor; the v6 camera-coincident mesh light
-     * would make Gate 2 (scr z > proj/2) unreachable, engine-true).
-     * M5: the engine NEVER pitches the light POSITION — lightPosition
-     * and lightRotation are INDEPENDENT attributes (effects.c:216-217);
-     * Gfx_FlashlightPositionUpdate (bodyprog_80055028.c:244-275) rotates
-     * only the DIRECTION rot by the bone matrix and applies the offset
-     * untranslated-by-rotation in the torso-bone frame (the -15deg
-     * lightRotation feeds the direction pipeline func_8003F4DC only,
-     * effects.c:492-566). The v30 code pitched the anchor by -15deg
-     * (net error ~7cm vertical + Gate-2 depth -0.12 -> -0.19m). The
-     * Sh1x userLight extras override the offset (programmable; the
-     * userLightRot feeds the beam via sh_env_update_rot). T7 (v35):
-     * the AUTHORED camdat/CLI offset (g_userLightOffset) beats the
-     * EXTRAs — the camdat models[].light.offset is the user's program. */
+/* v43: the engine light anchor — ONE shared copy (was duplicated in
+ * fx_pass and fx_water_scroll_sync): camera-bone offset (-0.08, 0.28,
+ * -0.12 glTF) UNPITCHED / the authored camdat offset / the EXTRAs
+ * userLight offset / the free-world or ahead light; writes g_fxLightPos
+ * (Q12, glTF axes). See the full provenance comment in fx_lens_exec. */
+static void fx_light_anchor(const Sh1x *sx, const CamPose *cam) {
     {
         /* engine-local (x,y,z) -> camera-local (x,-y,-z) [the PoC's
          * standing axis map]; then camera quaternion * local           */
@@ -10617,10 +10605,42 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
         g_fxLightPos[1] = (int)(wy * 4096.0f);
         g_fxLightPos[2] = (int)(wz * 4096.0f);
     }
-    const ShLight *L = &env->light;
+}
 
-    /* engine screen px scale (320-wide) */
-    const int scale = fb->w / 320 > 0 ? fb->w / 320 : 1;
+/* v43 — shLensFlareExec's COMPUTE half, moved OUT of fx_pass to run
+ * BEFORE the OT walk exactly like the engine: WorldGfx_Draw(draw.c:431-
+ * 446) collects objects -> chunks -> 2dEffects (shLensFlareExec INSIDE
+ * WorldGfx_2dEffectsDraw, computing the target rate + building the
+ * water ring/glint prims into the OT) BEFORE the GPU walk. fx_pass keeps
+ * only the POST-WALK half (the fb->z occlusion probe, the rate easing,
+ * shLensFlareDraw's sprite paint — the flare rides the FRONT OT slots
+ * drawn LAST over everything). Per-frame semantics unchanged: the exec
+ * sets g_flaresys (scr pos/angles/tgt rate), the draw consumes them in
+ * the SAME frame. */
+static void fx_lens_exec(Frame *fb, const Renderer *R, const CamPose *cam) {
+    const Sh1x *sx = &R->sc->sh1x;
+    const ShEnv *env = R->env;
+    if (!env) return;
+
+    /* ---- GATE 1 (shLensFlareExec trigger, bodyprog_80055028.c:102-106):
+     * lightMode == Spot AND lensFlareIntensity != 0 — this gates the
+     * WHOLE shLensFlareExec call: the flare branch AND the water shimmer
+     * branch (M7b). flareInhibit only gates the flare branch inside
+     * (lens_flare.c:63), waterInhibit only the water branch (:78).
+     * The PoC env's Spot mode = field_0 == SHENUM_1;
+     * flashlightLensFlareIntensity is env's flashlightLensFlareIntensity
+     * (preset flag EnableLensFlare).                                      */
+    int execOn = (env->field_0 == SHENUM_1) &&
+                 (env->cur.flashlightLensFlareIntensity != 0);
+    int spotOn = execOn && !g_flaresys.flareInhibit;
+    int skipWater = 0;
+
+    /* the light = the engine anchor (Game_FlashlightAttribsSet effects.c:
+     * 210-218 — the verbatim Harry anchor; the M5 no-pitch note and the
+     * T7 authored-offset precedence apply as documented in fx_pass's
+     * original comment, carried verbatim by fx_light_anchor).          */
+    fx_light_anchor(sx, cam);
+    const ShLight *L = &env->light;
 
     /* ---- light screen projection (WorldEnvRender_LightScreenInfoGet,
      * lighting.c:203-292) — computed with the PoC view matrix in ENGINE
@@ -10740,17 +10760,97 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
             skipWater = 1;   /* light unprojectable (z<=0) => z<=proj/2 too */
         }
     }
+    g_flaresys.skipWater = skipWater;
+    (void)execOn; (void)spotOn;
+}
 
-    /* ---- water shimmer (lens_flare.c:63-93 + WaterZoneGet:505-521) ----
-     * M7: gated by the SAME Spot+flareIntensity trigger as the flare
-     * branch (bodyprog_80055028.c:102-106 — the whole shLensFlareExec
-     * call), the zone test uses the LIGHT position (lens_flare.c:81:
-     * LensFlare_WaterZoneGet(Q12_TO_Q4(pos->vx), Q12_TO_Q4(pos->vz)) —
-     * pos = the light, NOT the camera), and the z<=proj/2 early-return
-     * skips the water branch too (lens_flare.c:73-75). Zones are ENGINE
-     * x/z meters; glTF maps (x,-y,-z): engine_x = x, engine_z = -z.    */
-    if (execOn && !g_flaresys.waterInhibit && !skipWater &&
-        sx->nWaterZones > 0 && R->sc) {
+/* v43 — THE WATER SHIMMER COLLECT (func_8008E794 glint + func_8008EA68
+ * caustic ring), moved OUT of fx_pass into the pre-walk collect so the
+ * prims join post[] at the ENGINE OT buckets 641 (opaque pair + glint)
+ * and 639 (semi pair) — the painter walk then layers them exactly like
+ * the engine's far->near OT walk: UNDER the water-floor quads (the DWAVE
+ * additive floor rides its OWN nearer buckets and blends over the ring),
+ * covered by any nearer opaque geometry. The v42 bug painted the ring
+ * AFTER the whole mesh walk = ON TOP of the water floor — the octagonal
+ * faceted blob over the water the owner reported ("the lens effect is
+ * above the water and is incredibly broken"). Add order (the 2dEffects
+ * run AFTER the mesh quads): the glint FIRST (the 641 chain tail =
+ * painted LAST within 641 = ON TOP of the ring's opaque pair), then per
+ * segment g4[0], g3[0] (641) and g4[1], g3[1] (639) — within a bucket
+ * the higher add-seq paints FIRST = BELOW, so each bucket paints g3
+ * UNDER g4 (the engine's per-segment add order, lens_flare.c:812-815).
+ * The depth gates keep the OT-bucket far-edge form (20.0625 m / 20.0 m —
+ * V41 C-3). */
+typedef struct {
+    int kind;              /* 0 = opaque G-tri, 1 = semi G-tri, 2 = glint  */
+    int x[3], y[3];        /* the tri corners / the glint center (kind 2)  */
+    int c[3][3];           /* per-vertex colors / (r,g,b) (kind 2)        */
+    float depthM;          /* the OT-bucket far-edge depth gate            */
+} FxPrim;
+static FxPrim g_fxPrims[64];
+static int g_nFxPrims;
+
+/* store one ring/glint prim + emit its OT entry (v43) */
+static int fx_emit_prim(PostEnt *post, int *nPost, int *seq, int maxPost,
+                        int bucket, int semi,
+                        int x0, int y0, const int c0[3],
+                        int x1, int y1, const int c1[3],
+                        int x2, int y2, const int c2[3],
+                        float depthM) {
+    if (*nPost >= maxPost || g_nFxPrims >= 64) return 0;
+    FxPrim *p = &g_fxPrims[g_nFxPrims];
+    p->kind = semi;
+    p->x[0] = x0; p->y[0] = y0;
+    p->x[1] = x1; p->y[1] = y1;
+    p->x[2] = x2; p->y[2] = y2;
+    memcpy(p->c[0], c0, 3 * sizeof(int));
+    memcpy(p->c[1], c1, 3 * sizeof(int));
+    memcpy(p->c[2], c2, 3 * sizeof(int));
+    p->depthM = depthM;
+    int idx = g_nFxPrims++;
+    PostEnt pe;
+    memset(&pe, 0, sizeof(pe));
+    pe.bucket = bucket; pe.seq = (*seq)++;
+    pe.kind = 6; pe.item = -1; pe.tri0 = idx; pe.ntri = 0;
+    post[(*nPost)++] = pe;
+    return 1;
+}
+/* store the glint quad prim (kind 2) + its 641 entry — emitted FIRST
+ * (the engine's add order: func_8008E794 runs BEFORE func_8008EA68, so
+ * the glint sits at the 641 chain TAIL = painted LAST within the bucket
+ * = ON TOP of the ring's opaque pair). */
+static int fx_emit_glint(PostEnt *post, int *nPost, int *seq, int maxPost,
+                         int px, int py, int r, int g, int b) {
+    if (*nPost >= maxPost || g_nFxPrims >= 64) return 0;
+    FxPrim *p = &g_fxPrims[g_nFxPrims];
+    p->kind = 2;
+    p->x[0] = px; p->y[0] = py;
+    p->c[0][0] = r; p->c[1][0] = g; p->c[2][0] = b;
+    p->depthM = 20.0625f;
+    int idx = g_nFxPrims++;
+    PostEnt pe;
+    memset(&pe, 0, sizeof(pe));
+    pe.bucket = 641; pe.seq = (*seq)++;
+    pe.kind = 6; pe.item = -1; pe.tri0 = idx; pe.ntri = 0;
+    post[(*nPost)++] = pe;
+    return 1;
+}
+
+static int fx_water_zone_collect(Frame *fb, const Renderer *R,
+                                 const CamPose *cam,
+                                 PostEnt *post, int *nPost, int *seq,
+                                 int maxPost) {
+    const Sh1x *sx = &R->sc->sh1x;
+    const ShEnv *env = R->env;
+    g_nFxPrims = 0;
+    if (!env) return 0;
+    int execOn = (env->field_0 == SHENUM_1) &&
+                 (env->cur.flashlightLensFlareIntensity != 0);
+    if (!(execOn && !g_flaresys.waterInhibit && !g_flaresys.skipWater &&
+          sx->nWaterZones > 0 && R->sc && !getenv("FOGPOC_NORING")))
+        return 0;
+    mat4 view = mat4_view_from_quat(cam->pos, cam->q);
+    const ShLight *L = &env->light;
         float ex = (float)g_fxLightPos[0] * (1.0f / 4096.0f);  /* the LIGHT */
         float ez = -(float)g_fxLightPos[2] * (1.0f / 4096.0f); /* not camera */
         for (int z = 0; z < sx->nWaterZones; z++) {
@@ -10792,7 +10892,6 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
                 float posY = -wz->illumination;   /* glTF water plane     */
                 /* func_8008E794: mirrored light position vy = posY*2 - vy */
                 float gx = lx, gy = posY * 2.0f - ly, gz = lz;
-                mat4 view = mat4_view_from_quat(cam->pos, cam->q);
                 float vx = view.m[0] * gx + view.m[4] * gy + view.m[8] * gz + view.m[12];
                 float vy = view.m[1] * gx + view.m[5] * gy + view.m[9] * gz + view.m[13];
                 float vz = view.m[2] * gx + view.m[6] * gy + view.m[10] * gz + view.m[14];
@@ -10820,6 +10919,15 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
                     glintB = (sinA * 5) >> 9;
                     glintOn = 1;
                 }   /* engine glint gate only (func_8008E794:635) */
+                /* v43: the glint joins the OT at bucket 641 BEFORE the ring
+                 * segments (the engine's add order — func_8008E794 runs
+                 * before func_8008EA68) = the LOWEST water seq = painted
+                 * LAST within 641 = ON TOP of the ring's opaque pair
+                 * (W1-13). */
+                if (glintOn)
+                    fx_emit_glint(post, nPost, seq, maxPost,
+                                  glintPx, glintPy,
+                                  glintR, glintG, glintB);
                 /* func_8008EA68 (lens_flare.c:690-823) — the caustic
                  * ring, VERBATIM geometry: 8 segments of 45deg in the
                  * LIGHT's yaw frame; the ring sits AT the water plane
@@ -10963,49 +11071,88 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
                              * by NEARER opaque geometry exactly like the
                              * engine's OT walk. */
                             if (cVis)
-                                fx_blit_gouraud_tri(fb, cScx, cScy, g3o0,
-                                                   sxp[0], syp[0], g4o1,
-                                                   sxp[1], syp[1], g4o1, 0,
-                                                   20.0625f);
+                                fx_emit_prim(post, nPost, seq, maxPost,
+                                             641, 0,
+                                             cScx, cScy, g3o0,
+                                             sxp[0], syp[0], g4o1,
+                                             sxp[1], syp[1], g4o1,
+                                             20.0625f);
                             /* g4[0] OPAQUE (20,18,12)/(20,18,12)/(4,4,4)/(4,4,4) */
-                            fx_blit_gouraud_tri(fb, sxp[0], syp[0], g4o0,
-                                               sxp[1], syp[1], g4o1,
-                                               sxp[2], syp[2], g4o2, 0,
-                                               20.0625f);
-                            fx_blit_gouraud_tri(fb, sxp[1], syp[1], g4o1,
-                                               sxp[2], syp[2], g4o2,
-                                               sxp[3], syp[3], g4o3, 0,
-                                               20.0625f);
+                            fx_emit_prim(post, nPost, seq, maxPost,
+                                         641, 0,
+                                         sxp[0], syp[0], g4o0,
+                                         sxp[1], syp[1], g4o1,
+                                         sxp[2], syp[2], g4o2,
+                                         20.0625f);
+                            fx_emit_prim(post, nPost, seq, maxPost,
+                                         641, 0,
+                                         sxp[1], syp[1], g4o1,
+                                         sxp[2], syp[2], g4o2,
+                                         sxp[3], syp[3], g4o3,
+                                         20.0625f);
                             /* g3[1] SEMI (C,P0,P1) (8,8,4)/(4,8,4)/(4,8,4) — UNDER */
                             if (cVis)
-                                fx_blit_gouraud_tri(fb, cScx, cScy, g3s0,
-                                                   sxp[0], syp[0], g3s1,
-                                                   sxp[1], syp[1], g3s2, 1,
-                                                   20.0f);
+                                fx_emit_prim(post, nPost, seq, maxPost,
+                                             639, 1,
+                                             cScx, cScy, g3s0,
+                                             sxp[0], syp[0], g3s1,
+                                             sxp[1], syp[1], g3s2,
+                                             20.0f);
                             /* g4[1] SEMI (4,8,4)/(4,8,4)/(0,0,0)/(0,0,0) */
-                            fx_blit_gouraud_tri(fb, sxp[0], syp[0], g4s0,
-                                               sxp[1], syp[1], g4s1,
-                                               sxp[2], syp[2], g4s2, 1,
-                                               20.0f);
-                            fx_blit_gouraud_tri(fb, sxp[1], syp[1], g4s1,
-                                               sxp[2], syp[2], g4s2,
-                                               sxp[3], syp[3], g4s3, 1,
-                                               20.0f);
+                            fx_emit_prim(post, nPost, seq, maxPost,
+                                         639, 1,
+                                         sxp[0], syp[0], g4s0,
+                                         sxp[1], syp[1], g4s1,
+                                         sxp[2], syp[2], g4s2,
+                                         20.0f);
+                            fx_emit_prim(post, nPost, seq, maxPost,
+                                         639, 1,
+                                         sxp[1], syp[1], g4s1,
+                                         sxp[2], syp[2], g4s2,
+                                         sxp[3], syp[3], g4s3,
+                                         20.0f);
                         }
                     }
                 }
-                /* v37 (W1-13): the GLINT paints ON TOP of the ring (both
-                 * ride bucket 641; the engine inserts the glint FIRST =
-                 * chain head = drawn LAST). Textured additive tpage-45
-                 * blit (see fx_water_glint_blit). */
+                /* v43: the glint joins the OT at bucket 641 BEFORE the
+                 * ring segments (the engine's add order — func_8008E794
+                 * runs before func_8008EA68) = the LOWEST water seq =
+                 * painted LAST within 641 = ON TOP of the ring's opaque
+                 * pair (W1-13). */
                 if (glintOn)
-                    fx_water_glint_blit(fb, glintPx, glintPy,
-                                        glintR, glintG, glintB);
-                break;      /* first matching zone wins (engine returns it) */
-            }
+                    fx_emit_glint(post, nPost, seq, maxPost,
+                                  glintPx, glintPy,
+                                  glintR, glintG, glintB);
+            break;      /* first matching zone wins (engine returns it) */
         }
     }
+    return g_nFxPrims;
+}
 
+/* ==================================================================== */
+/* v26 fx_pass — the SH1X v3 FX paint (flare + shimmer + anims).        */
+/* Engine references (VERBATIM, silent-hill-decomp):
+ *  shLensFlareExec/Draw/SetLightSeed/Effect_Draw/LightCenterIsVisible/
+ *  MakeEffectTargetRate/SpriteXYSet/GreySet + func_8008E5B4/E794/EA68 +
+ *  LensFlare_WaterZoneGet — src/bodyprog/gfx/lens_flare.c.
+ *  WorldEnvRender_LightScreenInfoGet/AngleGet/PositionGet — src/bodyprog/
+ *  world/lighting.c:203-292. Prop drivers — map overlay scripts (see
+ *  docs/SH1X_EXTRAS_V3_FX.md). Screen geometry: engine 320x224 NTSC.    */
+/* -------------------------------------------------------------------- */
+static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
+    const ShEnv *env = R->env;
+    (void)R->sc;
+    if (!env) return;
+
+    /* v43: the exec half (the light anchor + the screen projection +
+     * Gate 2 + the target rate + the water shimmer prim collect) moved
+     * to fx_lens_exec/fx_water_zone_collect — called BEFORE the OT walk
+     * exactly like the engine (shLensFlareExec runs INSIDE WorldGfx_
+     * 2dEffectsDraw, draw.c:431-446, before the GPU walk). fx_pass now
+     * paints only the POST-WALK half: the fb->z occlusion probe, the
+     * rate easing and shLensFlareDraw's sprites (the FRONT OT slots —
+     * drawn LAST over everything). */
+    const int scale = fb->w / 320 > 0 ? fb->w / 320 : 1;
     /* ---- shLensFlareDraw (lens_flare.c:176-223) ---------------------- */
     if (!g_flaresys.syncDrawExecF) return;
     g_flaresys.syncDrawExecF = 0;
@@ -11280,6 +11427,23 @@ static void fx_water_floor_rgba(const Sh1x *sx) {
             d[3] = (c & 0x8000u) ? ((c & 0x7FFFu) ? 255 : 0)
                                  : (c ? 127 : 0);
         }
+    static int dumped = 0;
+    if (!dumped && getenv("FOGPOC_WFLTEX")) {
+        dumped = 1;
+        /* upscale x2 for visibility */
+        unsigned char up[64 * 256 * 3];
+        for (int y = 0; y < 32; y++)
+            for (int x = 0; x < 128; x++) {
+                const unsigned char *s = g_waterFloorTex + ((size_t)y * 128 + x) * 4;
+                for (int dy = 0; dy < 2; dy++)
+                    for (int dx = 0; dx < 2; dx++) {
+                        unsigned char *d = up + (((size_t)y * 2 + dy) * 256 + (x * 2 + dx)) * 3;
+                        d[0] = s[0]; d[1] = s[1]; d[2] = s[2];
+                    }
+            }
+        write_png_rgb(getenv("FOGPOC_WFLTEX"), up, 256, 64);
+        fprintf(stderr, "WFLTEX dumped %s\n", getenv("FOGPOC_WFLTEX"));
+    }
 }
 
 /* v34: the water scroll counter advance moved to the TICK discipline.
@@ -11300,36 +11464,12 @@ static void fx_water_scroll_sync(const Sh1x *sx, const ShEnv *env,
     if (!(env->field_0 == SHENUM_1 &&
           env->cur.flashlightLensFlareIntensity != 0))
         return;
-    /* the light WORLD pos — the engine anchor chain (identical to the
-     * fx_pass light-position block: the camera-bone offset, the T7 authored
-     * offset (camdat light.offset > the Sh1x userLight override), the
-     * free-world/ahead CLI/camdat modes) */
-    float ox = -0.08f, oy = 0.28f, oz = -0.12f;
-    if (g_userLightHasOffset) {
-        ox = g_userLightOffset[0];
-        oy = g_userLightOffset[1];
-        oz = g_userLightOffset[2];
-    } else if (sx->hasUserLight) {
-        ox = sx->userLightOffset[0];
-        oy = -sx->userLightOffset[1];
-        oz = -sx->userLightOffset[2];
-    }
-    float wx, wy, wz;
-    if (g_userLightMode == 1) {
-        wx = g_userLightWorld[0]; wy = g_userLightWorld[1];
-        wz = g_userLightWorld[2];
-    } else {
-        float extraAhead = (g_userLightMode == 2) ? g_userLightAheadM : 0.0f;
-        v3 X, Y, Z;
-        quat_axes(cam->q, &X, &Y, &Z);
-        wx = X.x * ox + Y.x * oy + Z.x * oz + cam->pos.x;
-        wy = X.y * ox + Y.y * oy + Z.y * oz + cam->pos.y;
-        wz = X.z * ox + Y.z * oy + Z.z * oz + cam->pos.z;
-        if (extraAhead > 0.0f) {
-            wx -= Z.x * extraAhead; wy -= Z.y * extraAhead;
-            wz -= Z.z * extraAhead;
-        }
-    }
+    /* the light WORLD pos — the engine anchor (v43: the ONE shared
+     * fx_light_anchor copy — this was the third duplicate) */
+    fx_light_anchor(sx, cam);
+    float wx = (float)g_fxLightPos[0] * (1.0f / 4096.0f);
+    float wy = (float)g_fxLightPos[1] * (1.0f / 4096.0f);
+    float wz = (float)g_fxLightPos[2] * (1.0f / 4096.0f);
     /* GATE 2 + the water branch's own inhibit (lens_flare.c:59-93
      * structure — the maintainer's reimplementation of audit A-F3;
      * PR #3's hunk was rejected for the stale PAL constant 120):
@@ -12717,10 +12857,19 @@ static int sh_tvpaint_collect(const Sh1x *sx, const mat4 *viewProj,
 static void sh_tvpaint_draw_quad(Frame *fb, const Renderer *R,
                                  const TvQuad *q) {
     if (!q->tex) return;
+    /* v43: the GPU quad split VERBATIM — swanstation gpu_sw.cpp:696/715
+     * draws a POLY_FT4 as (v0,v1,v2)+(v2,v1,v3): BOTH triangles share the
+     * v1->v2 diagonal (TR->BL for the FT4 corner order c0..c3 = TL,TR,BL,
+     * BR). The v42 form (v0,v1,v2)+(v0,v2,v3) used TWO different
+     * diagonals (TR-BL then TL-BR): their union misses the quad's RIGHT
+     * WEDGE — every TV screen lost its right quarter ("the PoC has
+     * 'triangles' on the right hand side of the TV — only a partial view
+     * of the TV is shown", the owner's report). The same bug class the
+     * 461d0bd flare fix (fsq streaks) corrected for fx_blit_sprite_quad. */
     raster_tri(fb, &q->v[0], &q->v[1], &q->v[2], q->tex, 256, 256,
                RP_OPAQUE, &R->opts, R->opts.ps1, R->dither,
                R->enginePixScale, R->enginePixScaleY);
-    raster_tri(fb, &q->v[0], &q->v[2], &q->v[3], q->tex, 256, 256,
+    raster_tri(fb, &q->v[2], &q->v[1], &q->v[3], q->tex, 256, 256,
                RP_OPAQUE, &R->opts, R->opts.ps1, R->dither,
                R->enginePixScale, R->enginePixScaleY);
 }
@@ -12880,7 +13029,7 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
             nQuadMax += sc->item[i].icount / 3 + 1;
     }
     PostEnt *post = (PostEnt *)malloc(sizeof(PostEnt) *
-                                      (size_t)(nQuadMax + SNOW_COUNT_MAX + 1));
+                                      (size_t)(nQuadMax + SNOW_COUNT_MAX + 65));
     int nPost = 0, seq = 0;
     int nFlake = 0;
     const Snow *S = R->snow;
@@ -13497,6 +13646,19 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
         }
     }
 
+    /* v43: the engine's WorldGfx_Draw order (draw.c:431-446): objects ->
+     * chunks -> 2dEffects — shLensFlareExec's compute half (the light
+     * screen info + the flare target rate) and the water shimmer prims
+     * (the caustic ring + the glint at OT buckets 641/639) join the OT
+     * AFTER the mesh quads and BEFORE the GPU walk. The painter walk then
+     * layers the ring/glint UNDER the nearer water-floor quads exactly
+     * like the engine's far->near OT walk — the v42 bug painted them
+     * AFTER the walk = ON TOP of the water floor (the octagonal blob
+     * 'lens effect above the water'). */
+    fx_lens_exec(fb, R, cam);
+    fx_water_zone_collect(fb, R, cam, post, &nPost, &seq,
+                          nQuadMax + SNOW_COUNT_MAX + 65);
+
     /* OT walk: bucket DESC (far -> near), LIFO within a bucket (seq DESC) */
     qsort(post, (size_t)nPost, sizeof(PostEnt), postent_cmp);
 
@@ -13520,6 +13682,21 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
         if (post[bi].kind == 5) {           /* v36: the TV paint quad   */
             if (post[bi].tri0 >= 0 && post[bi].tri0 < nTvq)
                 sh_tvpaint_draw_quad(fb, R, &tvq[post[bi].tri0]);
+            continue;
+        }
+        if (post[bi].kind == 6) {           /* v43: the water ring/glint */
+            if (post[bi].tri0 >= 0 && post[bi].tri0 < g_nFxPrims) {
+                const FxPrim *fp = &g_fxPrims[post[bi].tri0];
+                if (fp->kind == 2)
+                    fx_water_glint_blit(fb, fp->x[0], fp->y[0],
+                                        fp->c[0][0], fp->c[1][0],
+                                        fp->c[2][0]);
+                else
+                    fx_blit_gouraud_tri(fb, fp->x[0], fp->y[0], fp->c[0],
+                                       fp->x[1], fp->y[1], fp->c[1],
+                                       fp->x[2], fp->y[2], fp->c[2],
+                                       fp->kind, fp->depthM);
+            }
             continue;
         }
         /* kind 0: one OT quad — draw ITS triangles (v13 per-tri culls kept
@@ -13602,6 +13779,13 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
                  * (v_norm*64-224)/32 = v*2-7. Both stay inside the pattern
                  * (u 0..62 < 128; v 224..255 -> rows 0..31) — no wrap, the
                  * GPU reads the page rows directly. */
+                if (getenv("FOGPOC_WFLDBG")) {
+                    static int cnt = 0;
+                    fprintf(stderr, "WFLDBG[%d] item=%d name=%s buf=%d vcol=(%d,%d,%d) z=%.2f\n",
+                            cnt, post[bi].item, it->name, it->buffer,
+                            a->vcol[0], a->vcol[1], a->vcol[2], a->z);
+                    cnt++;
+                }
                 RVert ra = *a, rb = *b, rc = *c;
                 ra.u = a->u * 2.0f;  ra.v = a->v * 2.0f - 7.0f;
                 rb.u = b->u * 2.0f;  rb.v = b->v * 2.0f - 7.0f;

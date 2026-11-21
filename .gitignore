@@ -1,0 +1,11 @@
+# build outputs
+.gradle/
+build/
+app/build/
+local.properties
+
+# the host verification engine + the anim-suite evidence (bench/build_host_engine.sh
+# + bench/anim_suite.py regenerate them on demand — never ship build artifacts)
+bench/fog_poc
+bench/anim_shots/
+bench/shots/

@@ -48,8 +48,19 @@ wallpaper.
    `file` field + at least one camera track. The World & Weather fields
    can be authored in the camtrack editor (or derived: the editor reads
    the GLB's SH1X.env and proposes the room-original defaults).
-3. Commit and push to `main`. CI detects the asset change, builds both
-   APKs and publishes the release — no other step is needed.
+   `tools/derive_wallpaper_envs.py` re-derives every entry's
+   `dayEnv`/`nightEnv` from the PoC repo's `tools/room_env_table.json`
+   (the verbatim per-room WorldEnv pair table): the dark-pair rooms
+   ({6,3} sewers/night town, {7,4} nightmare) get day = the
+   flashlight-OFF base and **night = the pair's flashlight-ON member**
+   — the in-game dark-room look, where the water FX (the caustic ring +
+   the glint + the DR_WAVE scroll), the beam and the lens flare live
+   (`shLensFlareExec` gates all of them on `lightMode == Spot`).
+   The weather fields stay the room's verbatim `field17`.
+3. Commit and push to `main`. CI detects the asset change, runs the
+   all-animations gate (`bench/anim_suite.py` — 25 driver families on
+   the corpus), builds both APKs and publishes the release — no other
+   step is needed.
 
 ## Versioning (the 1.0.0 scheme)
 

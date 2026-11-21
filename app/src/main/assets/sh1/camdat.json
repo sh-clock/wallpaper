@@ -43,7 +43,7 @@
         "particles": true,
         "engine": true,
         "dayEnv": 6,
-        "nightEnv": 6
+        "nightEnv": 3
       },
       "tracks": [
         {
@@ -106,7 +106,7 @@
         "particles": true,
         "engine": true,
         "dayEnv": 6,
-        "nightEnv": 6
+        "nightEnv": 3
       },
       "tracks": [
         {
@@ -187,7 +187,7 @@
         "particles": true,
         "engine": true,
         "dayEnv": 6,
-        "nightEnv": 6
+        "nightEnv": 3
       },
       "tracks": [
         {
@@ -268,7 +268,7 @@
         "particles": true,
         "engine": true,
         "dayEnv": 6,
-        "nightEnv": 6
+        "nightEnv": 3
       },
       "tracks": [
         {
@@ -323,7 +323,7 @@
         "particles": true,
         "engine": true,
         "dayEnv": 6,
-        "nightEnv": 6
+        "nightEnv": 3
       },
       "tracks": [
         {
@@ -378,7 +378,7 @@
         "particles": true,
         "engine": true,
         "dayEnv": 6,
-        "nightEnv": 6
+        "nightEnv": 3
       },
       "tracks": [
         {
@@ -441,7 +441,7 @@
         "particles": true,
         "engine": true,
         "dayEnv": 6,
-        "nightEnv": 6
+        "nightEnv": 3
       },
       "tracks": [
         {
@@ -504,7 +504,7 @@
         "particles": true,
         "engine": true,
         "dayEnv": 7,
-        "nightEnv": 7
+        "nightEnv": 4
       },
       "tracks": [
         {
@@ -559,7 +559,7 @@
         "particles": true,
         "engine": true,
         "dayEnv": 7,
-        "nightEnv": 7
+        "nightEnv": 4
       },
       "tracks": [
         {
@@ -614,7 +614,7 @@
         "particles": true,
         "engine": true,
         "dayEnv": 7,
-        "nightEnv": 7
+        "nightEnv": 4
       },
       "tracks": [
         {
@@ -724,7 +724,7 @@
         "particles": true,
         "engine": true,
         "dayEnv": 7,
-        "nightEnv": 7
+        "nightEnv": 4
       },
       "tracks": [
         {
@@ -787,7 +787,7 @@
         "particles": true,
         "engine": true,
         "dayEnv": 7,
-        "nightEnv": 7
+        "nightEnv": 4
       },
       "tracks": [
         {
@@ -905,7 +905,7 @@
         "particles": true,
         "engine": true,
         "dayEnv": 7,
-        "nightEnv": 7
+        "nightEnv": 4
       },
       "tracks": [
         {
@@ -960,7 +960,7 @@
         "particles": true,
         "engine": true,
         "dayEnv": 7,
-        "nightEnv": 7
+        "nightEnv": 4
       },
       "tracks": [
         {
@@ -1023,7 +1023,7 @@
         "particles": true,
         "engine": true,
         "dayEnv": 7,
-        "nightEnv": 7
+        "nightEnv": 4
       },
       "tracks": [
         {
@@ -1078,7 +1078,7 @@
         "particles": true,
         "engine": true,
         "dayEnv": 7,
-        "nightEnv": 7
+        "nightEnv": 4
       },
       "tracks": [
         {
@@ -1133,7 +1133,7 @@
         "particles": true,
         "engine": true,
         "dayEnv": 7,
-        "nightEnv": 7
+        "nightEnv": 4
       },
       "tracks": [
         {
@@ -1251,7 +1251,7 @@
         "particles": true,
         "engine": true,
         "dayEnv": 7,
-        "nightEnv": 7
+        "nightEnv": 4
       },
       "tracks": [
         {
@@ -1306,7 +1306,7 @@
         "particles": true,
         "engine": true,
         "dayEnv": 7,
-        "nightEnv": 7
+        "nightEnv": 4
       },
       "tracks": [
         {
@@ -1361,7 +1361,7 @@
         "particles": true,
         "engine": true,
         "dayEnv": 7,
-        "nightEnv": 7
+        "nightEnv": 4
       },
       "tracks": [
         {
@@ -1416,7 +1416,7 @@
         "particles": true,
         "engine": true,
         "dayEnv": 7,
-        "nightEnv": 7
+        "nightEnv": 4
       },
       "tracks": [
         {
@@ -1471,7 +1471,7 @@
         "particles": true,
         "engine": true,
         "dayEnv": 7,
-        "nightEnv": 7
+        "nightEnv": 4
       },
       "tracks": [
         {
@@ -1534,7 +1534,7 @@
         "particles": true,
         "engine": true,
         "dayEnv": 6,
-        "nightEnv": 6
+        "nightEnv": 3
       },
       "tracks": [
         {
@@ -1597,7 +1597,7 @@
         "particles": true,
         "engine": true,
         "dayEnv": 6,
-        "nightEnv": 6
+        "nightEnv": 3
       },
       "tracks": [
         {
@@ -1660,7 +1660,7 @@
         "particles": true,
         "engine": true,
         "dayEnv": 6,
-        "nightEnv": 6
+        "nightEnv": 3
       },
       "tracks": [
         {
@@ -1723,7 +1723,7 @@
         "particles": true,
         "engine": true,
         "dayEnv": 6,
-        "nightEnv": 6
+        "nightEnv": 3
       },
       "tracks": [
         {
@@ -1778,7 +1778,7 @@
         "particles": true,
         "engine": true,
         "dayEnv": 7,
-        "nightEnv": 7
+        "nightEnv": 4
       },
       "tracks": [
         {
@@ -1896,7 +1896,7 @@
         "particles": true,
         "engine": true,
         "dayEnv": 7,
-        "nightEnv": 7
+        "nightEnv": 4
       },
       "tracks": [
         {
@@ -1951,7 +1951,7 @@
         "particles": true,
         "engine": true,
         "dayEnv": 7,
-        "nightEnv": 7
+        "nightEnv": 4
       },
       "tracks": [
         {
@@ -2035,7 +2035,7 @@
         "particles": true,
         "engine": true,
         "dayEnv": 7,
-        "nightEnv": 7
+        "nightEnv": 4
       },
       "tracks": [
         {
@@ -2098,7 +2098,7 @@
         "particles": true,
         "engine": true,
         "dayEnv": 7,
-        "nightEnv": 7
+        "nightEnv": 4
       },
       "tracks": [
         {
@@ -2161,7 +2161,7 @@
         "particles": true,
         "engine": true,
         "dayEnv": 7,
-        "nightEnv": 7
+        "nightEnv": 4
       },
       "tracks": [
         {
@@ -2709,6 +2709,100 @@
           "yawSpeedDegS": 0,
           "pitchSpeedDegS": 0,
           "durationSec": 0
+        }
+      ]
+    },
+    {
+      "file": "DR01FE.glb",
+      "addedAt": "2026-11-21T21:31:24.000Z",
+      "bounds": {
+        "min": [
+          40.0,
+          -0.5,
+          40.0
+        ],
+        "max": [
+          64.0,
+          5.0,
+          64.0
+        ]
+      },
+      "fogon": true,
+      "nighton": true,
+      "flashlighton": true,
+      "env": {
+        "pair": [
+          6,
+          3
+        ],
+        "weatherTarget": 5,
+        "bootWeather": -1,
+        "lensFlare": 0,
+        "flashlightOn": true,
+        "psxWobble": true,
+        "dither": true,
+        "particles": true,
+        "engine": true,
+        "dayEnv": 6,
+        "nightEnv": 3,
+        "animsDemo": true
+      },
+      "tracks": [
+        {
+          "id": "channelpan",
+          "name": "Water channel pan (the DR_WAVE floor + the glint column)",
+          "type": "line",
+          "enabled": true,
+          "fovDeg": 55,
+          "loopMode": "pingPong",
+          "start": [
+            49.0,
+            2.0,
+            58.0
+          ],
+          "end": [
+            53.0,
+            1.6,
+            58.0
+          ],
+          "speedMS": 0.25,
+          "lookMode": "point",
+          "lookAt": [
+            53.0,
+            -0.6,
+            47.0
+          ],
+          "durationSec": 60
+        },
+        {
+          "id": "waterlook",
+          "name": "Water surface closeup (the dappled DR_WAVE pattern)",
+          "type": "fixed",
+          "enabled": false,
+          "fovDeg": 55,
+          "position": [
+            51.0,
+            2.6,
+            55.0
+          ],
+          "yawDeg": 0,
+          "pitchDeg": -55,
+          "durationSec": 30
+        },
+        {
+          "id": "glintview",
+          "name": "Flashlight glint on the water (light faces the camera)",
+          "type": "fixed",
+          "enabled": false,
+          "fovDeg": 55,
+          "position": [
+            49.0,
+            2.0,
+            58.0
+          ],
+          "yawDeg": 35,
+          "pitchDeg": -18,
+          "durationSec": 30
         }
       ]
     }

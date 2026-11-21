@@ -102,10 +102,31 @@ jobs:
           echo "version=$NEWNAME" >> "$GITHUB_OUTPUT"
           echo "new version: $NEWNAME ($KIND)"
 
+  # ---- the ALL-ANIMATIONS GATE (S20-cont) ------------------------------------
+  # The PoC S20 all-animations suite ported to the twin binary + the APK's
+  # OWN scene corpus: 25 driver families, anim-targeted cameras, A/B +
+  # sequence pixel proofs (FOGPOC_NORING kills the ring for the clean A/B).
+  # Runs on every push + PR BEFORE the release ships - the "test ALL work
+  # prior to shipping" contract for the wallpaper engine.
+  anim-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build the host verification engine (the twin, software path)
+        run: ./bench/build_host_engine.sh
+
+      - name: Install Pillow (the suite's pixel-diff dependency)
+        run: pip install --user pillow
+
+      - name: The all-animations suite - 25/25 families must animate
+        run: python3 bench/anim_suite.py
+
   # ---- build + smoke + release ---------------------------------------------
   build:
-    needs: bump
-    if: always()
+    needs: [bump, anim-gate]
+    if: always() && (needs.anim-gate.result == 'success' || needs.anim-gate.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (main carries the bump commit; tags use the tag)
