@@ -267,7 +267,7 @@
         "dither": true,
         "particles": true,
         "engine": true,
-        "dayEnv": 1,
+        "dayEnv": 6,
         "nightEnv": 6
       },
       "tracks": [
@@ -322,7 +322,7 @@
         "dither": true,
         "particles": true,
         "engine": true,
-        "dayEnv": 1,
+        "dayEnv": 6,
         "nightEnv": 6
       },
       "tracks": [
@@ -377,7 +377,7 @@
         "dither": true,
         "particles": true,
         "engine": true,
-        "dayEnv": 1,
+        "dayEnv": 6,
         "nightEnv": 6
       },
       "tracks": [
@@ -1533,7 +1533,7 @@
         "dither": true,
         "particles": true,
         "engine": true,
-        "dayEnv": 1,
+        "dayEnv": 6,
         "nightEnv": 6
       },
       "tracks": [
@@ -1596,7 +1596,7 @@
         "dither": true,
         "particles": true,
         "engine": true,
-        "dayEnv": 1,
+        "dayEnv": 6,
         "nightEnv": 6
       },
       "tracks": [
@@ -1659,7 +1659,7 @@
         "dither": true,
         "particles": true,
         "engine": true,
-        "dayEnv": 1,
+        "dayEnv": 6,
         "nightEnv": 6
       },
       "tracks": [
@@ -1722,7 +1722,7 @@
         "dither": true,
         "particles": true,
         "engine": true,
-        "dayEnv": 1,
+        "dayEnv": 6,
         "nightEnv": 6
       },
       "tracks": [
