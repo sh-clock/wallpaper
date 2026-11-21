@@ -626,10 +626,15 @@ static void hw_push_tri(const RVert *vA, const RVert *vB, const RVert *vC,
     g_hwBatch.insts[g_hwBatch.nVert + 2] = instTmp;
     g_hwBatch.nVert += 3;
     g_hwBatch.nInst += 1;
-    /* the z pass takes OPAQUE triangles only (raster_tri writes fb->z
-     * ONLY for RP_OPAQUE non-hole fragments — the shader's discard gives
-     * the hole rule; this filter gives the pass rule)                    */
-    if (pass == RP_OPAQUE) {
+    /* the z pass takes OPAQUE + MASK triangles (raster_tri's V41 C-5
+     * rule: `if (pass == RP_OPAQUE || pass == RP_MASK_TEX) fb->z[pi] = z`
+     * — the engine's leaf GT4s are OPAQUE ST-clear punch-through: a
+     * ta>0 leaf texel COVERS the flare probe's tile; the shader's ta==0
+     * discard gives the hole rule, this filter gives the pass rule.
+     * BLEND semi-trans prims still write nothing (white + F saturates at
+     * 0x7FFF — they never cover the tile); ADD likewise (semi-trans
+     * prims never occlude later flakes — engine-true))                */
+    if (pass == RP_OPAQUE || pass == RP_MASK_TEX) {
         if ((size_t)g_hwBatch.nZVert + 3 <= g_hwBatch.capZVert) {
             memcpy(&g_hwBatch.zverts[g_hwBatch.nZVert], Vv[0], sizeof(HwVert) * 3);
             memcpy(&g_hwBatch.zinsts[g_hwBatch.nZVert], in, sizeof(HwInst));
@@ -641,11 +646,51 @@ static void hw_push_tri(const RVert *vA, const RVert *vB, const RVert *vC,
     }
 }
 
+/* the RP_ADD_TEX capability flag (WA2-4): 0 = neither backend implements
+ * the additive destination-reading pass (see the header comment) — any
+ * waterLive quad routes the frame to the software renderer via the
+ * hw_build_batch failure path (silent, pixel-exact). A backend sets this
+ * to 1 only when it implements the full engine-exact additive chain
+ * (per-tri dst snapshots + the 5-bit fb_put quantize between stacked
+ * adds + the STP-class opaque-replace rule + the live water texture
+ * upload).                                                              */
+static int g_hw_cap_add_tex = 0;
+
 /* ==========================================================================
  * hw_build_batch + hw_replay_sprites — render_frame's body walked VERBATIM
  * (the OT-build block copied line-for-line; raster_tri redirected to
  * hw_push_tri; the snow/rain sprite blits deferred to hw_replay_sprites).
  * The clear is the GPU clear; the CPU fb is written by the readback.
+ *
+ * v43 re-port (WA2-4): the v33/v34/v37 waterLive material rule, walked
+ * VERBATIM at the engine's position — (1) the v33 waterLive texture
+ * redirect (fx_water_floor_rgba -> g_waterFloorTex 128x32, or the legacy
+ * fx_water_live_rgba -> g_waterLiveRGBA 32x32) + the v37 page-texel UV
+ * remap (u*2, v*2-7) + the FOGPOC_WFLDBG dump; (2) the v34/V41-C-5
+ * quadPass rule (waterLive -> RP_ADD_TEX; alphaMode 0/1/2 ->
+ * OPAQUE/MASK/BLEND — MASK was misclassified as BLEND before, and its
+ * texels never entered the occlusion z); (3) hw_push_tri's z-pass filter
+ * extended to RP_OPAQUE || RP_MASK_TEX (V41 C-5).
+ *
+ * THE ADD-TEXTURE SEAM (the one genuine new seam, correctness over
+ * speed): RP_ADD_TEX is a DESTINATION-READING blend (raster_tri
+ * fog_poc.c:7805-7833: dst5 = B5 + F5 with fb_put's 5-bit saturating
+ * quantize BETWEEN stacked adds, and the STP-class rule ta<128 ->
+ * opaque replace). NO current backend's shader implements a dst-read
+ * pass (the GLES/VK mesh shaders are pure replacers), and a correct GPU
+ * emulation requires OT-ORDER-INTERLEAVED draws — each ADD tri needs a
+ * fresh snapshot of the color attachment (glCopyTexSubImage2D ping-pong
+ * / VK staging+descriptor per draw) because the engine quantizes to
+ * 5-bit after every stacked add and interleaves nearer opaque quads
+ * that must cover it; plus a per-frame dynamic upload of the live water
+ * texture (not in the static texture array). Until a backend implements
+ * that, g_hw_cap_add_tex stays 0 and the FIRST RP_ADD_TEX quad makes
+ * hw_build_batch return 0 -> sh1_hw_render's existing silent fallback
+ * runs the full software render_frame (the accuracy source of truth) —
+ * pixel-identical, just slower (the same fallback class as the VK
+ * 8192-tri cap). A backend that gains the path sets g_hw_cap_add_tex=1
+ * and owns: the live-texture upload (tex/tw/th below), the layer
+ * mapping, and the segmented additive draw.
  * ========================================================================*/
 static int hw_build_batch(Frame *fb, const Renderer *R, const CamPose *cam) {
     const Scene *sc = R->sc;
@@ -981,13 +1026,70 @@ static int hw_build_batch(Frame *fb, const Renderer *R, const CamPose *cam) {
             }
             continue;
         }
+        /* kind 0: one OT quad — draw ITS triangles (v13 per-tri culls kept
+         * verbatim: near-plane discard, far cull — now redundant for the
+         * per-quad far cull at entry creation, kept as a defensive guard —
+         * and index guards). The ORDER (this loop's sequence) is the
+         * engine's OT walk. v15: the raster pass follows the MATERIAL —
+         * OPAQUE quads write the flake-occlusion depth reference (the
+         * engine's non-STP prims); MASK/BLEND quads keep the per-texel
+         * 0x0000 hole rule and write no depth (the engine STP prim pair). */
         const DrawItem *it = &sc->item[post[bi].item];
         const MaterialInfo *m = &sc->mat[it->matIdx];
         if (m->texIdx < 0 || m->texIdx >= sc->texCount) continue;
         const TexInfo *t = &sc->tex[m->texIdx];
         if (t->w <= 0) continue;
         const uint8_t *tex = sc->texBlob + t->off;
-        const PassMode quadPass = (m->alphaMode == 0) ? RP_OPAQUE : RP_BLEND_TEX;
+        int tw = t->w, th = t->h;
+        int waterFloorEngine = 0;
+        if (m->waterLive) {
+            /* v33 (S20): the LIVE DR_WAVE tile — the engine's material
+             * redirect (func_8008E4EC rewrites the DWAVE material to
+             * tpage 13 x=832 at every chunk load) makes the water-floor
+             * prims sample the region func_8008E5B4 rewrites per frame
+             * (the 32x32 two-quad composite at (832,224)).
+             * v37 (W1-6): the ENGINE consumption is 4bpp NIBBLES through
+             * the ROOM's CLUT (0,0) — Material_FsImageApply's field_E=45
+             * (4bpp, ABR-1 ADDITIVE) + field_10=0 with the img0 window
+             * (u,v)=(0,0): the floor quads' PAGE-texel UVs (u 0..62,
+             * v 224..255) read the live patch as 4 texels per 15-bit
+             * halfword. fx_water_floor_rgba builds that 128x32 pattern;
+             * the UV remap below maps u_norm*256 = page_u onto pattern
+             * columns (u'=u*2) and v_norm*64-224 onto pattern rows
+             * (v'=v*2-7). GLBs without SH1X.waterFloor keep the legacy
+             * v33 RGB view. */
+            if (R->sc->sh1x.hasWaterFloorClut) {
+                fx_water_floor_rgba(&R->sc->sh1x);
+                tex = g_waterFloorTex;
+                tw = 128; th = 32;
+                waterFloorEngine = 1;
+            } else {
+                fx_water_live_rgba();
+                tex = g_waterLiveRGBA;
+                tw = th = 32;
+            }
+        }
+        /* v34: waterLive forces the ADDITIVE semi-trans pass (the runtime
+         * field_E=45 rewrite); everything else follows the ripper's
+         * alphaMode exactly as before.
+         * V41 C-5: MASK (alphaMode 1) gets its OWN pass value so the
+         * raster can write fb->z for its ta>0 texels (the engine's leaf
+         * GT4s are opaque ST-clear punch-through — see raster_tri);
+         * BLEND (alphaMode 2) stays RP_BLEND_TEX (no depth write). */
+        const PassMode quadPass = m->waterLive ? RP_ADD_TEX
+            : ((m->alphaMode == 0) ? RP_OPAQUE
+               : ((m->alphaMode == 1) ? RP_MASK_TEX : RP_BLEND_TEX));
+        /* WA2-4 SEAM (see the header comment): no backend implements the
+         * destination-reading additive pass yet — route the whole frame
+         * to the software renderer (pixel-exact) instead of pushing ADD
+         * quads the GPU would draw WRONG (as plain replacers). The build
+         * failure path is the existing silent fallback (same class as
+         * the VK 8192-tri cap): render_frame re-runs fx_water_floor_rgba
+         * (idempotent per frame) and paints the water engine-exact.    */
+        if (quadPass == RP_ADD_TEX && !g_hw_cap_add_tex) {
+            free(xv); free(post);
+            return 0;
+        }
         for (int ti = 0; ti < post[bi].ntri && post[bi].tri0 + ti * 3 + 2 < it->icount; ti++) {
             int k = post[bi].tri0 + ti * 3;
             uint32_t ia = sc->idxs[it->ibase + k], ib = sc->idxs[it->ibase + k + 1],
@@ -996,13 +1098,45 @@ static int hw_build_batch(Frame *fb, const Renderer *R, const CamPose *cam) {
                 ic >= (uint32_t)it->vcount) continue;
             RVert *a = xv + it->vbase + ia, *b = xv + it->vbase + ib, *c = xv + it->vbase + ic;
             if (a->z <= 0.05f || b->z <= 0.05f || c->z <= 0.05f) continue;
-            {
+            {   /* engine far cull: max vertex SZ (Q8) > field_1C -> drop
+                 * (per-quad at entry creation since v15; this per-tri guard
+                 * never fires for surviving entries — defensive only)      */
                 float zm = fmaxf(a->z, fmaxf(b->z, c->z));
                 if ((int)floorf(zm * 256.0f + 0.5f) > farCullQ8) continue;
             }
-            hw_push_tri(a, b, c, t->w, t->h, quadPass, &R->opts,
-                        R->opts.ps1, R->dither, R->enginePixScale,
-                        R->enginePixScaleY, m->texIdx);
+            /* STP textured prim: per-texel 0x0000 holes only (v14); fogged
+             * with the SAME engine formula as opaque prims (see raster_tri)
+             * + the additive fog veil ON TOP (engine semi-trans G4 after the
+             * textured quad in draw order). Holes stay truly transparent. */
+            if (waterFloorEngine) {
+                /* v37: the page-texel UV remap — the converter normalized
+                 * the quads' PAGE texel coords by the DR_WAVE image's
+                 * 256x64 (u_norm = u_page/256, v_norm = v_page/64), and
+                 * the floor samples the 128x32 pattern at (u_page,
+                 * v_page-224): u' = u_norm*256/128 = u*2, v' =
+                 * (v_norm*64-224)/32 = v*2-7. Both stay inside the pattern
+                 * (u 0..62 < 128; v 224..255 -> rows 0..31) — no wrap, the
+                 * GPU reads the page rows directly. */
+                if (getenv("FOGPOC_WFLDBG")) {
+                    static int cnt = 0;
+                    fprintf(stderr, "WFLDBG[%d] item=%d name=%s buf=%d vcol=(%d,%d,%d) z=%.2f\n",
+                            cnt, post[bi].item, it->name, it->buffer,
+                            a->vcol[0], a->vcol[1], a->vcol[2], a->z);
+                    cnt++;
+                }
+                RVert ra = *a, rb = *b, rc = *c;
+                ra.u = a->u * 2.0f;  ra.v = a->v * 2.0f - 7.0f;
+                rb.u = b->u * 2.0f;  rb.v = b->v * 2.0f - 7.0f;
+                rc.u = c->u * 2.0f;  rc.v = c->v * 2.0f - 7.0f;
+                hw_push_tri(&ra, &rb, &rc, tw, th, quadPass,
+                            &R->opts, R->opts.ps1, R->dither,
+                            R->enginePixScale, R->enginePixScaleY,
+                            m->texIdx);
+            } else {
+                hw_push_tri(a, b, c, tw, th, quadPass, &R->opts,
+                            R->opts.ps1, R->dither, R->enginePixScale,
+                            R->enginePixScaleY, m->texIdx);
+            }
             (void)tex;
         }
     }
