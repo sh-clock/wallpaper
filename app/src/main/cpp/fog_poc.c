@@ -11324,9 +11324,25 @@ static void fx_blit_water_quad(Frame *fb, const int sx[4], const int sy[4],
     if (mny < 0) mny = 0;
     if (mxx >= (int)fb->w) mxx = (int)fb->w - 1;
     if (mxy >= (int)fb->h) mxy = (int)fb->h - 1;
-    /* affine UV: (u0,v0)->corner0, (u1,v0)->corner1, (u0,v1)->corner2  */
-    double du = (double)(u1 - u0) / (double)(sx[1] - sx[0] + 0.0001);
-    double dv = (double)(v1 - v0) / (double)(sy[2] - sy[0] + 0.0001);
+    /* v41 (A-6): the affine UV solve for OBLIQUE quads — the v39
+     * school-water blits' (fx_blit_wsheet_ft4/gt4) parallelogram solve:
+     * the parametric (a, b) in P = P0 + a*(P1-P0) + b*(P2-P0), the
+     * PS1's own screen-space linear interpolation along the quad EDGES
+     * (a POLY_FT4 interpolates u along corner0->corner1 and v along
+     * corner0->corner2 whatever their screen orientation — the ripple
+     * setters, map5_s00.c:165-168/226-231, give the four corners
+     * independent UVs). The old solve took u from screen-x and v from
+     * screen-y (axis-aligned) — correct only when edge 0->1 is
+     * horizontal and 0->2 vertical; under the oblique sewer camera the
+     * +x edge (u) and the -z edge (v) project to arbitrary headings
+     * and the tile sheared. Same contract as before:
+     * (u0,v0)->corner0, (u1,v0)->corner1, (u0,v1)->corner2.          */
+    double ax1 = (double)sx[1] - sx[0], ay1 = (double)sy[1] - sy[0];
+    double ax2 = (double)sx[2] - sx[0], ay2 = (double)sy[2] - sy[0];
+    double det = ax1 * ay2 - ax2 * ay1;
+    if (fabs(det) < 1e-9) return;            /* degenerate quad          */
+    double ia =  ay2 / det, ib = -ax2 / det; /* inv [[ax1 ax2][ay1 ay2]] */
+    double ic = -ay1 / det, id2 =  ax1 / det;
     for (int py = mny; py <= mxy; py++) {
         for (int px = mnx; px <= mxx; px++) {
             double ax = px + 0.5, ay = py + 0.5;
@@ -11342,8 +11358,11 @@ static void fx_blit_water_quad(Frame *fb, const int sx[4], const int sy[4],
                 if (!(neg && pos)) inside = 1;
             }
             if (!inside) continue;
-            int u = u0 + (int)((ax - sx[0]) * du);
-            int v = v0 + (int)((ay - sy[0]) * dv);
+            double rx = ax - sx[0], ry = ay - sy[0];
+            double ua = ia * rx + ib * ry;   /* along edge 0->1 (u axis)  */
+            double vb = ic * rx + id2 * ry;  /* along edge 0->2 (v axis)  */
+            int u = u0 + (int)((u1 - u0) * ua);
+            int v = v0 + (int)((v1 - v0) * vb);
             if (u < 0 || u > 31 || v < 0 || v > 31) continue;
             size_t pi = (size_t)py * fb->w + px;
             if (depthM > 0.0f && fb->z && fb->z[pi] < depthM)
@@ -12059,12 +12078,16 @@ static void sh1x_water_fx_draw(Frame *fb, const Renderer *R,
             if ((R->env->cur.effectsInfo.flags[0] & SHENV_FLAG_FLASHLIGHT) &&
                 (R->env->cur.effectsInfo.flags[0] & SHENV_FLAG_DARKENV))
                 continue;
-            /* v37 (W1-4): the spawn + the per-GAME-FRAME t walk now run
-             * in the TICK discipline (sh1x_water_ripple_tick — the same
-             * fix class as the v34 scroll counter: map5_s00.c:94-99 walks
-             * per game frame; the old render-pass walk froze between
-             * shot frames). The draw only READS the state; unseeded =
-             * not drawn (engine-true: field_B == 0 until the init tick). */
+            /* v37 (W1-4): the per-GAME-FRAME t walk runs in the TICK
+             * discipline (sh1x_water_ripple_tick — the same fix class as
+             * the v34 scroll counter: map5_s00.c:94-99 walks per game
+             * frame; the old render-pass walk froze between shot
+             * frames). v41 (audit A-3): the SPAWN moved OUT of the tick
+             * to sh1x_water_ripple_spawn — the engine's func_800CB0D8
+             * runs from Map_WorldObjectsInit at MAP LOAD, before frame 1
+             * (map5_s00.c:1247-1250); the particles exist from load, so
+             * the draw gates alone decide. The draw only READS the
+             * state; unseeded = no driver-21 entry was loaded. */
             if (!a->seeded) continue;
             /* the 5x5 mesh (func_800CB25C:166-231): grid x -93.5 +
              * col*0.75, z 9.6 - row*0.75, y 0.5 (engine); 4x4 quads,
@@ -12081,7 +12104,20 @@ static void sh1x_water_fx_draw(Frame *fb, const Renderer *R,
              * particle's own value (field_B=0), NOT sprite 0's.     */
             int sel = a->wrSel[12];
             unsigned char tile[32][32][3];
-            if (sel == 2) memcpy(tile, g_waterTileRGB, sizeof(tile));
+            /* v41 (A-5): the lazy first-composite gate the two material
+             * views already run (fx_water_live_rgba / fx_water_floor_rgba)
+             * — g_waterTileRGB is static zero-init and ONLY
+             * fx_water_tile_update writes it, so an ungated sel-2 read
+             * before the first pass sampled BLACK (and the per-shot reset
+             * clears g_waterTileEverUpdated but NOT g_waterTileRGB — a
+             * multi-shot sel-2 read could sample the STALE previous-shot
+             * composite through this path while the material views
+             * recompute). Mirrors the material sites: composite(0).  */
+            if (sel == 2) {
+                if (!g_waterTileEverUpdated)
+                    fx_water_tile_update(0);
+                memcpy(tile, g_waterTileRGB, sizeof(tile));
+            }
             else fx_water_static_tile(sel, tile);
             int brt = (sh_light_query_pos(R->env, -376832, 2048, 33177) < 129)
                       ? 0 : 8;   /* Q12(-92.0)= -376832, Q12(0.5)=2048,
@@ -12091,6 +12127,7 @@ static void sh1x_water_fx_draw(Frame *fb, const Renderer *R,
                 for (int mj = 0; mj < 4; mj++) {
                     int sxq[4], syq[4], vis = 1;
                     float dsum = 0.0f;
+                    float d0 = 0.0f;   /* v41 (A-4): corner [i][j]'s depth */
                     /* grid corners (engine coords -> glTF)             */
                     float wx[4] = { -93.5f + mj * 0.75f, -93.5f + (mj + 1) * 0.75f,
                                     -93.5f + mj * 0.75f, -93.5f + (mj + 1) * 0.75f };
@@ -12104,23 +12141,29 @@ static void sh1x_water_fx_draw(Frame *fb, const Renderer *R,
                         float pz = view.m[2] * gx + view.m[6] * gy + view.m[10] * gz + view.m[14];
                         float d = -pz;
                         if (d <= 0.05f) { vis = 0; break; }
+                        if (k == 0) d0 = d;   /* sp78[i][j], the cull corner */
                         dsum += d;
                         float iv = 224.0f / d;      /* v40: NTSC 224 (gte_rtpt) */
                         sxq[k] = (int)(px * iv) + (int)(fb->w / 2);
                         syq[k] = (int)(py * iv) + (int)(fb->h / 2);
                     }
                     if (!vis) continue;
-                    /* v40 (audit B2): the engine's PER-QUAD culls
-                     * (map5_s00.c:203-211) the mesh loop was missing —
-                     * `if (sp78[i][j] <= 0 || (sp78[i][j] >> 3) >=
+                    /* v40 (audit B2) + v41 (A-4): the engine's PER-QUAD
+                     * culls (map5_s00.c:203-211) the mesh loop was missing
+                     * — `if (sp78[i][j] <= 0 || (sp78[i][j] >> 3) >=
                      * ORDERING_TABLE_SIZE) continue; if (ABS(sp10[i][j].vx)
                      * > 200 || ABS(sp10[i][j].vy) > 160) continue;` on the
                      * quad's FIRST projected corner (screen-centered px +
-                     * Q8 z, ORDERING_TABLE_SIZE = 2048, data.h:53).       */
+                     * Q8 z, ORDERING_TABLE_SIZE = 2048, data.h:53). v40
+                     * tested the 4-corner AVERAGE z here — the engine tests
+                     * sp78[i][j], the [i][j] corner's OWN Q8 z; the average
+                     * is only the OT-bucket value (line 232: (sp78[i][j]+
+                     * sp78[i+1][j]+sp78[i][j+1]+sp78[i+1][j+1])>>2 = the
+                     * blit's dsum*0.25 depth below).                       */
                     {
                         int m0x = sxq[0] - (int)(fb->w / 2);
                         int m0y = syq[0] - (int)(fb->h / 2);
-                        int mzQ8 = (int)(dsum * 0.25f * 256.0f);
+                        int mzQ8 = (int)(d0 * 256.0f);
                         if (mzQ8 <= 0 || (mzQ8 >> 3) >= 2048) continue;
                         if (m0x > 200 || m0x < -200 ||
                             m0y > 160 || m0y < -160) continue;
@@ -12147,7 +12190,13 @@ static void sh1x_water_fx_draw(Frame *fb, const Renderer *R,
             for (int q = 0; q < 12; q++) {
                 int st = a->wrSel[q];
                 unsigned char rtile[32][32][3];
-                if (st == 2) memcpy(rtile, g_waterTileRGB, sizeof(rtile));
+                /* v41 (A-5): the same lazy first-composite gate as the
+                 * mesh site above + the two material views.             */
+                if (st == 2) {
+                    if (!g_waterTileEverUpdated)
+                        fx_water_tile_update(0);
+                    memcpy(rtile, g_waterTileRGB, sizeof(rtile));
+                }
                 else fx_water_static_tile(st, rtile);
                 float sM = (float)a->wrT[q] * 1.5f / 4096.0f;
                 float ex = (float)a->wrX[q] / 4096.0f;
@@ -12212,15 +12261,67 @@ static void sh1x_water_fx_draw(Frame *fb, const Renderer *R,
     (void)sx;
 }
 
-/* v37 (W1-4): the water-ripple per-GAME-FRAME tick — the spawn
- * (func_800CB0D8 / Map_WorldObjectsInit, ONCE) + the t random-walk
- * (map5_s00.c:94-99: t += Rng_GenerateUInt(-32, 31), CLAMP 0..4095 per
- * GAME FRAME while the system draws — i.e. gated by the player position
- * AND the flashlight-darkness gate, exactly like the draw). Runs from the
- * same tick sites as fx_water_scroll_sync (the 30Hz discipline); the v32
- * render-pass walk froze between shot frames (the same defect class
- * the v34 scroll-counter fix resolved). W1-8: the Z spawn base =
- * Q12(7.35) = 30105 (the truncating TO_FIXED), not 30106. */
+/* v41 (audit A-3): the water-ripple SPAWN — func_800CB0D8 VERBATIM,
+ * which the engine calls from Map_WorldObjectsInit (map5_s00.c:1247-
+ * 1250) at MAP LOAD: UNCONDITIONALLY, before ANY per-frame consumer of
+ * the shared RNG stream. The v37 design (W1-4) nested these 49 draws
+ * (the mesh selector + 12 sprites x {x, z, t, sel}) inside
+ * sh1x_water_ripple_tick's GATED path, so a camera that never passed
+ * the player/darkness gates never consumed them (every LATER stream
+ * consumer — spinRng/rngWalk/lightFlicker/waterfall — sat 49 draws off
+ * the engine sequence), and when the gates DID pass the spawn ran
+ * AFTER that tick's other consumers (the fired-tick order is anims ->
+ * scroll -> ripple), inverting the engine's load-then-per-frame order.
+ * The gates gate ONLY the per-particle draw + t-walk in the engine
+ * (func_800CB25C:76-99); the spawn itself is a map-load call. Runs at
+ * the engine's own sites: scene load (the Map_WorldObjectsInit
+ * stand-in in main), the per-shot engine-fresh reset (a fresh process
+ * re-parses the map: the same 49 draws from the reset seed 1) and the
+ * R restart (the engine re-enters WorldObjectsInit on every room
+ * reload). W1-8: the Z spawn base = Q12(7.35) = 30105 (the truncating
+ * TO_FIXED), not 30106. */
+static void sh1x_water_ripple_spawn(Sh1x *sx) {
+    if (!sx) return;
+    for (int i = 0; i < sx->nAnims; i++) {
+        Sh1xPropAnim *a = &sx->anims[i];
+        if (a->driver != 21) continue;
+        a->seeded = 1;
+        /* v40 (A-F4, the maintainer's reimplementation — PR #4's hunk
+         * was rejected as incomplete: it added this draw but never
+         * updated the read site): func_800CB0D8 draws the MESH
+         * particle's OWN selector FIRST (map5_s00.c:31-35: field_B=0
+         * mesh, field_C.s_1.field_2 = Rng_GenerateInt(0,2)) BEFORE the
+         * 12 sprite spawns (:36-51). The old spawn drew only 48 of the
+         * 49 values and the mesh draw read wrSel[0] (sprite 0's
+         * selector) — every downstream RNG consumer sat one draw off
+         * the engine stream. Slot 12 holds the mesh's own selector
+         * (wrSel[16]). */
+        a->wrSel[12] = (int)(sh_rng_next() % 3);
+        for (int q = 0; q < 12; q++) {
+            a->wrX[q] = -379904 + (int)(sh_rng_next() % 6144);
+            /* Rng(Q12(-92.75), Q12(-91.25)-1) = the 1.5m box         */
+            a->wrZ[q] = 30105 + (int)(sh_rng_next() % 6144);
+            /* Rng(Q12(7.35), Q12(8.85)-1); Q12(7.35) = 30105          */
+            a->wrT[q] = (int)(sh_rng_next() % 4096);
+            a->wrSel[q] = (int)(sh_rng_next() % 3);
+        }
+        return;   /* one waterRipple entry per room GLB (one spawn set)  */
+    }
+}
+
+/* v37 (W1-4): the water-ripple per-GAME-FRAME t-walk tick — the t
+ * random-walk (map5_s00.c:94-99: t += Rng_GenerateUInt(-32, 31), CLAMP
+ * 0..4095 per GAME FRAME while the system draws — i.e. gated by the
+ * player position AND the flashlight-darkness gate, exactly like the
+ * draw: the walk lives inside the gated func_800CB25C, and only the
+ * field_B != 0 SPRITES walk — they exist only after the load-time
+ * spawn). Runs from the same tick sites as fx_water_scroll_sync (the
+ * 30Hz discipline); the v32 render-pass walk froze between shot
+ * frames (the same defect class the v34 scroll-counter fix resolved).
+ * v41 (audit A-3): the SPAWN itself moved to sh1x_water_ripple_spawn
+ * (map load / per-shot fresh / R restart — the engine's
+ * Map_WorldObjectsInit sites), so the shared stream order is
+ * spawn-at-load THEN per-frame consumers, exactly like the engine. */
 static void sh1x_water_ripple_tick(Sh1x *sx, const ShEnv *env,
                                     const CamPose *cam) {
     if (!sx || !env || !cam) return;
@@ -12236,28 +12337,11 @@ static void sh1x_water_ripple_tick(Sh1x *sx, const ShEnv *env,
         if ((env->cur.effectsInfo.flags[0] & SHENV_FLAG_FLASHLIGHT) &&
             (env->cur.effectsInfo.flags[0] & SHENV_FLAG_DARKENV))
             return;
-        if (!a->seeded) {
-            a->seeded = 1;
-            /* v40 (A-F4, the maintainer's reimplementation — PR #4's
-             * hunk was rejected as incomplete: it added this draw but
-             * never updated the read site): func_800CB0D8 draws the
-             * MESH particle's OWN selector FIRST (map5_s00.c:31-35:
-             * field_B=0 mesh, field_C.s_1.field_2 = Rng_GenerateInt
-             * (0,2)) BEFORE the 12 sprite spawns (:36-51). The old
-             * spawn drew only 48 of the 49 values and the mesh draw
-             * read wrSel[0] (sprite 0's selector) — every downstream
-             * RNG consumer sat one draw off the engine stream. Slot
-             * 12 holds the mesh's own selector (wrSel[16]). */
-            a->wrSel[12] = (int)(sh_rng_next() % 3);
-            for (int q = 0; q < 12; q++) {
-                a->wrX[q] = -379904 + (int)(sh_rng_next() % 6144);
-                /* Rng(Q12(-92.75), Q12(-91.25)-1) = the 1.5m box         */
-                a->wrZ[q] = 30105 + (int)(sh_rng_next() % 6144);
-                /* Rng(Q12(7.35), Q12(8.85)-1); Q12(7.35) = 30105          */
-                a->wrT[q] = (int)(sh_rng_next() % 4096);
-                a->wrSel[q] = (int)(sh_rng_next() % 3);
-            }
-        }
+        /* engine-true: no particles = no walk (func_800CB25C:95 tests
+         * field_B != 0 — the sprites exist only past the load-time
+         * spawn). Unseeded here = no driver-21 entry / a reset is
+         * pending its re-spawn. */
+        if (!a->seeded) return;
         /* the per-frame t walk (func_800CB25C:94-99)                    */
         for (int q = 0; q < 12; q++) {
             a->wrT[q] += (int)(sh_rng_next() & 63) - 32;
@@ -17256,6 +17340,16 @@ int main(int argc, char **argv) {
             printf("mapLink: %d neighbor room(s) merged (cliff continuation)\n",
                    nb);
     }
+    /* v41 (audit A-3): the map-load WorldObjectsInit stand-in — the
+     * engine's Map_WorldObjectsInit (map5_s00.c:1247-1250) calls
+     * func_800CB0D8 (the water-ripple spawn: 49 shared-RNG draws)
+     * UNCONDITIONALLY at map load, BEFORE the first frame's per-frame
+     * consumers. Placed after the neighbor merge so the assembled
+     * scene is complete; the helper takes the first driver-21 entry
+     * (one spawn set per room GLB, like the engine's one call per
+     * map). GLBs without a waterRipple anim consume NOTHING (the loop
+     * finds no driver-21 entry) — shipped rooms are unaffected. */
+    sh1x_water_ripple_spawn(&sc.sh1x);
     printf("GLB %s: %d draw items, %d verts, %d indices, %d textures, bounds "
            "(%.1f..%.1f, %.1f..%.1f, %.1f..%.1f) diag %.2f m\n",
            glbPath, sc.itemCount, sc.vertCount, sc.idxCount, sc.texCount,
@@ -18013,13 +18107,24 @@ int main(int argc, char **argv) {
         /* the per-shot GLOBALS the anim/water systems carry in-file (the
          * propAnim RNG stream, the D_800AFDAC water counter, the lazy
          * water-tile composite gate, the belt-scroll accumulator, the
-         * TV-flicker pad) — so shot i is bit-identical to the same
-         * `--shot t=T` run in a fresh process. */
+         * TV-flicker pad and the eased flare rate (v41-E2: shLensFlareDraw
+         * advances nowEffRate once per render, so shot i>0 started from
+         * shot i-1's smoothed rate)) — so shot i is bit-identical to the
+         * same `--shot t=T` run in a fresh process. */
         g_propRngSeed = 1u;
         g_flaresys.counter = 0;
+        g_flaresys.nowEffRate = 0;
         g_waterTileEverUpdated = 0;
         g_sh1xBeltScroll = 0;
         g_tvpaint_pad = 0;
+        /* v41 (audit A-3): re-run the map-load ripple spawn AFTER the
+         * seed reset — a fresh process consumed the 49 draws at scene
+         * load (the Map_WorldObjectsInit stand-in above), so shot i's
+         * engine-fresh state must land at the SAME stream position
+         * (post-parse) before the first tick's other consumers. The
+         * anims reset above restored seeded=0 (the animsFresh snapshot
+         * predates the load-time spawn). */
+        sh1x_water_ripple_spawn(&sc.sh1x);
         Playback P;
         memset(&P, 0, sizeof(P));
         P.t = 0; P.speed = 1.0;
