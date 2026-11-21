@@ -107,16 +107,35 @@ alongside the APK/source) and wires it INTO the app:
   boundary blend) and the Settings/Appearance displays resolve through
   them. `Sh1Camdat.Track/Model/Wallpaper` mirror the v13 fields.
 - **The in-app Camtrack editor (new menu):** Settings -> "Camtrack
-  editor" opens `CamtrackEditorActivity` — the FULL CamTrack v13 editor
-  in a WebView with the LIVE PREVIEW, fully OFFLINE (three.js r170 is
-  embedded in the editor's data-URL importmap; the page is served from
-  the APK assets through `shouldInterceptRequest`, no network, no
-  file-access policy dependence). The `window.AndroidBridge` JS
-  interface serves the wallpaper's own camdat.json + model GLBs
-  (filesDir first, bundled assets next), boots the preview lens on the
-  wallpaper's CURRENT daylight phase (`isDaytimeNow`), and **Save to
-  wallpaper** validates + atomically writes `filesDir/sh1/camdat.json`
-  and restarts the engine through its own `requestSceneRestart` path.
+  editor" opens `CamtrackEditorActivity` — the NATIVE Camtrack editor
+  (v9.7): a full functional replica of the CamTrack v13 HTML editor
+  built from Material 3 Expressive components (Views + Material
+  Components 1.13, the app's own MD3 theme). NO WebView: every field of
+  the camdat (model env day/night presets, per-track env/weather
+  overrides, all 8 track types' path/look fields, keyframe coordinates,
+  loop modes) is edited with native MD3 controls — bottom sheets for
+  property editing, a drag-reorderable track list, MD3 sliders for
+  numerical input, a bottom navigation bar for the TRACKS / PATH /
+  WORLD / MODELS destinations. **The live preview is the wallpaper
+  engine itself** — the actual software rasterizer (libsh1.so) renders
+  into the activity's SurfaceView through the per-engine
+  surface-binding table (newest-live-wins), driven by the editor-session
+  API in `Sh1WallpaperService` (all engine lifecycle mutations stay
+  serialized on the service's single executor). Scrubbing seeks the
+  engine with the v13 editor's exact-pose-on-seek rule; play/pause and
+  rate ride the engine's own K_SPACE / K_PLUS fields; track switches
+  and committed edits re-boot the preview through the engine's own argv
+  path (the camdat on disk), debounced ~600 ms after the last edit.
+  Weather changes preview through the ENGINE's authentic runtime
+  transition (the 512-tick D0B18 sine cross-fade — never
+  short-circuited); env preset changes apply instantly through the
+  engine's own Gfx_MapEnvSet mode path; the Day/Night phase lens is
+  session-only and never serialized (the v13 rule). The data layer is
+  `CamtrackDoc`: the parse mirrors the engine's camdat parser and the
+  serialization is byte-compatible with the v13 editor's export
+  (unit-proven), and **Save to wallpaper** validates + atomically
+  writes `filesDir/sh1/camdat.json` and restarts the engine through its
+  own `requestSceneRestart` path.
 - **Back-button fix (three-button navigation):** the LWP settings
   activity (`SettingsActivity`, inherited from upstream Doodle) had no
   task isolation — launched by the system wallpaper picker with
