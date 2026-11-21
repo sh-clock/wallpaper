@@ -13642,10 +13642,34 @@ static int tim_load(TimImage *t, const char *path) {
     if (!bpp) { free(d); return 0; }
     size_t p = 8;
     if (hasClut) {
+        /* v41 audit (E-5): every block is validated against the file length
+         * BEFORE its header/data is read — previously `len < 8` was the ONLY
+         * check: a crafted ~40-byte --tim-file with blen=0/cw=65535 made the
+         * CLUT loop read ~2 MB past the buffer (verified SIGSEGV exit 139);
+         * pw=ph=65535 malloc'd ~8.6 GB, NULL'd and crashed on the first
+         * index write; a merely truncated TIM OOB-read its way to a garbage
+         * PNG. Malformed files are rejected loudly (the camdat loader's
+         * "camdat %s: ..." stderr convention); the caller prints "cannot
+         * load TIM %s" and exits 1. Valid TIMs — blen == 12+2*cw*ch, pixel
+         * block 12+2*pw*ph bytes fully present — load byte-identically. */
+        if ((size_t)len < p + 12) {
+            fprintf(stderr, "tim %s: truncated CLUT block header\n", path);
+            free(d); return 0;
+        }
         uint32_t blen; memcpy(&blen, d + p, 4);
         uint16_t cx, cy, cw, ch;
         memcpy(&cx, d + p + 4, 2); memcpy(&cy, d + p + 6, 2);
         memcpy(&cw, d + p + 8, 2); memcpy(&ch, d + p + 10, 2);
+        if ((uint64_t)blen < 12ull + 2ull * cw * ch) {
+            fprintf(stderr, "tim %s: CLUT block (%u bytes) shorter than its %ux%u palette table\n",
+                    path, blen, cw, ch);
+            free(d); return 0;
+        }
+        if ((uint64_t)p + blen > (uint64_t)len) {
+            fprintf(stderr, "tim %s: CLUT block (%u bytes) exceeds file length (%ld)\n",
+                    path, blen, len);
+            free(d); return 0;
+        }
         t->clutCount = ch;
         if (ch > 16) ch = t->clutCount = 16;
         for (int r = 0; r < ch; r++)
@@ -13653,13 +13677,45 @@ static int tim_load(TimImage *t, const char *path) {
                 memcpy(&t->clut[r][c], d + p + 12 + (size_t)(r * cw + c) * 2, 2);
         p += blen;
     }
+    if ((size_t)len < p + 12) {
+        fprintf(stderr, "tim %s: truncated pixel block header\n", path);
+        free(d); return 0;
+    }
     uint32_t plen; memcpy(&plen, d + p, 4);
     uint16_t px, py, pw, ph;
     memcpy(&px, d + p + 4, 2); memcpy(&py, d + p + 6, 2);
     memcpy(&pw, d + p + 8, 2); memcpy(&ph, d + p + 10, 2);
     t->w = pw * (bpp == 4 ? 4 : 2);
     t->h = ph;
+    /* v41 gate reimplement (E-5 residual, GATE-B probe evil_ph0big): a
+     * crafted ph=0/pw=65535+CLUT TIM passed every branch check
+     * (2*pw*ph=0<=len, w*h=0<=64M, malloc(0) non-NULL) and reached the
+     * decode with a ZERO-byte allocation — blit_tim then read up to
+     * 262,139 bytes past it (ASan-proven heap-buffer-overflow). A pixel
+     * block with no pixels is malformed: reject loudly. */
+    if (!t->w || !t->h) {
+        fprintf(stderr, "tim %s: zero pixel dimensions\n", path);
+        free(d); return 0;
+    }
+    /* the decode loop below reads exactly 12 + 2*pw*ph bytes (one u16 per
+     * halfword column x row) — plen stays advisory-only; what must fit is
+     * the data actually read */
+    if ((uint64_t)p + 12 + 2ull * pw * ph > (uint64_t)len) {
+        fprintf(stderr, "tim %s: pixel block (%ux%u) exceeds file length (%ld)\n",
+                path, pw, ph, len);
+        free(d); return 0;
+    }
+    if ((size_t)t->w * (size_t)t->h > 64u * 1024u * 1024u) {
+        fprintf(stderr, "tim %s: unreasonable pixel dimensions %dx%d\n",
+                path, t->w, t->h);
+        free(d); return 0;
+    }
     t->indices = (uint8_t *)malloc((size_t)t->w * t->h);
+    if (!t->indices && t->w && t->h) {
+        fprintf(stderr, "tim %s: out of memory for %dx%d indices\n",
+                path, t->w, t->h);
+        free(d); return 0;
+    }
     for (int y = 0; y < t->h; y++) {
         for (int x = 0; x < t->w; x++) {
             size_t bit = (size_t)y * pw * 2 + (size_t)(x / (bpp == 4 ? 4 : 2)) * 2;
