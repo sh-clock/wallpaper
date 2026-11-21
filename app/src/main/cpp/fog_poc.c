@@ -1786,7 +1786,17 @@ static void sh1x_load(Sh1x *sx, const JValue *json) {
             sx->hasWaterFloorClut = 1;
             for (int k = 0; k < 16; k++) {
                 const JValue *cv = jat(cl, k);
-                if (cv) sx->waterFloorClut[k] = (unsigned short)((int)cv->num & 0x7FFF);
+                /* v40 audit (D-F2): keep the FULL 16 bits — the ripper
+                 * emits the CLUT entry VERBATIM (& 0xFFFF, ipd2gltf.py
+                 * _room_water_floor) and the consumer's own floor builder
+                 * (g_waterFloorTex alpha classes) reads c & 0x8000 to
+                 * pick ABR-1 additive (alpha 255) vs opaque (alpha 127).
+                 * The old & 0x7FFF destroyed the STP bit, so every
+                 * STP-set palette entry (DR0100/DRFD00: ALL 16 entries,
+                 * e.g. 0x8421) classified as opaque-replace — the
+                 * engine's func_8008E4EC field_E=45 ABR-1 ADDITIVE
+                 * floor rendered wrong. */
+                if (cv) sx->waterFloorClut[k] = (unsigned short)((int)cv->num & 0xFFFF);
             }
         }
     }
@@ -2008,6 +2018,12 @@ static void sh1x_load(Sh1x *sx, const JValue *json) {
                                            w->width / 4096.0) * 4096.0);
                     w->tileLen = (int)(jnum(s, "tileLen",
                                              w->tileLen / 4096.0) * 4096.0);
+                    /* v40 audit (B-B9): an authored 0 hangs the surface
+                     * scroll `while (wfScroll >= tileLen) -=` loop (the
+                     * v39-A5 segmentCount clamp's adjacent zero — the
+                     * engine's own field_44 is never 0 in real data,
+                     * water.c:704-707). Clamp at parse, the A5 pattern. */
+                    if (w->tileLen < 1) w->tileLen = 1;
                     w->scrollSpd = (int)(jnum(s, "scrollSpeed",
                                               w->scrollSpd / 4096.0)
                                          * 4096.0);
@@ -5616,12 +5632,13 @@ static void sh_env_update_pose(ShEnv *env, v3 camPos, Quat camQ) {
          * — v27.2 (B-3): g_SysWork.lightIntensity is the lightFlicker
          * value when the boiler-room driver is LIVE (map1_s05.c:395:
          * g_SysWork.lightIntensity = Q12(1.35) + flicker; engine-fresh
-         * the driver is flag-129-gated and the multiplier stays 1.0). */
-        {
-            int flickerQ12 = (int)(g_sh1xLightFlicker * 4096.0f);
-            env->light.intensity =
-                (int)(((int64_t)lightWeight * flickerQ12) >> 12);
-        }
+         * the driver is flag-129-gated and the multiplier stays 1.0).
+         * v40 audit (C-F1): the multiply itself now lives BELOW the
+         * if/else — the decomp applies it for EVERY light mode
+         * (effects.c:476, unconditional), and the old placement here
+         * left the Spot/flashlight branch (the boiler room's own
+         * lightMode) without the flicker. */
+        env->light.intensity = lightWeight;
     } else {
     /* T7 (v35): the AUTHORED beam — sh_light_dir_from_rot (the verbatim
      * func_8003F4DC rot math) over the authored rot (CLI --userlightrot /
@@ -5680,6 +5697,21 @@ static void sh_env_update_pose(ShEnv *env, v3 camPos, Quat camQ) {
         L->pos[0] = (int)(camPos.x * 4096.0f);
         L->pos[1] = (int)(camPos.y * 4096.0f);
         L->pos[2] = (int)(camPos.z * 4096.0f);
+    }
+
+    /* v40 audit (C-F1): the decomp's ONE multiply site — effects.c:476
+     *   lightIntensity = Q12_MULT(<the mode's light weight>, g_SysWork.lightIntensity)
+     * runs for EVERY light mode (None/Spot/Directional), AFTER
+     * func_8003F4DC produced the mode's weight. The enum-2 branch sets
+     * env->light.intensity = lightWeight above; the flashlight/authored
+     * branch carries the preset spotLightIntensity — this single shared
+     * multiply covers both. g_sh1xLightFlicker is 1.0 unless the room
+     * drives the lightFlicker driver (map1_s05 boiler room), so rooms
+     * without the driver are bit-identical. */
+    {
+        int flickerQ12 = (int)(g_sh1xLightFlicker * 4096.0f);
+        env->light.intensity = (int)(((int64_t)env->light.intensity *
+                                      flickerQ12) >> 12);
     }
 
     /* WorldEnv_LightTransform (identity world matrix):
@@ -10323,8 +10355,17 @@ static void fx_water_glint_blit(Frame *fb, int px0, int py0,
             int tu = 64 + (int)(fu * 63.0);
             int tv = 31 - (int)(fv * 31.0);
             if (tu < 64 || tu > 127 || tv < 0 || tv > 31) continue;
-            unsigned idx = (unsigned)((g_drWaveIdx[tv][tu >> 1] >>
-                                       ((tu & 1) * 4)) & 0xF);
+            /* v40 audit (A-F1): g_drWaveIdx is the UNPACKED byte-per-texel
+             * sheet (dr_wave_data.h: [64][128], one palette index per
+             * texel — every other consumer indexes [y][x] directly, e.g.
+             * fx_water_tile_update / fx_water_static_tile). The old
+             * packed-nibble fetch [tv][tu>>1] >> ((tu&1)*4) read the WRONG
+             * half of the sheet (columns pair-packed) and forced index 0
+             * on odd columns — the glint sampled garbage. Verbatim
+             * reference: the FT4's u0..u3 = 64..127 window (lens_flare.c
+             * shLensFlareExec, the glint quad) reads the sheet's right
+             * half — one index per texel. */
+            unsigned idx = (unsigned)(g_drWaveIdx[tv][tu] & 0xFu);
             unsigned short tc = g_drWaveClut[1][idx];
             uint8_t *p = fb->rgb + pi * 3;
             int Fr = ((int)(tc & 31u) * r0) >> 7;
@@ -11787,7 +11828,16 @@ static void sh1x_school_water_draw(Frame *fb, const Renderer *R,
                 f180 = (int)(((int64_t)tv * f180) >> 12);
             }
         }
-        if (idx0 > 0 && a->wfSeg[idx0 - 1].horiz) {
+        /* v40 audit (A-F6): the backward-neighbor taper lives INSIDE the
+         * engine's horizontal branch (water.c:156 gates the whole path on
+         * field_30[idx0]==0; the taper :280-302 sits within it, and the
+         * vertical else :326-393 has NO tapers). The old condition gated
+         * only on the BACKWARD neighbor's horiz — a vertical current
+         * segment after a horizontal one leaked the taper into the
+         * droplet's brightness. Latent on shipped streams (map1_s02 is
+         * all-horizontal; map1_s03's vertical sits at idx 0) but live
+         * for authored mixed streams. */
+        if (idx0 > 0 && sg->horiz && a->wfSeg[idx0 - 1].horiz) {
             /* water.c:284-295 VERBATIM (audit v39-A2): the product < 0
              * branch SUBTRACTS the (negative) product and the else ADDS
              * — var_s1 = rampHalf + |product| in BOTH branches (the old
@@ -13364,7 +13414,20 @@ static CamPose playback_step(Playback *P, const CamTrack *tr, double dt,
         P->t += dt * P->speed;
         P->sessionT += dt * P->speed;   /* v10: monotonic — never wraps */
         if (isfinite(T) && T > 0) {
-            if (P->t >= T) P->t = fmod(P->t, T);   /* tickPlayback wrap */
+            /* v40 audit (B-B1): camtrack.html tickPlayback (:7315-7317)
+             * — `once` tracks STOP at the end pose and the player holds
+             * (setPlaying(false)); only loop/pingPong wrap. The old code
+             * wrapped `once` unconditionally, so every finite once-track
+             * replayed in an endless loop in the engine/wallpaper while
+             * the editor previewed a single pass — the format doc:
+             * "loopMode: loop wraps, pingPong mirrors at ends, once
+             * stops at end". Held at T, cam_phase01(once, u>=1) = 1 —
+             * the end pose, exactly the editor's hold. */
+            if (tr && tr->loopMode == LOOP_ONCE) {
+                if (P->t >= T) P->t = T;      /* once: stop at the end */
+            } else if (P->t >= T) {
+                P->t = fmod(P->t, T);          /* tickPlayback wrap     */
+            }
         }
         if (P->t < 0) P->t = 0;
     }
@@ -14108,9 +14171,19 @@ static void live_render(LiveApp *A) {
         snow_sync_live(&A->snow, A->play.t, cp.pos, cp.forward,
                        A->track, A->ovr.useFixed ? &A->ovr : NULL);
     sh_env_sync_live(&A->env, A->play.t, cp.pos, cp.q, 0);
-    sh1x_anims_sync((Sh1x *)&A->R.sc->sh1x, A->play.sessionT); /* v38 */
-    fx_water_scroll_sync(&A->R.sc->sh1x, &A->env, &cp); /* v34: scroll per tick */
-    sh1x_water_ripple_tick((Sh1x *)&A->R.sc->sh1x, &A->env, &cp); /* v37: the ripple walk per tick */
+    sh1x_anims_sync((Sh1x *)&A->R.sc->sh1x, A->play.sessionT); /* v38: session clock —
+     * dt=0 at the held sessionT: a no-op state hold (same discipline as the
+     * live_advance boot prime) */
+    /* v40 audit (C-F3): the WATER pair is NOT called here. live_render's
+     * only caller is live_save_final, which runs AFTER the loop's last
+     * fired tick already ran fx_water_scroll_sync + sh1x_water_ripple_tick
+     * at this exact session time — the v38-audit-A2 rule (fog_poc.c
+     * live_advance, the boot-prime comment): calling them again here
+     * double-advanced the D_800AFDAC scroll counter and the ripple RNG
+     * walk, so `--benchmark --save-final` was NOT bit-identical to
+     * `--shot t=DURATION` on water-zone rooms (the documented contract;
+     * V-c repro: a crafted waterLive GLB differed on 33.35% of pixels).
+     * The waterfall tick stays: it is sessionT-gated (dt=0 = no-op). */
     sh1x_waterfall_tick((Sh1x *)&A->R.sc->sh1x, &cp,
                         A->play.sessionT); /* v39: the school water per tick */
     render_frame(&A->fb, &A->R, &cp);
@@ -16631,7 +16704,16 @@ int main(int argc, char **argv) {
             const char *cm = strchr(argv[i], ',');
             if (cm) timPalette = atoi(cm + 1);
         }
-        else if (!strcmp(a, "--t") && i + 1 < argc) tStart = atof(argv[++i]);
+        else if (!strcmp(a, "--t") && i + 1 < argc) {
+            tStart = atof(argv[++i]);
+            /* v40 audit (E-F1): NaN/Inf --t poisoned the session clock
+             * (UBSAN signed-overflow cascade in the Q12 math; --t nan
+             * hangs the realtime window — V-c repro). Reject like
+             * --window-size does. */
+            if (!isfinite(tStart)) {
+                fprintf(stderr, "bad --t (not a finite number)\n"); return 1;
+            }
+        }
         else if (!strcmp(a, "--cam") && i + 7 < argc) {
             ovr.useFixed = 1;
             ovr.eye.x = (float)atof(argv[++i]); ovr.eye.y = (float)atof(argv[++i]);
@@ -16639,6 +16721,17 @@ int main(int argc, char **argv) {
             ovr.target.x = (float)atof(argv[++i]); ovr.target.y = (float)atof(argv[++i]);
             ovr.target.z = (float)atof(argv[++i]);
             if (i + 1 < argc && (isdigit((unsigned char)argv[i + 1][0]) || argv[i + 1][0] == '.')) ovr.fovDeg = (float)atof(argv[++i]);
+            /* v40 audit (E-F1): NaN/Inf coordinates cast to int are UB
+             * (NaN->INT_MIN feeding the Q12 pipeline — 8 UBSAN reports,
+             * the flat 730-byte frame presented as a valid render).
+             * Reject non-finite camera args with a clean error. */
+            if (!isfinite(ovr.eye.x) || !isfinite(ovr.eye.y) ||
+                !isfinite(ovr.eye.z) || !isfinite(ovr.target.x) ||
+                !isfinite(ovr.target.y) || !isfinite(ovr.target.z) ||
+                !isfinite(ovr.fovDeg)) {
+                fprintf(stderr, "bad --cam (all values must be finite)\n");
+                return 1;
+            }
         }
         else if (!strcmp(a, "--shot") && i + 1 < argc) {
             /* --shot t=12.5,file=name.png */
@@ -16648,6 +16741,10 @@ int main(int argc, char **argv) {
             const char *c2 = strstr(s, "file=");
             if (c1) tt = atof(c1 + 2);
             if (c2) snprintf(fn, sizeof(fn), "%s", c2 + 5);
+            if (c1 && !isfinite(tt)) {   /* v40 audit (E-F1) */
+                fprintf(stderr, "bad --shot t= (not a finite number)\n");
+                return 1;
+            }
             if (!fn[0]) snprintf(fn, sizeof(fn), "shot_%08.2f.png", tt);
             if (nShots < 64) { shots[nShots].t = tt; strcpy(shots[nShots].file, fn); nShots++; }
         }
@@ -16671,7 +16768,16 @@ int main(int argc, char **argv) {
             }
             camDumpPath = cdBuf;
         }
-        else if (!strcmp(a, "--track") && i + 1 < argc) trackSel = atoi(argv[++i]);
+        else if (!strcmp(a, "--track") && i + 1 < argc) {
+            trackSel = atoi(argv[++i]);
+            /* v40 audit (E-F3): -1 is the internal "absent" sentinel,
+            * so `--track -1` silently fell back to track 0 (identical
+            * render, no warning) while 999999 errors out. Reject
+            * negatives like the out-of-range case does. */
+            if (trackSel < 0) {
+                fprintf(stderr, "bad --track (must be >= 0)\n"); return 1;
+            }
+        }
         /* v33.8-WP (v10_7 graft): the --hw gles|vk backend flag
          * (Android/HW builds only; desktop ignores) */
 #if defined(__ANDROID__) && defined(SH1_HW_RENDER)
@@ -17725,6 +17831,17 @@ int main(int argc, char **argv) {
          * below in this loop in THIS engine's ordering; the scene lives
          * in sc — the same object R.sc aliases.) */
         sh1x_anims_reset(&sc.sh1x);
+        /* v40 audit (C-F2): multi-shot must ALSO invalidate the driver
+         * bind — the R-restart path does (v38-audit-A1: driver 9
+         * gravityScatter seeds its per-instance liveVy/liveVz/scatter
+         * rolls inside sh1x_anims_bind, which ran once per scene via the
+         * boundFor guard; restoring animsFresh without re-binding left
+         * driver 9 reading ZERO live state — the beans teleport to the
+         * room origin on shot 2+. V-c repro: a crafted gravityScatter
+         * GLB, multi-shot (t=2,t=6) t=6 frame != solo t=6; equal with
+         * this call. Shipped GLBs have no gravityScatter driver (the
+         * defect is latent there) — goldens unchanged. */
+        sh1x_anims_bind_invalidate();
         /* the per-shot GLOBALS the anim/water systems carry in-file (the
          * propAnim RNG stream, the D_800AFDAC water counter, the lazy
          * water-tile composite gate, the belt-scroll accumulator, the
