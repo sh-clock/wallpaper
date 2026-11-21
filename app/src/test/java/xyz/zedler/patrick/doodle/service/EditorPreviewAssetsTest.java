@@ -71,6 +71,16 @@ public class EditorPreviewAssetsTest {
       sizes[i] = f.length();
     }
 
+    // v41 (F-2): the DYNAMIC copy must reach the FULL bundled corpus,
+    // not just the old static 4-file array — the school-water scene
+    // SUFFFE.glb was unreachable on device before the restore (43/44
+    // scene cards disabled: the picker gates on this data dir).
+    File sufffe = new File(dir, "SUFFFE.glb");
+    assertTrue("dynamic corpus missing SUFFFE.glb (F-2 regression)",
+        sufffe.isFile());
+    assertTrue("SUFFFE.glb copied empty", sufffe.length() > 0);
+    long sufffeSize = sufffe.length();
+
     // the idempotent second call (the updateEditorPreview path) must not
     // rewrite or drop anything
     Sh1WallpaperService.copyAssetsIfNeeded(context);
@@ -78,6 +88,8 @@ public class EditorPreviewAssetsTest {
       assertEquals("file rewritten on the idempotent path: " + ASSETS[i],
           sizes[i], new File(dir, ASSETS[i]).length());
     }
+    assertEquals("SUFFFE.glb rewritten on the idempotent path",
+        sufffeSize, sufffe.length());
 
     // the copied camdat is the real v13 document the editor edits
     File camdat = new File(dir, "camdat.json");
