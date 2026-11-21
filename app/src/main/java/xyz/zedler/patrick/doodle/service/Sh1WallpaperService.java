@@ -301,6 +301,38 @@ public class Sh1WallpaperService extends WallpaperService {
       // v11.0 (aim 7): DYNAMIC corpus — every file currently bundled in
       // assets/sh1 (GLBs, the IPD/PLM, camdat.json); no hardcoded array
       String[] assets = listSceneAssets(context);
+      // V42 E-1 (the GATE form: version-keyed refresh + the user-data
+      // guard): APK updates CHANGE bundled assets (the v1.7.0 night-only
+      // camdat re-derivation, the v1.8.0 DR01FE drop-in) — the old
+      // exists()-only check left upgraders on stale data-dir copies
+      // forever (new files copied, CHANGED files never refreshed).
+      // The refresh is keyed on versionCode (the deprecated int field is
+      // used deliberately: minSdk 23, getLongVersionCode needs 28; the CI
+      // bumps versionCode on every releasable change including
+      // asset-only PATCH bumps). A .asset_hashes manifest (per-file
+      // SHA-256, MessageDigest — the platform's own) records what WE
+      // copied; on refresh, a data-dir file whose hash still matches the
+      // manifest is OUR unmodified copy -> refresh it from the APK; a
+      // file whose hash differs is USER data (the Camtrack editor
+      // persists its doc to this exact camdat.json path) -> PRESERVED,
+      // never clobbered. The one-time no-manifest transition (upgraders
+      // from a pre-guard build) backs up a differing camdat.json to
+      // camdat.user.bak before refreshing it (recovery), and refreshes
+      // the binary corpus (GLBs are never user-editable surfaces).
+      long currentVersion = -1L;
+      try {
+        currentVersion = context.getPackageManager()
+            .getPackageInfo(context.getPackageName(), 0).versionCode;
+      } catch (Exception e) {
+        Log.w(TAG, "asset copy: versionCode read failed", e);
+      }
+      File versionMarker = new File(dst, ".asset_version");
+      File hashManifest = new File(dst, ".asset_hashes");
+      long copiedVersion = readVersionMarker(versionMarker);
+      boolean versionKnown = currentVersion > 0;
+      boolean refreshAll = versionKnown && currentVersion != copiedVersion;
+      java.util.Map<String, String> hashes =
+          refreshAll ? readHashManifest(hashManifest) : java.util.Collections.emptyMap();
       boolean missing = false;
       for (String f : assets) {
         if (!new File(dst, f).exists()) {
@@ -308,7 +340,7 @@ public class Sh1WallpaperService extends WallpaperService {
           break;
         }
       }
-      if (!missing) {
+      if (!missing && !refreshAll) {
         sAssetsReady = true;
         return;
       }
@@ -316,9 +348,33 @@ public class Sh1WallpaperService extends WallpaperService {
         Log.e(TAG, "asset copy: cannot create " + dst);
         return;
       }
+      // the no-manifest transition: preserve a recovery copy of a
+      // user-touched camdat before the one-time full refresh
+      if (refreshAll && hashes.isEmpty()) {
+        preserveUserCamdat(context, dst);
+      }
+      java.util.Map<String, String> newHashes = new java.util.HashMap<>();
       for (String f : assets) {
         File out = new File(dst, f);
-        if (out.exists()) {
+        boolean refresh = false;
+        if (!out.exists()) {
+          refresh = true;                       // missing -> copy
+        } else if (refreshAll) {
+          String recorded = hashes.get(f);
+          if (recorded == null) {
+            refresh = true;                     // no manifest record (the
+                                                // transition) -> refresh
+          } else {
+            String onDisk = sha256Hex(out);
+            if (onDisk.equals(recorded)) {
+              refresh = true;                   // OUR unmodified copy
+            } else {
+              Log.i(TAG, "asset refresh: keeping user-modified " + f);
+            }
+          }
+        }
+        if (!refresh) {
+          newHashes.put(f, sha256Hex(out));     // keep tracking user data
           continue;
         }
         try (InputStream in = context.getAssets().open("sh1/" + f);
@@ -333,8 +389,114 @@ public class Sh1WallpaperService extends WallpaperService {
           return;   // v10.6: NEVER throw here — the watchdog degrades to
                     // the bundled scene; a boot-time crash dialog is worse
         }
+        newHashes.put(f, sha256Hex(out));
       }
+      if (versionKnown) {
+        writeVersionMarker(versionMarker, currentVersion);
+      }
+      writeHashManifest(hashManifest, newHashes);
       sAssetsReady = true;
+    }
+  }
+
+  /** V42 E-1: the versionCode of the last successful copy (8 bytes LE). */
+  private static long readVersionMarker(File marker) {
+    try (java.io.DataInputStream mi = new java.io.DataInputStream(
+        new java.io.FileInputStream(marker))) {
+      return mi.readLong();
+    } catch (Exception ignored) {
+      return -1L;
+    }
+  }
+
+  private static void writeVersionMarker(File marker, long version) {
+    try (java.io.DataOutputStream mo = new java.io.DataOutputStream(
+        new java.io.FileOutputStream(marker))) {
+      mo.writeLong(version);
+    } catch (Exception e) {
+      Log.w(TAG, "asset copy: version marker write failed", e);
+    }
+  }
+
+  /** V42 E-1: name -> sha256 hex of every file WE own in the data dir. */
+  private static java.util.Map<String, String> readHashManifest(File manifest) {
+    java.util.Map<String, String> out = new java.util.HashMap<>();
+    try (java.io.BufferedReader br = new java.io.BufferedReader(
+        new java.io.InputStreamReader(new java.io.FileInputStream(manifest), "UTF-8"))) {
+      String line;
+      while ((line = br.readLine()) != null) {
+        int eq = line.indexOf('=');
+        if (eq > 0 && line.length() > eq + 1) {
+          out.put(line.substring(0, eq), line.substring(eq + 1));
+        }
+      }
+    } catch (Exception ignored) {
+    }
+    return out;
+  }
+
+  private static void writeHashManifest(File manifest,
+      java.util.Map<String, String> hashes) {
+    try (java.io.PrintWriter pw = new java.io.PrintWriter(
+        new java.io.OutputStreamWriter(new java.io.FileOutputStream(manifest), "UTF-8"))) {
+      for (java.util.Map.Entry<String, String> e : hashes.entrySet()) {
+        pw.println(e.getKey() + "=" + e.getValue());
+      }
+    } catch (Exception e) {
+      // degraded mode: the next refresh treats unrecorded files as
+      // transition files — the user-data guard weakens to the backup
+      Log.w(TAG, "asset copy: hash manifest write failed (next refresh "
+          + "degrades to the transition form)", e);
+    }
+  }
+
+  private static String sha256Hex(File f) {
+    try (InputStream in = new java.io.FileInputStream(f)) {
+      java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+      byte[] buf = new byte[64 * 1024];
+      int n;
+      while ((n = in.read(buf)) > 0) {
+        md.update(buf, 0, n);
+      }
+      StringBuilder sb = new StringBuilder(64);
+      for (byte b : md.digest()) {
+        sb.append(Character.forDigit((b >> 4) & 0xF, 16))
+            .append(Character.forDigit(b & 0xF, 16));
+      }
+      return sb.toString();
+    } catch (Exception e) {
+      return "";
+    }
+  }
+
+  /** the one-time transition backup of a user-touched camdat.json */
+  private static void preserveUserCamdat(Context context, File dst) {
+    File camdat = new File(dst, "camdat.json");
+    if (!camdat.isFile()) {
+      return;
+    }
+    try (InputStream in = context.getAssets().open("sh1/camdat.json")) {
+      java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+      byte[] buf = new byte[64 * 1024];
+      int n;
+      while ((n = in.read(buf)) > 0) {
+        bos.write(buf, 0, n);
+      }
+      byte[] apk = bos.toByteArray();
+      byte[] disk = new byte[(int) camdat.length()];
+      try (java.io.DataInputStream di = new java.io.DataInputStream(
+          new java.io.FileInputStream(camdat))) {
+        di.readFully(disk);
+      }
+      if (!java.util.Arrays.equals(apk, disk)) {
+        File bak = new File(dst, "camdat.user.bak");
+        java.nio.file.Files.copy(camdat.toPath(), bak.toPath(),
+            java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        Log.i(TAG, "asset refresh (transition): user camdat.json differs "
+            + "from the shipped one — backed up to camdat.user.bak");
+      }
+    } catch (Exception e) {
+      Log.w(TAG, "asset refresh: the transition camdat backup failed", e);
     }
   }
 

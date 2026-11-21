@@ -123,10 +123,28 @@ jobs:
       - name: The all-animations suite - 25/25 families must animate
         run: python3 bench/anim_suite.py
 
+  # ---- the unit-test gate (S20-cont: the V42 E-1 review found the CI
+  # ran NO unit tests at all — assemble + smoke + anim-gate only). The
+  # Robolectric suite includes the asset-refresh upgrade path.
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: The Robolectric unit-test suite
+        run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
+
   # ---- build + smoke + release ---------------------------------------------
   build:
-    needs: [bump, anim-gate]
-    if: always() && (needs.anim-gate.result == 'success' || needs.anim-gate.result == 'skipped')
+    needs: [bump, anim-gate, unit-tests]
+    if: always() && (needs.anim-gate.result == 'success' || needs.anim-gate.result == 'skipped') && (needs.unit-tests.result == 'success' || needs.unit-tests.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (main carries the bump commit; tags use the tag)
