@@ -7459,7 +7459,7 @@ static inline void fb_put(Frame *fb, int x, int y, int r, int g, int b,
     p[0] = (uint8_t)r; p[1] = (uint8_t)g; p[2] = (uint8_t)b;
 }
 
-typedef enum { RP_OPAQUE, RP_BLEND_TEX, RP_ADD_TEX } PassMode;
+typedef enum { RP_OPAQUE, RP_BLEND_TEX, RP_ADD_TEX, RP_MASK_TEX } PassMode;
 
 /* texture sample: nearest, wrap (glTF sampler wrapS/T = REPEAT; the PS1
  * GPU has no linear filtering — engine-identical sampling).                 */
@@ -7726,8 +7726,17 @@ static void raster_tri(Frame *fb, const RVert *vA, const RVert *vB, const RVert 
             if (ta == 0) continue;   /* PSX 0x0000 hole (DuckStation: `texture_color == 0 -> return`) */
             /* v15: painter's algorithm — the opaque depth write is now
              * UNCONDITIONAL (last-drawn covering quad wins, exactly like
-             * the engine's OT paint-over); it never gates visibility.   */
-            if (pass == RP_OPAQUE) fb->z[pi] = z;   /* flake-occlusion ref */
+             * the engine's OT paint-over); it never gates visibility.
+             * V41 C-5: MASK (ST-clear punch-through leaf) prims write the
+             * depth reference TOO — the engine's leaf GT4s are OPAQUE
+             * (Gfx_BillboardDraw billboard.c:283 setPolyGT4, no
+             * setSemiTrans; only their 0x0000 texels are holes), so a
+             * ta>0 leaf texel COVERS the flare probe's 1x1 white TILE
+             * (shLensFlareLightCenterIsVisible reads it back non-white).
+             * BLEND semi-trans prims still write nothing (white + F
+             * saturates at 0x7FFF — they never cover the tile).        */
+            if (pass == RP_OPAQUE || pass == RP_MASK_TEX)
+                fb->z[pi] = z;   /* flake-occlusion ref */
             if (pass == RP_ADD_TEX && ta < 128) {
                 /* v37: the STP-CLEAR texel of a semi-trans prim — the PS1
                  * rule (DuckStation gpu_sw_rasterizer): the ABR blend
@@ -10398,8 +10407,13 @@ static void sh1x_anims_reset(Sh1x *sx) {
  * v 0..31 V-FLIPPED (u0=64,v0=31 / u1=64,v1=0 / u2=127,v2=31 / u3=127,v3=0),
  * quad = ±24 x ±48 ENGINE px around the projected mirrored-light point,
  * prim color r=sin>>6 g=(sin*7)>>9 b=(sin*5)>>9, OT bucket 641
- * (lens_flare.c:678) = zQ8 5000 -> 19.53 m — covered by any NEARER
- * opaque geometry. The blend: the PS1 semi-trans mode-1 FT4 =
+ * (lens_flare.c:678) = mesh-rule zQ8 [5128,5136) = [20.03125,
+ * 20.0625) m — covered by any NEARER opaque geometry (V41 C-3: the
+ * old "zQ8 5000 -> 19.53 m" inverted the RIPPLE rule (z+128)>>3
+ * (map5_s00.c:167) — the glint bucket competes against MESH geometry,
+ * whose insert rule is (maxSZ>>otShift)>>2 = SZ>>3 (otShift 1,
+ * bodyprog_80056D8C.c:855), so bucket 641 is the [20.03, 20.06) m
+ * band, not 19.53 m). The blend: the PS1 semi-trans mode-1 FT4 =
  * F5 = T5*C8 >> 7 (DuckStation (texture_color * vertex_color) >> 7)
  * then dst5 = B5 + F5 (clamped 31). (The v32 port was an untextured
  * AVERAGE-blend quad — half-strength and up to 5x over-bright at full
@@ -10419,9 +10433,16 @@ static void fx_water_glint_blit(Frame *fb, int px0, int py0,
     for (int yy = by0; yy < by1; yy++)
         for (int xx = bx0; xx < bx1; xx++) {
             size_t pi = (size_t)yy * fb->w + xx;
-            /* OT bucket 641 = zQ8 5000 -> 19.53125 m: occluded wherever
-             * the painter walk left NEARER opaque geometry (fb->z)      */
-            if (fb->z && fb->z[pi] < 19.53125f) continue;
+            /* OT bucket 641 = mesh-rule zQ8 [5128,5136) = [20.03125,
+             * 20.0625) m — occluded wherever
+             * the painter walk left NEARER opaque geometry (fb->z).
+             * V41 C-3: the exact gate is the bucket's FAR edge
+             * 642*8/256 = 20.0625 m — meshes AddPrim'd into the SAME
+             * bucket (before the glint, WorldGfx order objects ->
+             * chunks -> 2dEffects, draw.c:431-446) draw AFTER it and
+             * cover it too. The old 19.53125 was the ripple-rule
+             * inversion (641*8-128 = 5000).                         */
+            if (fb->z && fb->z[pi] < 20.0625f) continue;
             /* affine sprite UVs: x -> u 64..127, y -> v 31..0 (flipped)   */
             double fu = (double)(xx - x0) / (double)(x1 - x0);
             double fv = (double)(yy - y0) / (double)(y1 - y0);
@@ -10572,15 +10593,31 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
             scrLPos[1] = (int)(vy * invd);
             scrLPos[2] = (int)(d * 256.0f);          /* Q8-ish depth       */
             /* scr_l_ang_xy/z: angle between the eye->light ray and the
-             * light direction (lighting.c:203-238). The PoC light rides
-             * the camera (direction == view forward), so the angle is
-             * derived from the projected offset of the light DIRECTION
-             * endpoint: dir_end = pos + dir. Engine computes it in the
-             * light's own plane via OuterProduct; the PoC has the SAME
-             * vectors in view space, so the same math applies.         */
-            float dxv = (float)L->dir[0] * (1.0f / 4096.0f);
-            float dyv = (float)L->dir[1] * (1.0f / 4096.0f);
-            float dzv = (float)L->dir[2] * (1.0f / 4096.0f);
+             * light direction (lighting.c:203-238). V41 C-1: the ENGINE
+             * rotates the WORLD-space light DIRECTION into VIEW space
+             * FIRST — WorldEnvRender_LightScreenInfoGet's ApplyRotMatrix
+             * (lighting.c:228) applies the same world->view rotation it
+             * just used for the position (RotTrans, lighting.c:226;
+             * Vw_CoordToViewSpaceMatrix :223) — and only then feeds BOTH
+             * view-space vectors to WorldEnvRender_LightScreenAngleGet
+             * (:230). The old code fed the raw L->dir (stored WORLD-space
+             * by sh_env_update_pose for every mode) into view-space math:
+             * a mixed-frame angle that wandered with camera pose (the
+             * engine-true value is CONSTANT for a camera-mounted light —
+             * 82.01deg for the default anchor/beam, 27.1deg for the
+             * sewer/TV ahead-light; the mixed value swung 77.7..89.1deg /
+             * 27..175deg with yaw, wobbling the flare rate, the streak
+             * angles and the glint brightness). Rotate L->dir by the view
+             * rotation ROWS — the same rows that transform the position
+             * above, WITHOUT the translation (a direction has none).
+             * Mode 1's world-fixed dir needs the same rotation (the
+             * engine ApplyRotMatrix's it too).                           */
+            float dwx = (float)L->dir[0] * (1.0f / 4096.0f);
+            float dwy = (float)L->dir[1] * (1.0f / 4096.0f);
+            float dwz = (float)L->dir[2] * (1.0f / 4096.0f);
+            float dxv = view.m[0] * dwx + view.m[4] * dwy + view.m[8] * dwz;
+            float dyv = view.m[1] * dwx + view.m[5] * dwy + view.m[9] * dwz;
+            float dzv = view.m[2] * dwx + view.m[6] * dwy + view.m[10] * dwz;
             float ex = vx + dxv, ey = vy + dyv, ez = vz + dzv;
             float dex = ex - vx, dey = ey - vy, dez = ez - vz;
             /* normalize both view-space vectors                        */
@@ -10856,39 +10893,50 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
                             const int g3s2[3] = { 4, 8, 4 };     /* P1 */
                             /* g3[0] OPAQUE (C,P0,P1) (24,22,12) — UNDER */
                             /* v37 (W1-5): both ring pairs depth-gated at
-                             * their OT buckets — opaque pair 641 (zQ8 5000
-                             * = 19.53125 m), semi pair 639 (zQ8 4984 =
-                             * 19.46875 m): covered by NEARER opaque
-                             * geometry exactly like the engine's OT walk. */
+                             * their OT buckets — opaque pair 641, semi
+                             * pair 639. V41 C-3: the buckets are MESH-rule
+                             * (insert (maxSZ>>otShift)>>2 = SZ>>3, otShift
+                             * 1, bodyprog_80056D8C.c:855): bucket 641 =
+                             * zQ8 [5128,5136) = [20.03125, 20.0625) m,
+                             * bucket 639 = [5112,5120) = [19.96875,
+                             * 20.0) m. The old 19.53125/19.46875 pairs
+                             * inverted the RIPPLE rule (z+128)>>3
+                             * (map5_s00.c:167: 641*8-128 = 5000) — wrong
+                             * rule for constants competing against mesh
+                             * geometry. Exact gates = the far bucket edge
+                             * (same-bucket meshes cover too): 642*8/256 =
+                             * 20.0625 m and 640*8/256 = 20.0 m. Covered
+                             * by NEARER opaque geometry exactly like the
+                             * engine's OT walk. */
                             if (cVis)
                                 fx_blit_gouraud_tri(fb, cScx, cScy, g3o0,
                                                    sxp[0], syp[0], g4o1,
                                                    sxp[1], syp[1], g4o1, 0,
-                                                   19.53125f);
+                                                   20.0625f);
                             /* g4[0] OPAQUE (20,18,12)/(20,18,12)/(4,4,4)/(4,4,4) */
                             fx_blit_gouraud_tri(fb, sxp[0], syp[0], g4o0,
                                                sxp[1], syp[1], g4o1,
                                                sxp[2], syp[2], g4o2, 0,
-                                               19.53125f);
+                                               20.0625f);
                             fx_blit_gouraud_tri(fb, sxp[1], syp[1], g4o1,
                                                sxp[2], syp[2], g4o2,
                                                sxp[3], syp[3], g4o3, 0,
-                                               19.53125f);
+                                               20.0625f);
                             /* g3[1] SEMI (C,P0,P1) (8,8,4)/(4,8,4)/(4,8,4) — UNDER */
                             if (cVis)
                                 fx_blit_gouraud_tri(fb, cScx, cScy, g3s0,
                                                    sxp[0], syp[0], g3s1,
                                                    sxp[1], syp[1], g3s2, 1,
-                                                   19.46875f);
+                                                   20.0f);
                             /* g4[1] SEMI (4,8,4)/(4,8,4)/(0,0,0)/(0,0,0) */
                             fx_blit_gouraud_tri(fb, sxp[0], syp[0], g4s0,
                                                sxp[1], syp[1], g4s1,
                                                sxp[2], syp[2], g4s2, 1,
-                                               19.46875f);
+                                               20.0f);
                             fx_blit_gouraud_tri(fb, sxp[1], syp[1], g4s1,
                                                sxp[2], syp[2], g4s2,
                                                sxp[3], syp[3], g4s3, 1,
-                                               19.46875f);
+                                               20.0f);
                         }
                     }
                 }
@@ -10913,14 +10961,31 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
      * the light's screen center (pixels[0] & 0x7FFF) == 0x7FFF). PoC:
      * probe the depth buffer — visible iff NO opaque geometry closer
      * than the light depth at that pixel (fb->z < light depth = covered).
-     */
+     *
+     * V41 C-5: the engine draws the white TILE only when
+     * check_screen_bounds passes (lens_flare.c:99-104):
+     *   return ... && scr_l_pos->vz >= 0 &&
+     *          scr_l_ang_z >= Q12_ANGLE(75.0f);
+     * ang_z < 75deg -> NO tile is drawn -> the DR_MOVE at org[5] copies
+     * STALE VRAM scratch (rect 784,113, lens_flare.c:151-155) -> the
+     * readback is not 0x7FFF -> shLensFlareLightCenterIsVisible (:204-
+     * 222) reports NOT visible -> add_rate = -now -> the rate decays to
+     * 0 -> NO flare, at any distance/occlusion. The engine's vz >= 0
+     * term is subsumed by Gate 2 (vz > 112 Q8). MODELED: the PoC gate
+     * additionally requires scrLAngZ >= Q12_ANGLE(75deg) — the SAME
+     * bound shLensFlareMakeEffectTargetRate's ang_z_rate table starts at
+     * (Q12(75deg) = 853, fx_q12_angle truncation = the engine's
+     * Q12_ANGLE). Combined with C-1's view-space ang_z this makes the
+     * shipped sewer/TV ahead-light (engine-true 27.07deg < 75deg) show
+     * NO flare — engine-true (the tile is never drawn there).      */
     {
         int px = g_flaresys.scrLPos[0] + fb->w / 2;
         int py = g_flaresys.scrLPos[1] + fb->h / 2;
         int visible = 0;
         if (px >= 0 && px < (int)fb->w && py >= 0 && py < (int)fb->h) {
             float lightDepth = (float)g_flaresys.scrLPos[2] / 256.0f;
-            visible = fb->z[(size_t)py * fb->w + px] >= lightDepth;
+            visible = fb->z[(size_t)py * fb->w + px] >= lightDepth &&
+                      g_flaresys.scrLAngZ >= fx_q12_angle(75.0f);
         }
         g_flaresys.centerVisible = visible;
         /* rate easing (lens_flare.c:182-192): now += (tgt-now)/2 or ->0 */
@@ -13329,13 +13394,24 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
             int bucket = -1;
             if (!bad) {
                 if (ams == 1) {
-                    /* MASK: engine Gfx_BillboardDraw — CENTER-depth bucket */
+                    /* MASK: engine Gfx_BillboardDraw — CENTER-depth bucket.
+                     * V41 C-4: the engine far cull is STRICT '<' on the
+                     * Q8 depth with the low 2 bits CLEARED — billboard.c:
+                     *   263:  temp_v0_2 = RotTransPers(...);   // OTZ = SZ>>2
+                     *   264:  temp_a0   = temp_v0_2 << 2;     // = SZ & ~3
+                     *   266:  if (temp_v0_2 > 32 && temp_a0 < sp494)
+                     * sp494 = farCullQ8 (MIN(0x79C<<3, fog far)). The old
+                     * `cq8 <= farCullQ8` kept a quad whose center sits
+                     * EXACTLY on the far-cull plane (equality passes) and,
+                     * because farCullQ8 is always a multiple of 4 in
+                     * practice (0x79C<<3; fog far = Q12>>4), the & ~3 is
+                     * exact: (cq8 & ~3) < farCullQ8 is verbatim.          */
                     float cz = 0.0f;
                     for (int q = 0; q < nv; q++) cz += xv[it->vbase + vi[q]].z;
                     cz /= (float)nv;
                     int cq8 = (int)floorf(cz * 256.0f + 0.5f);
                     int cq6 = cq8 >> 2;                 /* Q8 -> Q6 (Q6>>1 == Q8>>3) */
-                    if (cq6 > 32 && cq8 <= farCullQ8)   /* engine gates: >32, far cull */
+                    if (cq6 > 32 && (cq8 & ~3) < farCullQ8) /* engine: >32, STRICT far cull */
                         bucket = cq6 >> 1;
                 } else {
                     /* OPAQUE + BLEND: engine Gfx_MeshDraw — OTZ = MAX vertex
@@ -13437,9 +13513,14 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
         }
         /* v34: waterLive forces the ADDITIVE semi-trans pass (the runtime
          * field_E=45 rewrite); everything else follows the ripper's
-         * alphaMode exactly as before. */
+         * alphaMode exactly as before.
+         * V41 C-5: MASK (alphaMode 1) gets its OWN pass value so the
+         * raster can write fb->z for its ta>0 texels (the engine's leaf
+         * GT4s are opaque ST-clear punch-through — see raster_tri);
+         * BLEND (alphaMode 2) stays RP_BLEND_TEX (no depth write). */
         const PassMode quadPass = m->waterLive ? RP_ADD_TEX
-            : ((m->alphaMode == 0) ? RP_OPAQUE : RP_BLEND_TEX);
+            : ((m->alphaMode == 0) ? RP_OPAQUE
+               : ((m->alphaMode == 1) ? RP_MASK_TEX : RP_BLEND_TEX));
         for (int ti = 0; ti < post[bi].ntri && post[bi].tri0 + ti * 3 + 2 < it->icount; ti++) {
             int k = post[bi].tri0 + ti * 3;
             uint32_t ia = sc->idxs[it->ibase + k], ib = sc->idxs[it->ibase + k + 1],
