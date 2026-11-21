@@ -101,6 +101,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <limits.h>
+#include <errno.h>
 #include <math.h>
 #include <ctype.h>
 #include <sys/stat.h>
@@ -16757,14 +16759,40 @@ static int run_realtime(LiveApp *A, int winW, int winH) {
  * `--shot t=DURATION` (both simulate the same 60fps playback session),
  * proving the realtime path renders the same pixels as the deterministic
  * pipeline. */
+/* V41 audit (E-12): sane scene-time bound for the deterministic time
+ * arguments (--t / --shot t= / --r2shot t=) and the benchmark --duration
+ * clamp below. One engine tick = 1/30 s, so 3600 s = 108k whole ticks —
+ * a typo like t=1e9 would otherwise fast-forward 3e10 ticks (hours of
+ * 100% CPU with no progress output).                                       */
+#define CLI_T_MAX_S 3600.0
+
 static int run_benchmark(LiveApp *A, int frames) {
     double rate = A->maxFps > 0 ? A->maxFps : 60.0;
     int n = frames;
     if (A->duration > 0) {
         /* --duration drives the run end-to-end (the frame-count arg is a
-         * cap only when no duration is given)                              */
-        int need = (int)(A->duration * rate) + 2;
-        n = need;
+         * cap only when no duration is given)
+         * V41 audit (E-13): the old `(int)(duration * rate)` cast was UB
+         * for huge-but-finite durations — `--benchmark --duration 1e9`
+         * cast 3e10 to a negative int, printed "benchmark: 0 frames",
+         * exited 0 and silently wrote the t=0 frame as the "final" one.
+         * Clamp BEFORE the cast: to the same scene-time bound the
+         * --t/--shot caps use (a warning says so), and to INT_MAX so the
+         * cast itself can never overflow (a huge --fps widens rate).   */
+        double need = A->duration * rate + 2.0;
+        double cap = CLI_T_MAX_S * rate + 2.0;
+        if (need > cap) {
+            fprintf(stderr, "benchmark: duration %.6g s exceeds the %.0f s "
+                    "scene-time bound — clamping the run\n",
+                    A->duration, CLI_T_MAX_S);
+            need = cap;
+            /* clamp the run's duration too, so the auto-quit boundary and
+             * the --save-final phase forcing land on the CAPPED end (the
+             * actually-simulated boundary), not the requested one      */
+            A->duration = CLI_T_MAX_S;
+        }
+        if (need > (double)INT_MAX) need = (double)INT_MAX;
+        n = (int)need;
     }
     double t0 = now_sec();
     int i;
@@ -16793,6 +16821,55 @@ static int run_benchmark(LiveApp *A, int frames) {
 
 /* ----------------------------------------------------------------- CLI */
 typedef struct { double t; char file[512]; } Shot;
+
+/* V41 audit (E-9): the --shot array cap — the old `if (nShots < 64)`
+ * silently DROPPED every shot past 64 (66 --shot args -> 64 files, no
+ * warning, exit 0). The limit is now a named constant and a hard error. */
+#define MAX_SHOTS 64
+
+/* V41 audit (E-8): strict numeric CLI parsing. The numeric flags were
+ * parsed with atoi/atof — and --snow-seed with a NULL-endptr strtoul,
+ * which accepts trailing garbage IDENTICALLY (it is the END POINTER
+ * that validates, not the function choice) — so "--worldstage 2abc"
+ * silently booted stage 2 and "--track 0abc" selected track 0. Strict
+ * rule: the WHOLE argument must be exactly one number; the existing
+ * per-flag range checks then apply unchanged.                            */
+static char *cli_long_end(const char *s, long *out) {
+    char *end = NULL;
+    long v;
+    errno = 0;
+    v = strtol(s, &end, 10);
+    if (errno == ERANGE || end == s) return NULL;   /* no number / overflow */
+    *out = v;
+    return end;
+}
+
+static int cli_int(const char *s, int *out) {
+    long v;
+    char *end = cli_long_end(s, &v);
+    if (!end || *end != '\0' || v < INT_MIN || v > INT_MAX) return 0;
+    *out = (int)v;
+    return 1;
+}
+
+static int cli_dbl(const char *s, double *out) {
+    char *end = NULL;
+    double v = strtod(s, &end);
+    if (end == s || *end != '\0' || !isfinite(v)) return 0;
+    *out = v;
+    return 1;
+}
+
+/* V41 audit (E-12): the t= field inside the --shot/--r2shot key=value
+ * lists ("t=12.5,file=...") — the number must end at ',' or at the end
+ * of the string; anything else is trailing garbage.                      */
+static int cli_time_kv(const char *s, double *out) {
+    char *end = NULL;
+    double v = strtod(s, &end);
+    if (end == s || (*end != '\0' && *end != ',') || !isfinite(v)) return 0;
+    *out = v;
+    return 1;
+}
 
 int main(int argc, char **argv) {
     const char *glbPath = NULL, *camdatPath = NULL, *inputDir = NULL;
@@ -16827,7 +16904,13 @@ int main(int argc, char **argv) {
     int nightPair1 = SH_PRESET_3_IDX;  /*   (spot 1.3 beam; map0_s01_events.c:920) */
     int envPair0 = -1, envPair1 = -1;  /* v8: --envpair A,B (Gfx_MapEnvSet)      */
     int worldStage = -1;               /* v8: --worldstage N (WorldEnv_MapPresetSet) */
-    int lensFlareType = 0;             /* v8: --lensflare N (enum-2 light source) */
+    int lensFlareType = -1;             /* v8: --lensflare N (enum-2 light source).
+                                         * V41 audit (E-10): -1 = CLI-silent
+                                         * sentinel — 0 is a LEGAL explicit value
+                                         * (Default, ambient-only) and must beat
+                                         * the camdat env, matching the
+                                         * psxForced/ditherForced/snowForced
+                                         * house style                               */
     int bootWeather = -1;              /* v8: --weather N (Particle_EnvironmentSet) */
     int bootWeatherTarget = -1;        /* v12: --weather-target N (sharedFunc_800D0B18,
                                          the runtime transition recipe, 0..8) */
@@ -16844,7 +16927,7 @@ int main(int argc, char **argv) {
                                              * 0 = unlimited (benchmarking) */
     char saveFinal[512] = {0};
     CamOverrideFixed ovr; memset(&ovr, 0, sizeof(ovr)); ovr.fovDeg = 60.0f;
-    Shot shots[64]; int nShots = 0;
+    Shot shots[MAX_SHOTS]; int nShots = 0;
     double tStart = 0.0;
     const char *fpDumpPath = NULL;
     const char *camDumpPath = NULL;
@@ -16925,7 +17008,10 @@ int main(int argc, char **argv) {
              *   2 = night   -> {6,3} (exterior; interior+chunk -> {7,4})
              *   3 = nowheres-> {9,9}
              * Our room is exterior (THR): hasActiveChunk = false.          */
-            worldStage = atoi(argv[++i]);
+            if (!cli_int(argv[++i], &worldStage)) {     /* V41 (E-8) */
+                fprintf(stderr, "bad --worldstage (not a number: '%s')\n", argv[i]);
+                return 1;
+            }
             if (worldStage < 1 || worldStage > 3) {
                 fprintf(stderr, "bad --worldstage (1 day, 2 night, 3 {9,9})\n");
                 return 1;
@@ -17000,17 +17086,28 @@ int main(int argc, char **argv) {
              * Preset1..4 ((-20,195) (-20,-75) (-20,15) (-20,105) degs).
              * The engine reads the CURRENT ROAD's lens_flare (road data,
              * not part of the room rip) — an explicit parameter here.     */
-            lensFlareType = atoi(argv[++i]);
+            if (!cli_int(argv[++i], &lensFlareType)) {  /* V41 (E-8) */
+                fprintf(stderr, "bad --lensflare (not a number: '%s')\n", argv[i]);
+                return 1;
+            }
             if (lensFlareType < 0 || lensFlareType > 5) {
                 fprintf(stderr, "bad --lensflare (0..5)\n");
                 return 1;
             }
         }
-        else if (!strcmp(a, "--weather")) {
+        else if (!strcmp(a, "--weather") && i + 1 < argc) {
+            /* v41 audit (E-1): the i+1<argc guard was MISSING on this one
+             * value flag — a trailing --weather read argv[argc] (NULL) ->
+             * atoi(NULL) = SIGSEGV (verified exit 139). With the guard the
+             * missing-value case falls to "unknown arg" exactly like every
+             * other value flag (--lensflare, --weather-target, ...). */
             /* v8: Particle_EnvironmentSet(arg0, field_16=1) at boot — the
              * map-load recipe (instant weather, no transition):
              * 0 none | 1 snow | 2 snow(+wind flag) | 5 rain | 6 rain(+wind) */
-            bootWeather = atoi(argv[++i]);
+            if (!cli_int(argv[++i], &bootWeather)) {    /* V41 (E-8) */
+                fprintf(stderr, "bad --weather (not a number: '%s')\n", argv[i]);
+                return 1;
+            }
             if (bootWeather != 0 && bootWeather != 1 && bootWeather != 2 &&
                 bootWeather != 5 && bootWeather != 6) {
                 fprintf(stderr, "bad --weather (0 none, 1 snow, 2 snow+, 5 rain, 6 rain+)\n");
@@ -17029,7 +17126,10 @@ int main(int argc, char **argv) {
              * Starts the 512-tick sine cross-fade with the verbatim bank
              * counts, the 800DD592 spawn-type switch and (for wind >= 2)
              * the live wind ramp. */
-            bootWeatherTarget = atoi(argv[++i]);
+            if (!cli_int(argv[++i], &bootWeatherTarget)) {  /* V41 (E-8) */
+                fprintf(stderr, "bad --weather-target (not a number: '%s')\n", argv[i]);
+                return 1;
+            }
             if (bootWeatherTarget < 0 || bootWeatherTarget > 8) {
                 fprintf(stderr, "bad --weather-target (0..8: 0 none, 1-4 snow wind0-3, 5-8 rain wind0-3)\n");
                 return 1;
@@ -17046,7 +17146,11 @@ int main(int argc, char **argv) {
             /* v9: Gfx_MapEnvSet(N,N) at boot — sugar for --envpair N,N.
              * ALL 21 presets selectable (identical pairs are engine-legal:
              * {16,16} {13,13} {18,18} ...).                                 */
-            int p = atoi(argv[++i]);
+            int p;
+            if (!cli_int(argv[++i], &p)) {              /* V41 (E-8) */
+                fprintf(stderr, "bad --preset (not a number: '%s')\n", argv[i]);
+                return 1;
+            }
             if (sh_preset_local_from_decomp(p) < 0) {
                 fprintf(stderr, "bad --preset (0..20)\n");
                 return 1;
@@ -17084,8 +17188,31 @@ int main(int argc, char **argv) {
             const char *c1 = strstr(s, "t=");
             const char *c2 = strstr(s, "file=");
             const char *c3 = strstr(s, "pan=");
-            if (c1) tt = atof(c1 + 2);
+            if (c1 && !cli_time_kv(c1 + 2, &tt)) {   /* V41 (E-8/E-12) */
+                fprintf(stderr, "bad --r2shot t= (not a finite number)\n");
+                return 1;
+            }
+            if (tt < 0) {                             /* V41 (E-12) */
+                fprintf(stderr, "bad --r2shot t= (must be >= 0 seconds)\n");
+                return 1;
+            }
+            if (tt > CLI_T_MAX_S) {
+                fprintf(stderr, "--r2shot t=%.6g s exceeds the %.0f s scene-time "
+                        "bound — capping\n", tt, CLI_T_MAX_S);
+                tt = CLI_T_MAX_S;
+            }
             if (c3) { if (sscanf(c3 + 4, "%lf,%lf", &py, &pp) != 2) py = atof(c3 + 4); }
+            /* v41 audit (E-4, pr_25): cli_time_kv already rejects inf/nan
+             * (its !isfinite(v) guard); the pan= pair feeds
+             * llround(deg/360*4096) — non-finite pan is UB there.
+             * (twin note: the pan= sscanf parse line is KEPT — PoC main's
+             * eb9b588 merge resolution accidentally dropped it, leaving
+             * pan=Y,P silently ignored; PoC's own e28662c/06af82f branches
+             * + the merge message + the --help text all keep the parse.) */
+            if (c3 && (!isfinite(py) || !isfinite(pp))) {
+                fprintf(stderr, "bad --r2shot pan= (values must be finite)\n");
+                return 1;
+            }
             if (c2) snprintf(fn, sizeof(fn), "%s", c2 + 5);
             if (!fn[0]) snprintf(fn, sizeof(fn), "r2shot_%08.2f.png", tt);
             r2Shot.t = tt; r2Shot.panYawDeg = py; r2Shot.panPitchDeg = pp;
@@ -17097,37 +17224,98 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--env-dump") && i + 1 < argc) envDumpPath = argv[++i];
         else if (!strcmp(a, "--nosnow")) { snowEnabled = 0; snowForced = 0; }
         else if (!strcmp(a, "--snow")) { snowEnabled = 1; snowForced = 1; }
-        else if (!strcmp(a, "--snow-seed") && i + 1 < argc) snowSeed = (unsigned)strtoul(argv[++i], NULL, 0);
+        else if (!strcmp(a, "--snow-seed") && i + 1 < argc) {
+            /* V41 audit (E-8): the NULL-endptr strtoul accepted trailing
+             * garbage exactly like atoi — validate the end pointer (the
+             * base-0 "0x..." hex seed parsing is unchanged)              */
+            const char *v = argv[++i];
+            char *end = NULL;
+            unsigned long n = strtoul(v, &end, 0);
+            if (end == v || *end != '\0') {
+                fprintf(stderr, "bad --snow-seed (not a number: '%s')\n", v);
+                return 1;
+            }
+            snowSeed = (unsigned)n;
+        }
         else if (!strcmp(a, "--window")) wantWindow = 1;
         else if (!strcmp(a, "--window-size") && i + 1 < argc) {
             if (sscanf(argv[++i], "%dx%d", &winW, &winH) != 2 || winW < 16 || winH < 16 || winW > 8192 || winH > 8192) {
                 fprintf(stderr, "bad --window-size\n"); return 1;
             }
         }
-        else if (!strcmp(a, "--duration") && i + 1 < argc) duration = atof(argv[++i]);
+        else if (!strcmp(a, "--duration") && i + 1 < argc) {
+            /* V41 audits (E-8/E-13): strict parse — a negative duration
+             * silently disabled the auto-quit (every consumer guards on
+             * `> 0`), and a non-finite one made run_benchmark's frame
+             * count cast UB. Reject both loudly.                          */
+            if (!cli_dbl(argv[++i], &duration) || duration < 0) {
+                fprintf(stderr, "bad --duration (not a finite number >= 0: '%s')\n", argv[i]);
+                return 1;
+            }
+        }
         else if (!strcmp(a, "--save-final") && i + 1 < argc) {
             snprintf(saveFinal, sizeof(saveFinal), "%s", argv[++i]);
         }
-        else if (!strcmp(a, "--fps") && i + 1 < argc) maxFps = atof(argv[++i]);
+        else if (!strcmp(a, "--fps") && i + 1 < argc) {
+            if (!cli_dbl(argv[++i], &maxFps)) {         /* V41 (E-8) */
+                fprintf(stderr, "bad --fps (not a finite number: '%s')\n", argv[i]);
+                return 1;
+            }
+        }
         else if (!strcmp(a, "--benchmark")) {
             benchmark = 1;
-            if (i + 1 < argc && isdigit((unsigned char)argv[i + 1][0])) benchFrames = atoi(argv[++i]);
+            /* V41 audits (E-8/E-12): strict parse — the old atoi accepted
+             * trailing garbage ("1e9" -> 1 frame) and overflowed past
+             * INT_MAX with UB; cli_int rejects both                       */
+            if (i + 1 < argc && isdigit((unsigned char)argv[i + 1][0])) {
+                if (!cli_int(argv[++i], &benchFrames)) {
+                    fprintf(stderr, "bad --benchmark frame count (not a number: '%s')\n", argv[i]);
+                    return 1;
+                }
+            }
         }
         else if (!strcmp(a, "--tim-file") && i + 1 < argc) timFile = argv[++i];
         else if (!strcmp(a, "--tim") && i + 1 < argc) {
-            /* --tim N or --tim N,PAL */
-            timView = atoi(argv[++i]);
-            const char *cm = strchr(argv[i], ',');
-            if (cm) timPalette = atoi(cm + 1);
+            /* --tim N or --tim N,PAL — V41 (E-8): strict; N and PAL must
+             * be clean integers with nothing else following              */
+            const char *v = argv[++i];
+            long n;
+            char *end = cli_long_end(v, &n);
+            if (!end || n < INT_MIN || n > INT_MAX ||
+                (*end != '\0' && *end != ',')) {
+                fprintf(stderr, "bad --tim (not a number: '%s')\n", v);
+                return 1;
+            }
+            if (*end == ',') {
+                long pal;
+                char *end2 = cli_long_end(end + 1, &pal);
+                if (!end2 || *end2 != '\0' || pal < INT_MIN || pal > INT_MAX) {
+                    fprintf(stderr, "bad --tim palette (not a number: '%s')\n", end + 1);
+                    return 1;
+                }
+                timPalette = (int)pal;
+            }
+            timView = (int)n;
         }
         else if (!strcmp(a, "--t") && i + 1 < argc) {
-            tStart = atof(argv[++i]);
             /* v40 audit (E-F1): NaN/Inf --t poisoned the session clock
              * (UBSAN signed-overflow cascade in the Q12 math; --t nan
              * hangs the realtime window — V-c repro). Reject like
-             * --window-size does. */
-            if (!isfinite(tStart)) {
+             * --window-size does. cli_dbl (V41 E-8) additionally rejects
+             * trailing garbage now. */
+            if (!cli_dbl(argv[++i], &tStart)) {
                 fprintf(stderr, "bad --t (not a finite number)\n"); return 1;
+            }
+            /* V41 audit (E-12): a negative --t silently rendered the t=0
+             * pose (the fast-forward loops never run below 0) — reject. */
+            if (tStart < 0) {
+                fprintf(stderr, "bad --t (must be >= 0 seconds: '%s')\n", argv[i]);
+                return 1;
+            }
+            if (tStart > CLI_T_MAX_S) {
+                fprintf(stderr, "--t %.6g s exceeds the %.0f s scene-time "
+                        "bound — capping\n", tStart, CLI_T_MAX_S);
+                tStart = CLI_T_MAX_S;
             }
         }
         else if (!strcmp(a, "--cam") && i + 7 < argc) {
@@ -17155,14 +17343,29 @@ int main(int argc, char **argv) {
             const char *s = argv[++i];
             const char *c1 = strstr(s, "t=");
             const char *c2 = strstr(s, "file=");
-            if (c1) tt = atof(c1 + 2);
-            if (c2) snprintf(fn, sizeof(fn), "%s", c2 + 5);
-            if (c1 && !isfinite(tt)) {   /* v40 audit (E-F1) */
+            if (c1 && !cli_time_kv(c1 + 2, &tt)) {   /* V41 (E-8/E-12) */
                 fprintf(stderr, "bad --shot t= (not a finite number)\n");
                 return 1;
             }
+            /* V41 audit (E-12): a negative t silently rendered the t=0
+             * pose (the fast-forward loop never runs below 0) — reject;
+             * a huge finite t (1e9 -> 3e10 ticks, hours of CPU) — cap. */
+            if (tt < 0) {
+                fprintf(stderr, "bad --shot t= (must be >= 0 seconds)\n");
+                return 1;
+            }
+            if (tt > CLI_T_MAX_S) {
+                fprintf(stderr, "--shot t=%.6g s exceeds the %.0f s scene-time "
+                        "bound — capping\n", tt, CLI_T_MAX_S);
+                tt = CLI_T_MAX_S;
+            }
+            if (c2) snprintf(fn, sizeof(fn), "%s", c2 + 5);
             if (!fn[0]) snprintf(fn, sizeof(fn), "shot_%08.2f.png", tt);
-            if (nShots < 64) { shots[nShots].t = tt; strcpy(shots[nShots].file, fn); nShots++; }
+            if (nShots < MAX_SHOTS) { shots[nShots].t = tt; strcpy(shots[nShots].file, fn); nShots++; }
+            else {   /* V41 audit (E-9): used to be silently dropped */
+                fprintf(stderr, "too many --shot arguments (max %d)\n", MAX_SHOTS);
+                return 1;
+            }
         }
         else if (!strcmp(a, "--fp-dump") && i + 1 < argc) fpDumpPath = argv[++i];
         else if (!strcmp(a, "--cam-dump") && i + 1 < argc) {
@@ -17185,7 +17388,10 @@ int main(int argc, char **argv) {
             camDumpPath = cdBuf;
         }
         else if (!strcmp(a, "--track") && i + 1 < argc) {
-            trackSel = atoi(argv[++i]);
+            if (!cli_int(argv[++i], &trackSel)) {       /* V41 (E-8) */
+                fprintf(stderr, "bad --track (not a number: '%s')\n", argv[i]);
+                return 1;
+            }
             /* v40 audit (E-F3): -1 is the internal "absent" sentinel,
             * so `--track -1` silently fell back to track 0 (identical
             * render, no warning) while 999999 errors out. Reject
@@ -17203,7 +17409,12 @@ int main(int argc, char **argv) {
             else if (!strcmp(v, "vk") || !strcmp(v, "vulkan")) sh1_hw_set_backend(2);
         }
 #endif
-        else if (!strcmp(a, "--dbg-item") && i + 1 < argc) dbgItem = atoi(argv[++i]);
+        else if (!strcmp(a, "--dbg-item") && i + 1 < argc) {
+            if (!cli_int(argv[++i], &dbgItem)) {        /* V41 (E-8) */
+                fprintf(stderr, "bad --dbg-item (not a number: '%s')\n", argv[i]);
+                return 1;
+            }
+        }
         else if (!strcmp(a, "--help") || !strcmp(a, "-h")) {
             printf("fog_poc — Silent Hill fog+snow PoC (GLTF-native software renderer)\n\n"
                    "usage: fog_poc [--glb FILE] [--camdat FILE] [options]\n\n"
@@ -17296,7 +17507,7 @@ int main(int argc, char **argv) {
                    "                        including the camdat turn filter)\n"
                    "  --tim-file F --tim N[,PAL]  view page N (palette PAL) of a TIM file\n"
                    "  --window         force the realtime window (default anyway)\n"
-                   "  --window-size WxH  window client size (default 1280x720)\n"
+                   "  --window-size WxH  window client size (default 960x672)\n"
                    "  --fps N          realtime present cap (v22 default 30 - the engine's\n"
                    "                   g_IntervalVBlanks=2 in-game cadence, one present per\n"
                    "                   tick; 60 = the 60 Hz display-duplicate presentation;\n"
@@ -17624,7 +17835,13 @@ int main(int argc, char **argv) {
             dither = cd.envDither;
         if (snowForced < 0 && cd.envParticles >= 0)
             snowEnabled = cd.envParticles;               /* 0 = --nosnow    */
-        if (lensFlareType == 0 && cd.envLensFlare > 0)
+        /* V41 audit (E-10): the old `lensFlareType == 0` guard made an
+         * explicit `--lensflare 0` indistinguishable from CLI-silent, so
+         * an authored camdat env always won — contradicting the documented
+         * precedence above. -1 is the CLI-silent sentinel now (the
+         * psxForced/ditherForced/... house style); 0 is a legal explicit
+         * value that must override the camdat.                          */
+        if (lensFlareType < 0 && cd.envLensFlare >= 0)
             lensFlareType = cd.envLensFlare;
         if (bootWeatherTarget < 0 && cd.envWeatherTarget >= 0)
             bootWeatherTarget = cd.envWeatherTarget;     /* resolved below  */
@@ -17640,6 +17857,10 @@ int main(int argc, char **argv) {
          * envAnimsDemo value is IGNORED (parsed for compatibility, never
          * folded). The schema doc + editor stop emitting the field. */
     }
+    /* V41 audit (E-10): resolve the CLI-silent sentinel — neither the CLI
+     * nor the camdat authored a lens flare -> the engine default 0
+     * (Default = ambient-only), exactly the pre-V41 default behavior. */
+    if (lensFlareType < 0) lensFlareType = 0;
 
     /* ---- v4 audit mode: dump the flashlight math primitives over a
      * deterministic input grid, then exit (compared against the
