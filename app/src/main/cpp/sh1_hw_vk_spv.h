@@ -1,10 +1,14 @@
 /* sh1_hw_vk_spv.h — the EMBEDDED SPIR-V for the v9.9 Vulkan backend.
- * GENERATED from vk/hw_mesh_vk.vert and vk/hw_mesh_vk.frag by
- * scripts/gen_vk_spv_header.sh (glslangValidator, target-env vulkan1.0)
- * — the same toolchain family Swanstation's pre-baked embedded_spirv
- * pipeline uses. DO NOT EDIT BY HAND; regenerate after shader edits.
- * The desktop harness and the Android build embed the IDENTICAL bytes.
- * v10.2: regenerated after the AUDIT FIX (the fb_put quantize-flag
+ * The bytes are HAND-SYNCED from vk/hw_mesh_vk.vert and vk/hw_mesh_vk.frag
+ * (compiled offline with glslangValidator, target-env vulkan1.0 — the
+ * same toolchain family Swanstation's pre-baked embedded_spirv pipeline
+ * uses). There is NO regeneration script in this repo: the pre-V45
+ * header claimed scripts/gen_vk_spv_header.sh, but no such script — and
+ * no scripts/ directory — has ever existed here (verified against the
+ * full git history). After a shader edit the checked-in .spv files and
+ * these arrays must be re-synced BY HAND and kept byte-identical, or
+ * the desktop harness and the Android build silently diverge.
+ * v10.2: re-synced by hand after the AUDIT FIX (the fb_put quantize-flag
  * branch — see hw_mesh_vk.frag's v10.2 comment); glslang 15.2.0
  * reproduces the prior .spv byte-identically from the prior GLSL
  * (toolchain-equivalence proof), so ONLY the fixed branch's bytes move.

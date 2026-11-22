@@ -24,9 +24,10 @@
  * glslangValidator (the same toolchain family Swanstation's pre-baked
  * embedded_spirv pipeline uses — see its shader_cache.h: "every shader
  * in the Vulkan backend is pre-baked into the build at .inc-include
- * time"). sh1_hw_vk_spv.h embeds the IDENTICAL bytes on Android; the
- * regeneration script ships with the source. The desktop harness loads
- * the same embedded bytes (one code path, no divergence).
+ * time"). sh1_hw_vk_spv.h embeds the IDENTICAL bytes on Android; they
+ * are HAND-SYNCED after shader edits (no regeneration script exists in
+ * this repo). The desktop harness loads the same embedded bytes (one
+ * code path, no divergence).
  *
  * Fallback contract: any init/render failure returns 0 and the caller
  * (sh1_hw_render.c) falls back to the software renderer (logged).
@@ -53,8 +54,9 @@
 #define VKLOGE(...) do { fprintf(stderr, "[sh1-vk ERR] " __VA_ARGS__); fprintf(stderr, "\n"); } while (0)
 #endif
 
-/* the embedded SPIR-V (generated from hw_mesh_vk.vert/.frag by
- * scripts/gen_vk_spv_header.sh — byte-identical to the .spv files) */
+/* the embedded SPIR-V (hand-synced from hw_mesh_vk.vert/.frag — no
+ * regeneration script exists; must stay byte-identical to the .spv
+ * files) */
 #include "sh1_hw_vk_spv.h"
 
 /* ==========================================================================
@@ -413,6 +415,12 @@ extern "C" int sh1_vk_hw_init(int w, int h, const unsigned char *texBlob,
         }
         memset(g_stagingMap, 0, total);
         for (int i = 0; i < texCount; i++) {
+            /* >2048 (or empty) layers are SKIPPED silently — the SW path
+             * has no size limit, so such a texture would render in
+             * software yet vanish here (the layer stays zero = alpha-0
+             * discard). PS1 texture pages are <=256x256, so the real
+             * corpus never hits this; the GLES backend skips
+             * identically (sh1_hw_render.c). */
             if (tex[i].w <= 0 || tex[i].h <= 0 || tex[i].w > 2048 ||
                 tex[i].h > 2048)
                 continue;

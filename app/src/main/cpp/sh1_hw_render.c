@@ -320,7 +320,13 @@ static int gles_hw_init(int w, int h, const Scene *sc) {
     glUniform1ui(un_tc, getenv("HW_DEBUG_SHADER") ? 7u : 0u);  /* 7 = the
         debug early-out (flags as colors); normally the 15-bit path */
 
-    /* --- VAO: attributes 0-4 vertex rate, 5-9 instance rate (divisor 1) - */
+    /* --- VAO: attributes 0-4 per-vertex; 5-9 carry the per-triangle
+     * HwInst record — but ALL TEN are bound at VERTEX rate (plain
+     * glVertexAttribPointer/IPointer — no glVertexAttribDivisor call
+     * exists in this file: the record is REPLICATED 3x, one copy per
+     * triangle vertex, so a plain glDrawArrays renders the batch — see
+     * hw_batch_reserve's replication note + hw_push_tri's 3x store;
+     * Vulkan mirrors it with two VERTEX_RATE bindings) ---------------- */
     glGenVertexArrays(1, &g_gl_vao);
     glBindVertexArray(g_gl_vao);
     glGenBuffers(1, &g_gl_vbo);
@@ -382,6 +388,12 @@ static int gles_hw_init(int w, int h, const Scene *sc) {
                  g_gl_layers, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     for (int i = 0; i < sc->texCount; i++) {
         const TexInfo *t = &sc->tex[i];
+        /* >2048 (or empty) layers are SKIPPED silently — the SW path
+         * (tex_sample) has no size limit, so such a texture would render
+         * in software yet vanish here (the layer stays zero = alpha-0
+         * discard by the shader's hole rule). PS1 texture pages are
+         * <=256x256, so the real corpus never hits this; the Vulkan
+         * backend skips identically (sh1_hw_vk.cpp). */
         if (t->w <= 0 || t->h <= 0 || t->w > 2048 || t->h > 2048) continue;
         glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, i, t->w, t->h, 1,
                         GL_RGBA, GL_UNSIGNED_BYTE, sc->texBlob + t->off);
