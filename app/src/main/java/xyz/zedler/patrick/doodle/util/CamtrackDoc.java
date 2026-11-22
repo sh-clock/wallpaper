@@ -761,8 +761,15 @@ public final class CamtrackDoc {
         break;
       }
       default: {  // fixed
+        /* v40 audit (B-B10, ported to the Java twin by the v45 audit H-2):
+         * the C parser's default is {1,1,0} (fog_poc.c:3456
+         * `if (!jvec3(raw, "position", p)) { p[0] = 1; p[1] = 1; p[2] = 0; }`)
+         * and the reference editor's (camtrack.html:6301) — the old [0,1,0]
+         * was the only default mismatch: a hand-edited fixed track without
+         * a position rendered 1m apart between editor preview and engine,
+         * and serialize() then PERSISTED the wrong default into camdat.json. */
         tr.position = vec3(CamtrackJson.jget(raw, "position"),
-            new double[]{0, 1, 0});
+            new double[]{1, 1, 0});
         tr.yawDeg = CamtrackJson.jnum(raw, "yawDeg", 0);
         tr.pitchDeg = CamtrackJson.jnum(raw, "pitchDeg", 0);
         tr.yawSpeedDegS = CamtrackJson.jnum(raw, "yawSpeedDegS", 0);
