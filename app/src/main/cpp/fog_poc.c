@@ -5019,6 +5019,16 @@ static void sh_env_entry_from_preset(ShEnvEntry *e, const ShEffectsInfo *p) {
  * progress blend) is the LOAD-SCREEN path — the night transition is
  * the INSTANT map-init Gfx_MapEnvSet, so slots swap directly).       */
 static void sh_env_set_pair(ShEnv *env, int presetIdx0, int presetIdx1) {
+    /* v43 WA1-1: WorldEnv_PresetsSet (effects.c:300-304) routes through
+     * WorldEnv_TransitionStart(idx0, idx1, PrimitiveType_None, ...) which
+     * writes progressType = None (effects.c:352) — an instant preset set
+     * CANCELS any in-flight S32 blend. Without this clear the next
+     * sh_env_tick (primType==1 arm, 5917-5931) overwrites the instant
+     * env1C = env84 copies below with blend(stale envEC -> env84) for
+     * the rest of the ~3 s transition — the stale pre-transition env
+     * bleeds back (wallpaper-only: the PoC has no transition state
+     * to clear).                                                        */
+    env->primType = 0;                 /* WorldEnv_PresetsSet: progressType = PrimitiveType_None */
     env->isFlashlightUnavailable = (presetIdx0 == presetIdx1);
     sh_env_entry_from_preset(&env->env84[0], &SH_MAP_EFFECTS_INFOS[presetIdx0]);
     sh_env_entry_from_preset(&env->env84[1], &SH_MAP_EFFECTS_INFOS[presetIdx1]);
@@ -6231,6 +6241,12 @@ static void sh_env_sync_live(ShEnv *env, double t, v3 camPos, Quat camQ,
 static void sh_env_reset(ShEnv *env, double t) {
     env->ticksDone = 0;
     env->lastTickT = t;
+    /* v43 WA1-1: restart == fresh boot parity. A fresh LiveApp is
+     * memset to 0 (primType = 0 = PrimitiveType_None); without this
+     * clear a restart mid-blend carries primType/envEC/transT and the
+     * next tick resumes the stale S32 blend (K_R never re-applies a
+     * preset — see 15152-15209).                                   */
+    env->primType = 0;                 /* cancel any in-flight S32 blend    */
 }
 
 /* ==================================================================== */
