@@ -167,6 +167,18 @@ public class Sh1WallpaperService extends WallpaperService {
       }
       java.util.ArrayList<String> files = new java.util.ArrayList<>();
       for (String f : names) {
+        if (f.indexOf('/') >= 0) {
+          // V44 (the red-CI root cause): Robolectric's AssetManager.list()
+          // walks the tree RECURSIVELY (it returns "thumbs/pair_0.png" for
+          // list("sh1")), while real Android lists the IMMEDIATE children
+          // only ("thumbs" as a single dir entry). A nested path is a
+          // subdirectory tree entry in either semantics — the scene corpus
+          // is FLAT by contract, and writing a nested name would target an
+          // uncreated subdirectory (the FileNotFoundException aborted the
+          // whole copy + left no markers — the v1.10.0 red CI). Filter by
+          // path separator: stable and identical in BOTH environments.
+          continue;
+        }
         String[] sub = context.getAssets().list("sh1/" + f);
         if (sub != null && sub.length > 0) {
           continue;   // a directory (thumbs/) — read from the APK directly
