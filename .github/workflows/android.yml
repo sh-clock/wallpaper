@@ -126,17 +126,33 @@ jobs:
   # ---- the unit-test gate (S20-cont: the V42 E-1 review found the CI
   # ran NO unit tests at all — assemble + smoke + anim-gate only). The
   # Robolectric suite includes the asset-refresh upgrade path.
+  # V44: the gradle dep cache (setup-java cache:gradle — the robolectric
+  # + nativeruntime jars) AND the ~/.m2 cache (Robolectric's RUNTIME
+  # android-all-instrumented jars, fetched by Robolectric's own maven
+  # resolver at test time, NOT a gradle dependency) — the 2026-11-22
+  # maven-central 429 mass rate-limit made every fresh runner fail at
+  # MavenArtifactFetcher.fetch; with both caches only the FIRST run
+  # after a version bump downloads, everything later is cache-served.
   unit-tests:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      - name: Set up JDK 17 (with the gradle dependency cache)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+          cache: gradle
+
+      - name: Cache the Robolectric runtime jars (maven 429 immunity)
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/robolectric
+          key: robolectric-m2-v1-${{ hashFiles('gradle/libs.versions.toml', 'app/build.gradle') }}
+          restore-keys: |
+            robolectric-m2-v1-
 
       - name: The Robolectric unit-test suite
         run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
@@ -152,11 +168,12 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || (startsWith(github.ref, 'refs/tags/') && github.ref || github.ref) }}
 
-      - name: Set up JDK 17
+      - name: Set up JDK 17 (with the gradle dependency cache)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+          cache: gradle   # V44: maven-central 429 immunity for the AGP/gradle deps too
 
       # Android SDK + NDK 27.2 + CMake 3.22.1 are preinstalled on
       # ubuntu-latest runners; AGP resolves/downloads any missing piece
