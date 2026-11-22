@@ -661,6 +661,17 @@ static void hw_push_tri(const RVert *vA, const RVert *vB, const RVert *vC,
  * nothing reads it past the collection loop, so the lifetime need not
  * extend into the replay/tail passes). Legacy GLBs (hasExtras == 0)
  * keep the all-items path — byte-identical to before on those.
+ * v43 re-port (WA2-1): the v26.3/v27.2 anims block (sh1x_anims_draw_apply
+ * + the SH1X_ANIM_DEBUG dump) is walked VERBATIM at the engine's position
+ * (immediately after `int nItems = sc->itemCount;`, before the transform
+ * loop) — the stale v9.x copy went straight to transform_item2, so every
+ * animated prop (fans/swings/MOVACHES) froze at its authored pose in BOTH
+ * hardware backends. The apply is IDEMPOTENT per frame (it resets each
+ * item's model to the g_animBase snapshot before re-applying the driver
+ * pose — see sh1x_anims_draw_apply), so the build->render_frame fallback
+ * paths (backend init failure / GPU frame failure / OOM batch) that run
+ * the software renderer AFTER this walk stay correct. Safe no-op when
+ * sc->sh1x.nAnims == 0 (legacy GLBs).
  * ========================================================================*/
 static int hw_build_batch(Frame *fb, const Renderer *R, const CamPose *cam) {
     const Scene *sc = R->sc;
@@ -692,6 +703,46 @@ static int hw_build_batch(Frame *fb, const Renderer *R, const CamPose *cam) {
     }
 
     int nItems = sc->itemCount;
+    /* v27.2 (B-12): the anim tick + apply are the SANCTIONED mutation of
+     * the heap-owned scene (the Renderer treats it const for render
+     * purity; the driver state lives in sc->sh1x/items) — one documented
+     * cast, replacing the scattered const-discards. */
+    sh1x_anims_draw_apply((Scene *)sc);   /* v26.3: live driver rotations -> items */
+    if (getenv("SH1X_ANIM_DEBUG")) {
+        static int dbgN = 0;
+        if (dbgN++ < 400) {
+            for (int i = 0; i < sc->sh1x.nAnims; i++) {
+                const Sh1xPropAnim *da = &sc->sh1x.anims[i];
+                fprintf(stderr, "[animstate] t? cur=(%.2f,%.2f,%.2f) %s",
+                        da->cur[0], da->cur[1], da->cur[2], da->object);
+                if (da->driver == 1)   /* fanArray per-fan split state */
+                    fprintf(stderr, " fanAng[0]=%d fanAng[6]=%d "
+                            "fanAng[7]=%d fanAng[15]=%d (raw)",
+                            da->fanAng[0], da->fanAng[6],
+                            da->fanAng[7], da->fanAng[15]);
+                if (da->driver == 14)  /* ferris pendulum state */
+                    fprintf(stderr, " master=%d pend=(%d,%d,%d,%d) "
+                            "vel=(%d,%d,%d,%d)",
+                            da->mvMaster, da->mvPend[0], da->mvPend[1],
+                            da->mvPend[2], da->mvPend[3],
+                            da->mvPendVel[0], da->mvPendVel[1],
+                            da->mvPendVel[2], da->mvPendVel[3]);
+                if (da->driver == 4 || da->driver == 5 || da->driver == 8)
+                    /* v32.2 debug: the raw swing-family live state */
+                    fprintf(stderr, " rawVy=%d rawVel=%d",
+                            da->rawVy, da->rawVel);
+                fprintf(stderr, "\n");
+            }
+        }
+        static int once = 0;
+        if (!once) { once = 1;
+            for (int i = 0; i < sc->itemCount; i++)
+                if (sc->item[i].animIdx >= 0)
+                    fprintf(stderr, "[animbind] item %d '%s' -> anim %d (%s)\n", i,
+                            sc->item[i].name, sc->item[i].animIdx,
+                            sc->sh1x.anims[sc->item[i].animIdx].object);
+        }
+    }
     RVert *xv = (RVert *)calloc((size_t)(sc->vertCount ? sc->vertCount : 1), sizeof(RVert));
     for (int i = 0; i < nItems; i++) {
         transform_item2(R, &sc->item[i], &view, &viewProj,
@@ -1197,7 +1248,7 @@ static int hw_build_batch(Frame *fb, const Renderer *R, const CamPose *cam) {
                     cz /= (float)nv;
                     int cq8 = (int)floorf(cz * 256.0f + 0.5f);
                     int cq6 = cq8 >> 2;
-                    if (cq6 > 32 && cq8 <= farCullQ8)
+                    if (cq6 > 32 && (cq8 & ~3) < farCullQ8) /* engine: >32, STRICT far cull */
                         bucket = cq6 >> 1;
                 } else {
                     int mz = 0;
