@@ -220,3 +220,18 @@ dependencies {
     testImplementation 'org.robolectric:robolectric:4.14.1'
     testImplementation 'androidx.test:core:1.6.1'
 }
+
+// V44 CI: Robolectric's OWN maven resolver (MavenArtifactFetcher) fetches
+// the android-all-instrumented jars at TEST time from repo1.maven.org —
+// the 2026-11-22 maven-central 429 mass rate-limit made every fresh runner
+// fail at fetch (IOException -> AssertionError across all Robolectric
+// classes). The actions/cache of ~/.m2 only helps AFTER a first successful
+// run; the FIRST run needs a reachable source. robolectric.dependency.repo.*
+// redirects the fetcher to the aliyun PUBLIC mirror of the same central
+// artifacts (org.robolectric/android-all-instrumented verified present
+// there) — the first run fetches from the mirror, every later run is
+// served from the ~/.m2 cache.
+tasks.withType(Test).configureEach {
+    systemProperty 'robolectric.dependency.repo.url', 'https://maven.aliyun.com/repository/public'
+    systemProperty 'robolectric.dependency.repo.id', 'aliyun'
+}
