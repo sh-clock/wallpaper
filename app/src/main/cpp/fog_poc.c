@@ -1150,6 +1150,11 @@ typedef struct {
     int alphaMode;            /* 0 = OPAQUE, 1 = MASK (billboard), 2 = BLEND (STP) */
     int waterLive;            /* v33: SH1X.waterLive — the DWAVE material the
                                * engine redirects to the animated tile   */
+    int waterLiveUvTile;       /* v45: 1 = the GLB's TEXCOORD_0 is TILE-relative
+                               * (u/32, (v-224)/32 — the floor.uvUnits extras
+                               * present); 0 = the v33..v44 legacy form
+                               * (sheet-normalized u/128, v/64 — the render
+                               * path still un-mangles those) */
 } MaterialInfo;
 
 typedef struct {
@@ -1516,6 +1521,7 @@ typedef struct {
     /* v3 FX (all optional — zeroed = feature off, v2 behavior) */
     int hasEnvEffects;             /* 1 = effectTexFlag present            */
     int envFlagIsWaterRefract;      /* DR/DRU shimmer flag                  */
+    int hasDrWave;                 /* v45: the waterRefract payload loaded */
     Sh1xWaterZone waterZones[4];    /* s_WaterZone, max 4 (decomp has <=2)  */
     int nWaterZones;
     Sh1xMapLink mapLink;
@@ -1815,8 +1821,10 @@ static void sh1x_load(Sh1x *sx, const JValue *json) {
     }
     /* v37: SH1X.waterFloor — see the Sh1x struct comment. clut15 = the
      * 16 RAW u16 5:5:5 entries of the room's slot-0 CLUT row 0 (the
-     * emitter's rip-side derivation is cited there). Absent (older GLB)
-     * = the legacy 32x32 RGB live-tile floor path. */
+     * emitter's rip-side derivation is cited there). V44: record-only —
+     * the waterLive floor ALWAYS renders the 32x32 direct-color tile
+     * (the engine's func_80059E34(1) path) whatever this block says; the
+     * full-width parse stays for contract/audit tooling. */
     const JValue *wfl = jget(sh, "waterFloor");
     if (wfl && wfl->type == JV_OBJ) {
         const JValue *cl = jarr(wfl, "clut15");
@@ -1825,16 +1833,61 @@ static void sh1x_load(Sh1x *sx, const JValue *json) {
             for (int k = 0; k < 16; k++) {
                 const JValue *cv = jat(cl, k);
                 /* v40 audit (D-F2): keep the FULL 16 bits — the ripper
-                 * emits the CLUT entry VERBATIM (& 0xFFFF, ipd2gltf.py
-                 * _room_water_floor) and the consumer's own floor builder
-                 * (g_waterFloorTex alpha classes) reads c & 0x8000 to
-                 * pick ABR-1 additive (alpha 255) vs opaque (alpha 127).
-                 * The old & 0x7FFF destroyed the STP bit, so every
-                 * STP-set palette entry (DR0100/DRFD00: ALL 16 entries,
-                 * e.g. 0x8421) classified as opaque-replace — the
-                 * engine's func_8008E4EC field_E=45 ABR-1 ADDITIVE
-                 * floor rendered wrong. */
+                 * emits the CLUT entry VERBATIM (& 0xFFFF). V44: the
+                 * waterFloor extras are RECORD-ONLY now (the renderer's
+                 * direct-color path never reads them — the v37 nibble
+                 * view was the UNUSED arg0==2 variant). */
                 if (cv) sx->waterFloorClut[k] = (unsigned short)((int)cv->num & 0xFFFF);
+            }
+        }
+    }
+    /* v45: SH1X.envEffects.waterRefract — the DR_WAVE payload (the sewer
+     * water). The ripper emits the verbatim TIM: "pixels" = the 4096
+     * img_data bytes (4bpp, LOW nibble = even u), "clut" = the 2 rows
+     * (16 u16 each). It OVERRIDES the compiled-in defaults
+     * (dr_wave_data.h — the same bytes for the authentic TIM), the SAME
+     * contract as waterTex/water_tim_data.h. Absent (older GLBs /
+     * non-water rooms) = the compiled-in defaults stand. The liveTile
+     * block (vramRect, the two layer windows, the ctr rule) is the
+     * engine's func_8008E5B4 spec — already implemented verbatim in
+     * fx_water_tile_update; the block is record/audit material for this
+     * consumer. */
+    if (ee && ee->type == JV_OBJ && sx->envFlagIsWaterRefract) {
+        const JValue *wr = jget(ee, "waterRefract");
+        if (wr && wr->type == JV_OBJ) {
+            const char *b64 = jstr(wr, "pixels", "");
+            unsigned char sheet[4096];
+            int nb = sh_b64_decode(b64, sheet, sizeof(sheet));
+            const JValue *cl = jarr(wr, "clut");
+            int clRows = jcount(cl);
+            if (nb == 4096 && clRows >= 2) {
+                /* 4bpp: 2 texels/byte, low nibble = even u (the same
+                 * TimFile layout the waterTex path decodes) */
+                for (int v = 0; v < 64; v++) {
+                    const unsigned char *row = sheet + (size_t)v * 64;
+                    for (int ub = 0; ub < 64; ub++) {
+                        g_drWaveIdx[v][ub * 2]     = row[ub] & 0xF;
+                        g_drWaveIdx[v][ub * 2 + 1] = row[ub] >> 4;
+                    }
+                }
+                for (int r = 0; r < 2; r++) {
+                    const JValue *cr = jat(cl, r);
+                    for (int k = 0; k < 16 && cr; k++) {
+                        const JValue *cv = jat(cr, k);
+                        if (cv)
+                            g_drWaveClut[r][k] =
+                                (unsigned short)((int)cv->num & 0xFFFF);
+                    }
+                }
+                sx->hasDrWave = 1;
+                g_waterTileEverUpdated = 0;  /* re-seed the live tile from
+                                                the new sheet (see
+                                                fx_water_live_rgba) */
+            } else if (nb >= 0) {
+                fprintf(stderr, "sh1x: waterRefract: decoded %d bytes "
+                                "(expect 4096) — the compiled-in DR_WAVE "
+                                "default stands\n",
+                        nb);
             }
         }
     }
@@ -2801,11 +2854,16 @@ static int scene_load_glb_q(Scene *s, const char *path, int quiet) {
          * (WorldMap_ChunkPropertiesSet -> func_8008E4EC matches the
          * material by NAME — "DWAVE" in the sewer IPDs — and rewrites
          * its tpage to 13 x=832, lens_flare.c:497-502 + map.c:1167-1186);
-         * func_8008E5B4 then rewrites the 32x32 window per frame. */
+         * func_8008E5B4 then rewrites the 32x32 window per frame.
+         * v45: the extras' "floor" spec (uvUnits) marks the TILE-relative
+         * UV form — the v45 ripper normalizes the MIZ floor prims' UVs on
+         * the 32x32 live tile (the v33..v44 GLBs carried the mangled
+         * sheet-normalized v 3.5..3.98). */
         {
             const JValue *ex = jget(m, "extras");
             const JValue *sx = jget(ex, "SH1X");
             s->mat[i].waterLive = jintb(sx, "waterLive", 0);
+            s->mat[i].waterLiveUvTile = jget(sx, "floor") != NULL;
         }
     }
 
@@ -7539,7 +7597,7 @@ static inline void fb_put(Frame *fb, int x, int y, int r, int g, int b,
     p[0] = (uint8_t)r; p[1] = (uint8_t)g; p[2] = (uint8_t)b;
 }
 
-typedef enum { RP_OPAQUE, RP_BLEND_TEX, RP_ADD_TEX, RP_MASK_TEX } PassMode;
+typedef enum { RP_OPAQUE, RP_BLEND_TEX, RP_ADD_TEX, RP_MASK_TEX, RP_SUB_TEX } PassMode;
 
 /* texture sample: nearest, wrap (glTF sampler wrapS/T = REPEAT; the PS1
  * GPU has no linear filtering — engine-identical sampling).                 */
@@ -7817,50 +7875,46 @@ static void raster_tri(Frame *fb, const RVert *vA, const RVert *vB, const RVert 
              * saturates at 0x7FFF — they never cover the tile).        */
             if (pass == RP_OPAQUE || pass == RP_MASK_TEX)
                 fb->z[pi] = z;   /* flake-occlusion ref */
-            if (pass == RP_ADD_TEX && ta < 128) {
-                /* v37: the STP-CLEAR texel of a semi-trans prim — the PS1
-                 * rule (DuckStation gpu_sw_rasterizer): the ABR blend
-                 * applies ONLY to texels whose STP bit is SET; STP-clear
-                 * texels write OPAQUE. The engine water floor's room-CLUT
-                 * palette mixes both classes (the DRG04 row is all STP-set
-                 * 0x8421-style; DRUG03's rows mix 0x0001/0x0421 with
-                 * 0x0842) — the opaque texels REPLACE the background with
-                 * the modulated color, the STP-set ones add onto it.
-                 * fx_water_floor_rgba encodes the class in the alpha: 127
-                 * = opaque, 255 = additive, 0 = hole (handled above). */
-                int r = (((tr >> 3) * vr) >> 4) + orr;
-                int g = (((tg >> 3) * vg) >> 4) + og;
-                int b = (((tb >> 3) * vb) >> 4) + ob;
-                fb_put(fb, x, y, r, g, b, quantize, dither);
-                continue;
-            }
             if (pass == RP_ADD_TEX) {
                 /* v34 WATER: the runtime DWAVE material rewrite (func_8008E4EC
                  * -> Lm_MaterialFsImageApply1(..., blendMode=1) ->
                  * Material_FsImageApply: field_E = (tPage[0]&3)<<7 |
                  * (1<<5) | tPage[1]&0xF = 45 with img0 {tPage{0,13}}) makes
-                 * the water-floor prims SEMI-TRANSPARENT ABR-1 ADDITIVE:
+                 * the SCHOOL-water surfaces SEMI-TRANSPARENT ABR-1 ADDITIVE:
                  *   dst5 = B5 + F5, F5 = modulate(texel, vcolor) — clamp 31.
-                 * The blend is additive with the BACKGROUND (the fog color
-                 * under it), so the floor adds its animated texels over the
-                 * scene instead of replacing them (the DR street reference:
-                 * near-black water that only brightens where the flashlight
-                 * vcolor lights it — level 4 gray base + green/warm streaks
-                 * near the light, never a flat lit surface). The per-texel
-                 * STP 0x0000 hole is preserved (F=0 -> B+0, a no-op). The
-                 * fog veil (orr) still applies additively BELOW the floor
-                 * texels exactly like the engine's veil-quad-then-GT4 OT
-                 * order in the STP branch. No depth write (semi-trans
-                 * prims never occlude later flakes — engine-true).
-                 * UNITS: the same pre-dither "8-bit-ish" domain as the
-                 * opaque path ((T5*C)>>4 + veil); the CURRENT framebuffer
-                 * value (already expanded 8-bit) is added IN THE SAME
-                 * domain and fb_put's quantize8 clamps the 5-bit sum at
-                 * 31 — B5 + F5 saturating, engine-exact. */
+                 * (V44: this ADD branch now serves the school-water ABR-1
+                 * surfaces only — the DR floor quads moved to RP_SUB_TEX,
+                 * see the subtractive branch below. The v37 alpha<128
+                 * STP-class sub-branch died with fx_water_floor_rgba — the
+                 * nibble/CLUT interpretation was func_80059E34's UNUSED
+                 * arg0==2 variant.) */
                 const uint8_t *bg = fb->rgb + pi * 3;
                 int r = (((tr >> 3) * vr) >> 4) + orr + (int)bg[0];
                 int g = (((tg >> 3) * vg) >> 4) + og + (int)bg[1];
                 int b = (((tb >> 3) * vb) >> 4) + ob + (int)bg[2];
+                fb_put(fb, x, y, r, g, b, quantize, dither);
+                continue;
+            }
+            if (pass == RP_SUB_TEX) {
+                /* V44 (the VIN water-CLUT research): the MIZ water-floor
+                 * quads — func_80059E34(1) forces the tpage to
+                 * (prim->u1 & 0x1FFFFF) | (0x140<<16) = 0x14D
+                 * (bodyprog_80056D8C.c:1546): bits 0-3 = 0xD (x 832),
+                 * bit 4 = 0 (y 0), bits 5-6 = 2 = ABR-2 B-F SUBTRACTIVE
+                 * (swanstation GPUTransparencyMode::
+                 * BackgroundMinusForeground, gpu_sw_backend.cpp:182-189:
+                 * the blargg per-channel B5-F5 saturating at 0), bits 7-8
+                 * = 2 = 15-bit DIRECT COLOR. F = modulate(liveTile T5,
+                 * flat 56) — F8 = (T5*56)>>4, the same pre-dither
+                 * 8-bit-ish domain as the add path; fb_put's quantize8
+                 * clamps the negative at 0 = the 5-bit subtract's
+                 * saturation. All live-tile texels are STP-set -> every
+                 * texel blends (subtracts). No veil, no depth write
+                 * (semi-trans prims never occlude the flakes). */
+                const uint8_t *bg = fb->rgb + pi * 3;
+                int r = (int)bg[0] - (((tr >> 3) * vr) >> 4);
+                int g = (int)bg[1] - (((tg >> 3) * vg) >> 4);
+                int b = (int)bg[2] - (((tb >> 3) * vb) >> 4);
                 fb_put(fb, x, y, r, g, b, quantize, dither);
                 continue;
             }
@@ -11507,12 +11561,18 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
  * head-insert chain). */
 /* v33 (S20): the RGBA view of the live DR_WAVE tile the water-floor
  * materials sample (MaterialInfo.waterLive). Updated from the same
- * composite fx_water_tile_update writes (RGB + opaque alpha). */
+ * composite fx_water_tile_update writes (RGB + opaque alpha).
+ * V44 (the VIN water-CLUT research): this is THE engine view — the MIZ
+ * water-floor models (field_B=0x10) draw the live tile DIRECTLY as
+ * 15-bit RGB555 colors (func_80059E34(1)'s forced 15-bit tpage) and
+ * SUBTRACT the flat-(56,56,56)-modulated texel from the background
+ * (ABR-2, tpage 0x14D bits 5-6); the alpha is 255 for every texel
+ * because every DR_WAVE CLUT entry is STP-set -> every texel of the
+ * composite blends. The v37 nibble view (fx_water_floor_rgba /
+ * g_waterFloorTex) was func_80059E34's UNUSED arg0==2 variant (no
+ * shipped DR room models it) — REMOVED. */
 static unsigned char g_waterLiveRGBA[32 * 32 * 4];
 static void fx_water_live_rgba(void) {
-    /* legacy v33 view (pre-waterFloor GLBs): the 32x32 composite as an RGB
-     * texture sampled 1:1 — SUPERSEDED by fx_water_floor_rgba (v37) when
-     * the GLB carries SH1X.waterFloor; kept so old GLBs render as before. */
     if (!g_waterTileEverUpdated)
         fx_water_tile_update(0);
     for (int y = 0; y < 32; y++)
@@ -11521,55 +11581,6 @@ static void fx_water_live_rgba(void) {
             const unsigned char *s = g_waterTileRGB[y][x];
             d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = 255;
         }
-}
-
-/* v37: THE ENGINE FLOOR VIEW (W1-6 fixed). The engine's DWAVE material
- * after the redirect is 4bpp on page 13 (x 832) with CLUT (0,0) — the
- * ROOM's slot-0 palette — and the floor quads' page-texel UVs sit at
- * v 224..255 (the func_8008E5B4 write window D_800AFDA4 {832,224,32,32}),
- * so each 15-bit live-tile halfword is read as FOUR 4bpp texels:
- *   texel(u, row) = clut[(tile15[row][u>>2] >> (4*(u&3))) & 0xF]
- * (u = 0..127 = the 32-halfword patch's 128 texels; row = 0..31). The
- * palette comes from the GLB's SH1X.waterFloor.clut15 (verbatim slot-0
- * CLUT row). Texel classes (a semi-trans prim, DuckStation
- * gpu_sw_rasterizer): STP set + color != 0 -> alpha 255 (the ABR-1
- * additive blend); STP CLEAR -> alpha 127 (an OPAQUE write — the room
- * palettes MIX these, e.g. DRUG03's rows); 0x0000 -> alpha 0 (the hole). */
-static unsigned char g_waterFloorTex[32 * 128 * 4];
-static void fx_water_floor_rgba(const Sh1x *sx) {
-    if (!sx || !sx->hasWaterFloorClut) return;
-    if (!g_waterTileEverUpdated)
-        fx_water_tile_update(0);
-    for (int row = 0; row < 32; row++)
-        for (int col = 0; col < 128; col++) {
-            unsigned nib = (unsigned)((g_waterTile15[row][col >> 2] >>
-                                       (4 * (col & 3))) & 0xF);
-            unsigned short c = sx->waterFloorClut[nib];
-            unsigned r = c & 31u, g = (c >> 5) & 31u, b = (c >> 10) & 31u;
-            unsigned char *d = g_waterFloorTex + ((size_t)row * 128 + col) * 4;
-            d[0] = (unsigned char)((r << 3) | (r >> 2));
-            d[1] = (unsigned char)((g << 3) | (g >> 2));
-            d[2] = (unsigned char)((b << 3) | (b >> 2));
-            d[3] = (c & 0x8000u) ? ((c & 0x7FFFu) ? 255 : 0)
-                                 : (c ? 127 : 0);
-        }
-    static int dumped = 0;
-    if (!dumped && getenv("FOGPOC_WFLTEX")) {
-        dumped = 1;
-        /* upscale x2 for visibility */
-        unsigned char up[64 * 256 * 3];
-        for (int y = 0; y < 32; y++)
-            for (int x = 0; x < 128; x++) {
-                const unsigned char *s = g_waterFloorTex + ((size_t)y * 128 + x) * 4;
-                for (int dy = 0; dy < 2; dy++)
-                    for (int dx = 0; dx < 2; dx++) {
-                        unsigned char *d = up + (((size_t)y * 2 + dy) * 256 + (x * 2 + dx)) * 3;
-                        d[0] = s[0]; d[1] = s[1]; d[2] = s[2];
-                    }
-            }
-        write_png_rgb(getenv("FOGPOC_WFLTEX"), up, 256, 64);
-        fprintf(stderr, "WFLTEX dumped %s\n", getenv("FOGPOC_WFLTEX"));
-    }
 }
 
 /* v34: the water scroll counter advance moved to the TICK discipline.
@@ -13770,11 +13781,25 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
                     }
                     if (mz > 0 && mz <= farCullQ8) {    /* engine: <=0 skip; >field_1C skip */
                         if (mz < 32) mz = 32;           /* engine: <=32 -> 32 */
-                        /* v16: the per-model OT section base — the engine's
-                         * addPrim target is org[func_800571D0(field_B_1) +
-                         * ((OTZ >> otShift) >> 2)] (func_80057090 hands
-                         * Gfx_MeshDraw the base-offset tag pointer)        */
-                        bucket = it->otBase + (mz >> 3);/* base + (Q8>>1)>>2, otShift 1 */
+                        if (sc->mat[it->matIdx].waterLive) {
+                            /* V44 (the VIN water-CLUT research): the MIZ
+                             * water-floor models are field_B=0x10 ->
+                             * func_80059D50(1) -> func_80059E34(1), whose
+                             * addPrim target is the FIXED org[640] tag
+                             * (bodyprog_80056D8C.c:1455) — NOT the depth
+                             * bucket: the quads ride one fixed far overlay
+                             * slot (occluded by nearer geometry, added over
+                             * everything beyond it; the caustic ring's 641
+                             * and the glint's 639 bracket it exactly like
+                             * the engine). */
+                            bucket = 640;
+                        } else {
+                            /* v16: the per-model OT section base — the engine's
+                             * addPrim target is org[func_800571D0(field_B_1) +
+                             * ((OTZ >> otShift) >> 2)] (func_80057090 hands
+                             * Gfx_MeshDraw the base-offset tag pointer)        */
+                            bucket = it->otBase + (mz >> 3);/* base + (Q8>>1)>>2, otShift 1 */
+                        }
                     }
                 }
             }
@@ -13858,42 +13883,45 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
         if (t->w <= 0) continue;
         const uint8_t *tex = sc->texBlob + t->off;
         int tw = t->w, th = t->h;
-        int waterFloorEngine = 0;
+        int waterLiveEngine = 0;
         if (m->waterLive) {
             /* v33 (S20): the LIVE DR_WAVE tile — the engine's material
              * redirect (func_8008E4EC rewrites the DWAVE material to
              * tpage 13 x=832 at every chunk load) makes the water-floor
              * prims sample the region func_8008E5B4 rewrites per frame
              * (the 32x32 two-quad composite at (832,224)).
-             * v37 (W1-6): the ENGINE consumption is 4bpp NIBBLES through
-             * the ROOM's CLUT (0,0) — Material_FsImageApply's field_E=45
-             * (4bpp, ABR-1 ADDITIVE) + field_10=0 with the img0 window
-             * (u,v)=(0,0): the floor quads' PAGE-texel UVs (u 0..62,
-             * v 224..255) read the live patch as 4 texels per 15-bit
-             * halfword. fx_water_floor_rgba builds that 128x32 pattern;
-             * the UV remap below maps u_norm*256 = page_u onto pattern
-             * columns (u'=u*2) and v_norm*64-224 onto pattern rows
-             * (v'=v*2-7). GLBs without SH1X.waterFloor keep the legacy
-             * v33 RGB view. */
-            if (R->sc->sh1x.hasWaterFloorClut) {
-                fx_water_floor_rgba(&R->sc->sh1x);
-                tex = g_waterFloorTex;
-                tw = 128; th = 32;
-                waterFloorEngine = 1;
-            } else {
-                fx_water_live_rgba();
-                tex = g_waterLiveRGBA;
-                tw = th = 32;
-            }
+             * V44 (the VIN water-CLUT research): the ENGINE consumption is
+             * 15-bit DIRECT COLOR — the MIZ water-floor models are
+             * field_B=0x10 -> func_80059D50(1) -> func_80059E34(1), whose
+             * packet generator FORCES the tpage to (prim->u1 & 0x1FFFFF) |
+             * (0x140<<16) = 0x14D (bodyprog_80056D8C.c:1546): bits 7-8 = 2
+             * = 15-bit DIRECT COLOR, bits 5-6 = 2 = ABR-2 B-F
+             * SUBTRACTIVE, a FLAT code-0x2E POLY_FT4 with color
+             * (56,56,56) (packedColor 0x2E383838) at the FIXED OT bucket
+             * org[640] — the quads read the live 32x32 tile DIRECTLY as
+             * RGB555, NO CLUT, and SUBTRACT the flat-modulated dapple
+             * from the background. The v37 nibble/CLUT interpretation
+             * (fx_water_floor_rgba / g_waterFloorTex) was
+             * func_80059E34's UNUSED arg0==2 variant — REMOVED. The
+             * glTF UVs: the v45 GLBs carry TILE-relative coords
+             * (waterLiveUvTile — floor.uvUnits present); the v33..v44
+             * GLBs carry the sheet-normalized form (u/128, v/64) whose
+             * un-mangle (u*4, v*2-7) recovers the tile coords. */
+            fx_water_live_rgba();
+            tex = g_waterLiveRGBA;
+            tw = th = 32;
+            waterLiveEngine = 1;
         }
-        /* v34: waterLive forces the ADDITIVE semi-trans pass (the runtime
-         * field_E=45 rewrite); everything else follows the ripper's
-         * alphaMode exactly as before.
+        /* V44: waterLive (the DR/DRU MIZ floor quads) = the forced
+         * func_80059E34(1) packet path: 15-bit direct color + ABR-2
+         * SUBTRACTIVE + flat (56,56,56) + fixed bucket 640 — RP_SUB_TEX.
+         * Everything else follows the ripper's alphaMode exactly as
+         * before.
          * V41 C-5: MASK (alphaMode 1) gets its OWN pass value so the
          * raster can write fb->z for its ta>0 texels (the engine's leaf
          * GT4s are opaque ST-clear punch-through — see raster_tri);
          * BLEND (alphaMode 2) stays RP_BLEND_TEX (no depth write). */
-        const PassMode quadPass = m->waterLive ? RP_ADD_TEX
+        const PassMode quadPass = m->waterLive ? RP_SUB_TEX
             : ((m->alphaMode == 0) ? RP_OPAQUE
                : ((m->alphaMode == 1) ? RP_MASK_TEX : RP_BLEND_TEX));
         for (int ti = 0; ti < post[bi].ntri && post[bi].tri0 + ti * 3 + 2 < it->icount; ti++) {
@@ -13914,15 +13942,23 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
              * with the SAME engine formula as opaque prims (see raster_tri)
              * + the additive fog veil ON TOP (engine semi-trans G4 after the
              * textured quad in draw order). Holes stay truly transparent. */
-            if (waterFloorEngine) {
-                /* v37: the page-texel UV remap — the converter normalized
-                 * the quads' PAGE texel coords by the DR_WAVE image's
-                 * 256x64 (u_norm = u_page/256, v_norm = v_page/64), and
-                 * the floor samples the 128x32 pattern at (u_page,
-                 * v_page-224): u' = u_norm*256/128 = u*2, v' =
-                 * (v_norm*64-224)/32 = v*2-7. Both stay inside the pattern
-                 * (u 0..62 < 128; v 224..255 -> rows 0..31) — no wrap, the
-                 * GPU reads the page rows directly. */
+            if (waterLiveEngine) {
+                /* V44: the flat (56,56,56) modulation + NO fog veil — the
+                 * engine's func_80059E34 writes packedColor 0x2E383838
+                 * (r0=g0=b0=56) for every vertex and adds NO veil G4 (the
+                 * fog veil is Gfx_MeshDraw's STP-branch companion; the
+                 * alternate path replaces that draw entirely); the depth
+                 * fade is the far cull alone (var_t9 =
+                 * MIN(Q8(7.61)<<3, fog.far) — the same farCullQ8 above).
+                 * V45 UV forms: the v45 GLBs carry TILE-relative
+                 * TEXCOORD_0 (u/32, (v-224)/32 — the extras'
+                 * floor.uvUnits) used AS-IS; the v33..v44 GLBs carry the
+                 * sheet-normalized form (u/128, v/64) whose un-mangle
+                 * (u*4, v*2-7) recovers the tile coords 0..0.9688. All
+                 * live-tile texels are STP-set (every DR_WAVE CLUT entry
+                 * >= 0x8000) -> every texel blends (SUBTRACTS — ABR-2,
+                 * see the RP_SUB_TEX raster branch); the 0x0000-hole rule
+                 * never fires on the direct view. */
                 if (getenv("FOGPOC_WFLDBG")) {
                     static int cnt = 0;
                     fprintf(stderr, "WFLDBG[%d] item=%d name=%s buf=%d vcol=(%d,%d,%d) z=%.2f\n",
@@ -13931,9 +13967,18 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
                     cnt++;
                 }
                 RVert ra = *a, rb = *b, rc = *c;
-                ra.u = a->u * 2.0f;  ra.v = a->v * 2.0f - 7.0f;
-                rb.u = b->u * 2.0f;  rb.v = b->v * 2.0f - 7.0f;
-                rc.u = c->u * 2.0f;  rc.v = c->v * 2.0f - 7.0f;
+                if (!m->waterLiveUvTile) {
+                    /* the legacy (v33..v44) sheet-normalized form */
+                    ra.u = a->u * 4.0f;  ra.v = a->v * 2.0f - 7.0f;
+                    rb.u = b->u * 4.0f;  rb.v = b->v * 2.0f - 7.0f;
+                    rc.u = c->u * 4.0f;  rc.v = c->v * 2.0f - 7.0f;
+                }
+                ra.vcol[0] = ra.vcol[1] = ra.vcol[2] = 56;
+                rb.vcol[0] = rb.vcol[1] = rb.vcol[2] = 56;
+                rc.vcol[0] = rc.vcol[1] = rc.vcol[2] = 56;
+                ra.ocol[0] = ra.ocol[1] = ra.ocol[2] = 0;
+                rb.ocol[0] = rb.ocol[1] = rb.ocol[2] = 0;
+                rc.ocol[0] = rc.ocol[1] = rc.ocol[2] = 0;
                 raster_tri(fb, &ra, &rb, &rc, tex, tw, th, quadPass,
                            &R->opts, R->opts.ps1, R->dither,
                            R->enginePixScale, R->enginePixScaleY);
