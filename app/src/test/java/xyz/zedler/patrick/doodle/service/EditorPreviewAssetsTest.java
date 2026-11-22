@@ -19,7 +19,10 @@
  * sAssetsReady latch is process-global (correct in production, where
  * the data dirs are stable for the process lifetime), while Robolectric
  * gives every test method a FRESH data dir: separate methods would see
- * the latch set with an empty new dir.
+ * the latch set with an empty new dir. V43 (the v1.10.0 red-CI fix):
+ * the latch is reset via the @VisibleForTesting hook before the first
+ * copy — the class is order-independent against AssetRefreshTest
+ * (whichever class runs SECOND would otherwise skip the whole copy).
  */
 package xyz.zedler.patrick.doodle.service;
 
@@ -52,6 +55,7 @@ public class EditorPreviewAssetsTest {
     Context context = ApplicationProvider.getApplicationContext();
     // the wallpaper service class is NEVER instantiated here — exactly
     // the "wallpaper not set" scenario from the bug report
+    Sh1WallpaperService.resetAssetsReadyForTest();
     Sh1WallpaperService.copyAssetsIfNeeded(context);
 
     File dir = Sh1Storage.sh1Dir(context);

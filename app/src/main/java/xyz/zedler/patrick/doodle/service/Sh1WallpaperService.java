@@ -19,6 +19,7 @@ import android.os.PowerManager;
 import android.service.wallpaper.WallpaperService;
 import android.util.Log;
 import android.view.SurfaceHolder;
+import androidx.annotation.VisibleForTesting;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -182,6 +183,27 @@ public class Sh1WallpaperService extends WallpaperService {
   private static volatile boolean sAssetsReady = false;
   private static final AtomicInteger sGen = new AtomicInteger(0);
   private static volatile boolean sEngineStarted = false;
+
+  /**
+   * V43 (the v1.10.0 red-CI fix): test isolation for the process-global
+   * copy latch. Robolectric gives EVERY test class (and every test
+   * method) a fresh data dir, while this latch is process-global —
+   * correct in production, where the data dirs are stable for the
+   * process lifetime, but fatal for the unit-test suite: Gradle runs
+   * test classes in an unspecified JVM order, so whichever class
+   * touched the copy SECOND saw the latch already set and skipped the
+   * whole flow (AssetRefreshTest then found no .asset_version marker).
+   * The tests reset the latch before each copy invocation that must
+   * perform real work — every refresh phase then exercises the ACTUAL
+   * guard logic (version marker + hash manifest), not the latch
+   * shortcut. NEVER call from production code.
+   */
+  @VisibleForTesting
+  static void resetAssetsReadyForTest() {
+    synchronized (Sh1WallpaperService.class) {
+      sAssetsReady = false;
+    }
+  }
 
   /**
    * v10.1 BUG 2: the number of LIVE Sh1Engine instances (the system

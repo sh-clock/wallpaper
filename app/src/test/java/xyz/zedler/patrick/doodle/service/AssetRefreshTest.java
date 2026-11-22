@@ -11,7 +11,13 @@
  *
  * The whole flow runs as ONE test method on purpose — the sAssetsReady
  * latch is process-global (see EditorPreviewAssetsTest's NOTE) while
- * Robolectric gives every method a fresh data dir.
+ * Robolectric gives every method a fresh data dir. V43 (the v1.10.0
+ * red-CI fix): the latch is reset before EVERY copy invocation via the
+ * @VisibleForTesting hook, so (a) the class is order-independent against
+ * EditorPreviewAssetsTest and (b) every phase below exercises the REAL
+ * guard logic (version marker + hash manifest) instead of short-
+ * circuiting on the latch — the phase-3 refresh previously could not
+ * have run at all with the latch left set by phase 1.
  */
 package xyz.zedler.patrick.doodle.service;
 
@@ -90,6 +96,7 @@ public class AssetRefreshTest {
   @Test
   public void upgradePathRefreshesStaleAssetsAndPreservesUserData() throws Exception {
     Context context = ApplicationProvider.getApplicationContext();
+    Sh1WallpaperService.resetAssetsReadyForTest();
     Sh1WallpaperService.copyAssetsIfNeeded(context);
     File dir = Sh1Storage.sh1Dir(context);
     assertTrue(dir.isDirectory());
@@ -103,10 +110,12 @@ public class AssetRefreshTest {
     File glb = new File(dir, GLB);
     assertArrayEquals(apkBytes(context, GLB), fileBytes(glb));
 
-    // (2) same-version no-op: our unmodified copy is NOT rewritten
-    //     (the mtime latch — idempotence already proven by the latch;
-    //     here we prove the guard does not fire without the version bump)
+    // (2) same-version no-op: the rebind runs the REAL guard (the version
+    //     marker matches, every file present) and returns WITHOUT the
+    //     rewrite — not the latch shortcut (V43: the latch is reset so
+    //     this actually reaches the guard)
     long glbMtime = glb.lastModified();
+    Sh1WallpaperService.resetAssetsReadyForTest();
     Sh1WallpaperService.copyAssetsIfNeeded(context);
     assertEquals(glbMtime, glb.lastModified());
 
@@ -121,6 +130,7 @@ public class AssetRefreshTest {
     File camdat = new File(dir, CAMDAT);
     writeFile(camdat, "{\"user\":true}".getBytes(StandardCharsets.UTF_8));
 
+    Sh1WallpaperService.resetAssetsReadyForTest();
     Sh1WallpaperService.copyAssetsIfNeeded(context);
 
     // the deleted GLB is back and byte-identical to the APK
@@ -144,6 +154,7 @@ public class AssetRefreshTest {
     mo = new java.io.DataOutputStream(new java.io.FileOutputStream(marker));
     mo.writeLong(1L);
     mo.close();
+    Sh1WallpaperService.resetAssetsReadyForTest();
     Sh1WallpaperService.copyAssetsIfNeeded(context);
     File bak = new File(dir, "camdat.user.bak");
     assertTrue("the user camdat must be backed up at the transition", bak.isFile());
