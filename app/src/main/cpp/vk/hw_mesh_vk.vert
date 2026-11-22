@@ -17,7 +17,7 @@ layout(location = 3) in vec3 a_ocol;   /* per-vertex additive veil color    */
 layout(location = 4) in float a_z;     /* view depth (m)                    */
 layout(location = 5) in uvec4 a_ddaA;      /* U0,V0,Dudx,Dudy (u32 Q24)     */
 layout(location = 6) in uvec2 a_ddaB;      /* Dvdx,Dvdy (u32 Q24)           */
-layout(location = 7) in ivec4 a_ddaAnchor; /* X0,Y0 (Q12), KX,KY           */
+layout(location = 7) in ivec4 a_ddaAnchor; /* X0,Y0 (Q12), KX,KY (float bits)  */
 layout(location = 8) in ivec2 a_texSize;   /* tw,th                        */
 layout(location = 9) in ivec4 a_flags;     /* mode,useDDA,persp,layer      */
 layout(push_constant) uniform PC {
