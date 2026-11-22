@@ -674,6 +674,31 @@ static void hw_push_tri(const RVert *vA, const RVert *vB, const RVert *vC,
  * entry composites over ALL GPU-batched quads instead of only the
  * farther ones — for the TV quads this only matters where nearer mesh
  * geometry overlaps a screen (it would have painted over the TV).
+ * v43 re-port (WA2-2): the v24 WorldMap_Draw SUBCELL WINDOW block (the
+ * sh1xItemMask construction: subcell floor/clamp, the
+ * WorldMap_SubchunkVisibleCheck range + AABB frustum + span verdicts,
+ * the billboard-anchor inheritance, the cutsceneOnly drop-live rule and
+ * the driver-23 gated-static rule) + the collection gate
+ * `if (sh1xItemMask && !sh1xItemMask[i]) continue;` are walked VERBATIM
+ * at the engine's position (between the weather collection and the quad
+ * loop). The stale v9.x copy gated only dbgItem/matIdx, so the hardware
+ * backends drew out-of-window geometry, cutscene beans and gated statics
+ * the software backend (and the engine) never add. The mask is freed at
+ * this function's cleanup seams (the SW frees it at render_frame's end —
+ * nothing reads it past the collection loop, so the lifetime need not
+ * extend into the replay/tail passes). Legacy GLBs (hasExtras == 0)
+ * keep the all-items path — byte-identical to before on those.
+ * v43 re-port (WA2-1): the v26.3/v27.2 anims block (sh1x_anims_draw_apply
+ * + the SH1X_ANIM_DEBUG dump) is walked VERBATIM at the engine's position
+ * (immediately after `int nItems = sc->itemCount;`, before the transform
+ * loop) — the stale v9.x copy went straight to transform_item2, so every
+ * animated prop (fans/swings/MOVACHES) froze at its authored pose in BOTH
+ * hardware backends. The apply is IDEMPOTENT per frame (it resets each
+ * item's model to the g_animBase snapshot before re-applying the driver
+ * pose — see sh1x_anims_draw_apply), so the build->render_frame fallback
+ * paths (backend init failure / GPU frame failure / OOM batch) that run
+ * the software renderer AFTER this walk stay correct. Safe no-op when
+ * sc->sh1x.nAnims == 0 (legacy GLBs).
  * ========================================================================*/
 static int hw_build_batch(Frame *fb, const Renderer *R, const CamPose *cam) {
     const Scene *sc = R->sc;
@@ -705,6 +730,46 @@ static int hw_build_batch(Frame *fb, const Renderer *R, const CamPose *cam) {
     }
 
     int nItems = sc->itemCount;
+    /* v27.2 (B-12): the anim tick + apply are the SANCTIONED mutation of
+     * the heap-owned scene (the Renderer treats it const for render
+     * purity; the driver state lives in sc->sh1x/items) — one documented
+     * cast, replacing the scattered const-discards. */
+    sh1x_anims_draw_apply((Scene *)sc);   /* v26.3: live driver rotations -> items */
+    if (getenv("SH1X_ANIM_DEBUG")) {
+        static int dbgN = 0;
+        if (dbgN++ < 400) {
+            for (int i = 0; i < sc->sh1x.nAnims; i++) {
+                const Sh1xPropAnim *da = &sc->sh1x.anims[i];
+                fprintf(stderr, "[animstate] t? cur=(%.2f,%.2f,%.2f) %s",
+                        da->cur[0], da->cur[1], da->cur[2], da->object);
+                if (da->driver == 1)   /* fanArray per-fan split state */
+                    fprintf(stderr, " fanAng[0]=%d fanAng[6]=%d "
+                            "fanAng[7]=%d fanAng[15]=%d (raw)",
+                            da->fanAng[0], da->fanAng[6],
+                            da->fanAng[7], da->fanAng[15]);
+                if (da->driver == 14)  /* ferris pendulum state */
+                    fprintf(stderr, " master=%d pend=(%d,%d,%d,%d) "
+                            "vel=(%d,%d,%d,%d)",
+                            da->mvMaster, da->mvPend[0], da->mvPend[1],
+                            da->mvPend[2], da->mvPend[3],
+                            da->mvPendVel[0], da->mvPendVel[1],
+                            da->mvPendVel[2], da->mvPendVel[3]);
+                if (da->driver == 4 || da->driver == 5 || da->driver == 8)
+                    /* v32.2 debug: the raw swing-family live state */
+                    fprintf(stderr, " rawVy=%d rawVel=%d",
+                            da->rawVy, da->rawVel);
+                fprintf(stderr, "\n");
+            }
+        }
+        static int once = 0;
+        if (!once) { once = 1;
+            for (int i = 0; i < sc->itemCount; i++)
+                if (sc->item[i].animIdx >= 0)
+                    fprintf(stderr, "[animbind] item %d '%s' -> anim %d (%s)\n", i,
+                            sc->item[i].name, sc->item[i].animIdx,
+                            sc->sh1x.anims[sc->item[i].animIdx].object);
+        }
+    }
     RVert *xv = (RVert *)calloc((size_t)(sc->vertCount ? sc->vertCount : 1), sizeof(RVert));
     for (int i = 0; i < nItems; i++) {
         transform_item2(R, &sc->item[i], &view, &viewProj,
@@ -735,7 +800,12 @@ static int hw_build_batch(Frame *fb, const Renderer *R, const CamPose *cam) {
             nQuadMax += sc->item[i].icount / 3 + 1;
     }
     PostEnt *post = (PostEnt *)malloc(sizeof(PostEnt) *
-                                      (size_t)(nQuadMax + SNOW_COUNT_MAX + 1));
+                                      (size_t)(nQuadMax + SNOW_COUNT_MAX + 65));
+    /* v43 (the branch-update, twin fog_poc.c:13203-13204 verbatim): the +65
+     * headroom (64 FxPrim slots + 1) is the alloc's own worst-case guard —
+     * the TV collect (24 max) + the quad loop's unguarded pushes must stay
+     * under SNOW_COUNT_MAX + 65 like the SW twin. */
+
     if (!xv || !post) { free(xv); free(post); return 0; }
     int nPost = 0, seq = 0;
     int nFlake = 0;
@@ -934,10 +1004,255 @@ static int hw_build_batch(Frame *fb, const Renderer *R, const CamPose *cam) {
                            nQuadMax + SNOW_COUNT_MAX + 1);
     }
 
+    /* ==================================================================
+     * v24 — the WorldMap_Draw SUBCELL WINDOW (engine-verbatim).
+     * world_map.c:1348-1447 WorldMap_Draw:
+     *   curPosX/curPosZ = camera pos Q8 (this PoC: cam->pos*256)
+     *   chunkEdgeX/Z    = ipdHdr->chunkX/Z * Q8(CHUNK_SIZE=40)  [10240 Q8]
+     *   subchunkX = FLOOR_TO_STEP(curPosX-chunkEdgeX, Q8(8)) clamped [0,4]
+     *   subchunkZ likewise;
+     *   modelOrderIdxs = &textureCount + z*10 + x*2  -> (start, count)
+     *   for i in [start, start+count): buffer = modelBuffers[modelOrder[i]]
+     *     WorldMap_SubchunkVisibleCheck(buffer, curPosX-chunkEdgeX,
+     *                                    curPosZ-chunkEdgeZ, edges)
+     *       -> ranges: subchunkX > minX && < maxX && subchunkZ > minZ &&
+     *                  < maxZ  (NOTE: the same Q8 value, NOT the floored
+     *                  subchunk corner — verbatim)
+     *          then AABB (minX, Q8(-8), minZ)-(maxX, Q8(4), maxZ) vs the
+     *          Vw_AabbVisibleInFrustumCheck(modelMat @ chunk edge, near
+     *          Q8(25), far SCREEN_GEOM_DIST=240): 8 corners -> visible iff
+     *          NOT all outside near / all outside far / fully off-screen.
+     *     instances in buffer order (modelInfo.modelHdr NULL -> skip;
+     *       workm = rt,t; t += chunkEdge), then billboard anchors.
+     * SH1X GLBs carry all of it; legacy GLBs (no SH1X) keep the old
+     * all-items path (v11-v23 behaviour). The per-quad OT bucket math
+     * below is UNCHANGED — the window only SELECTS which items add.    */
+    int *sh1xItemMask = NULL;    /* 1 = this item is in the engine window */
+    const Sh1x *sx = &sc->sh1x;
+    if (sx->hasExtras && R->dbgItem < 0) {
+        /* SH1X axes are ENGINE axes (converter: pos=(x+edge,-y,-(z+edge))/256
+         * — glTF_z = -engine_z, glTF_y = -engine_y). WorldMap_Draw consumes
+         * engine-space curPosX/curPosZ, so the camera's engine position is
+         * (x, -z) of the glTF camera. Chunk edges/box Q7.8 values are in
+         * engine units as stored.                                      */
+        int curPosX = (int)floorf(cam->pos.x * 256.0f + 0.5f);
+        int curPosZ = (int)floorf(-cam->pos.z * 256.0f + 0.5f);
+        int chunkEdgeX = sx->chunkX * 10240;   /* Q8(CHUNK_SIZE 40) */
+        int chunkEdgeZ = sx->chunkZ * 10240;
+        int subX = curPosX - chunkEdgeX, subZ = curPosZ - chunkEdgeZ;
+        /* FLOOR_TO_STEP(x, 2048): x>=0 ? x/2048 : (x-2047)/2048 (int C
+         * division truncates toward zero, matching the macro's intent) */
+        subX = (subX >= 0) ? (subX / 2048) : ((subX - 2047) / 2048);
+        subZ = (subZ >= 0) ? (subZ / 2048) : ((subZ - 2047) / 2048);
+        if (subX < 0) subX = 0;
+        if (subX > 4) subX = 4;
+        if (subZ < 0) subZ = 0;
+        if (subZ > 4) subZ = 4;
+        int start = sx->subcell[subZ][subX][0];
+        int count = sx->subcell[subZ][subX][1];
+        if (getenv("FOGPOC_SH1X_DEBUG"))
+            fprintf(stderr, "[sh1x] cam engine pos Q8 (%d,%d) chunk (%d,%d) edges (%d,%d) subcell (%d,%d) start=%d count=%d\n",
+                    curPosX, curPosZ, sx->chunkX, sx->chunkZ, chunkEdgeX, chunkEdgeZ,
+                    subX, subZ, start, count);
+        if (start < 0 || count < 0) { start = 0; count = sx->modelOrderSize; }
+        if (start + count > sx->modelOrderSize)
+            count = sx->modelOrderSize - start;
+        sh1xItemMask = (int *)calloc((size_t)(nItems > 0 ? nItems : 1), sizeof(int));
+        /* the visible buffers set (engine WorldMap_SubchunkVisibleCheck):
+         * subchunkX/Z here are the UNfloored camera-relative Q8 values —
+         * the engine passes curPosX-chunkEdgeX (Q8, not floored).      */
+        int relX = curPosX - chunkEdgeX, relZ = curPosZ - chunkEdgeZ;
+        unsigned char bufVis[256];
+        memset(bufVis, 0, sizeof(bufVis));
+        for (int i = 0; i < count; i++) {
+            int b = sx->modelOrder[start + i];
+            if (b < 0 || b >= sx->nBuffers || b >= 256) continue;
+            if (bufVis[b]) continue;          /* already verdict-ed */
+            bufVis[b] = 1;
+            /* range test (verbatim: strict > and <) */
+            int inRange = 0;
+            for (int r = 0; r < sx->bufs[b].subchunkCount && !inRange; r++) {
+                const int mnX = sx->bufs[b].subchunkRanges[r].minX;
+                const int mxX = sx->bufs[b].subchunkRanges[r].maxX;
+                const int mnZ = sx->bufs[b].subchunkRanges[r].minZ;
+                const int mxZ = sx->bufs[b].subchunkRanges[r].maxZ;
+                if (relX > mnX && relX < mxX && relZ > mnZ && relZ < mxZ)
+                    inRange = 1;
+            }
+            /* AABB frustum check: Vw_AabbVisibleInFrustumCheck with
+             * modelMat = translate(chunkEdgeX, 0, chunkEdgeZ), box corners
+             * (minX,-2048,minZ)..(maxX,1024,maxZ) Q8, near Q8(25)=6400,
+             * far SCREEN_GEOM_DIST=240 (a GTE-projection test: the box is
+             * visible unless ALL 8 corners are behind near / beyond far /
+             * off-screen on one side. Implemented in view space with the
+             * PoC view matrix; a corner at view depth d has GTE SZ = d*256
+             * (Q8) — near/far compare in those units).                */
+            int visible = 0;
+            if (inRange) {
+                int nOutNear = 0, nOutFar = 0;
+                for (int ci = 0; ci < 8; ci++) {
+                    /* world-space AABB corner in the buffer's own frame +
+                     * chunk edge offset (engine passes box coords as Q7.8
+                     * SVECTORs transformed by the chunk-edge matrix).
+                     * SH1X Q7.8 box values are ENGINE units; the PoC view
+                     * matrix is glTF-space — convert (x,y,z)e -> (x,-y,-z)g
+                     * (the converter's axis map) before projecting.       */
+                    float ex = (float)((ci & 1) ? sx->bufs[b].maxX : sx->bufs[b].minX) / 256.0f
+                              + (float)chunkEdgeX / 256.0f;
+                    float ey = (ci & 2) ? (1024.0f / 256.0f) : (-2048.0f / 256.0f);
+                    float ez = (float)((ci & 4) ? sx->bufs[b].maxZ : sx->bufs[b].minZ) / 256.0f
+                              + (float)chunkEdgeZ / 256.0f;
+                    float wx = ex, wy = -ey, wz = -ez;   /* engine -> glTF  */
+                    float vx = view.m[0]*wx + view.m[4]*wy + view.m[8]*wz + view.m[12];
+                    float vy = view.m[1]*wx + view.m[5]*wy + view.m[9]*wz + view.m[13];
+                    float vz = view.m[2]*wx + view.m[6]*wy + view.m[10]*wz + view.m[14];
+                    float d = -vz;                 /* PoC forward depth (m)  */
+                    int szQ8 = (int)floorf(d * 256.0f + 0.5f);
+                    /* Engine units (vw_calc.c:619-623, cross-calibrated with
+                     * the sibling Vw_AabbVisibleInScreenCheck's 0x3FFE depth
+                     * guard = 63 m at Q8): transformedZ = RotTransPers*4 =
+                     * Q8 view depth (256/m). The WorldMap call passes
+                     * nearPlane = Q8(25.0f) = 6400 (25 m — the TRUE far
+                     * cull; all 8 corners beyond 25 m => invisible) and
+                     * farPlane = SCREEN_GEOM_DIST = 224 (0.875 m — the
+                     * near-plane guard: corners closer than 0.875 m or
+                     * behind the camera get region-flagged for the
+                     * near-plane span test instead; v40: NTSC 224 not the
+                     * PAL 240).                                    */
+                    if (szQ8 > 6400) nOutNear++;    /* all-beyond-25m cull  */
+                    if (szQ8 < 224) nOutFar++;     /* v40: farPlane = SCREEN_GEOM_DIST = 224 (map.c:1479) */
+                    else {
+                        /* on-screen region flags (screen center +/- 160/120
+                         * px; the PoC screen grid = enginePixScale x 320) */
+                        /* v24.1 FIX (audit #3): GTE projection bounds —
+                         * v40: H = SCREEN_GEOM_DIST = gsScreenHeight = 224
+                         * (NTSC; draw.c:35 + game_main.c:84), screen half
+                         * 160/112 px => |vx| <= d*160/224, |vy| <= d*112/224
+                         * (engine's OWN frustum; fov-independent). */
+                        if (d > 0.05f) {
+                            float bx = d * (160.0f / 224.0f);  /* v40: GTE H=224 */
+                            float by = d * (112.0f / 224.0f);  /* v40: gsScreenHeight>>1=112 over H=224 (vw_calc.c:635-665) */
+                            if (vx >= -bx && vx <= bx && vy >= -by && vy <= by)
+                                visible = 1;
+                        }
+                    }
+                }
+                /* v24.1 FIX (audit #2): engine order — all-8 verdicts
+                 * BEFORE the center flag (vw_calc.c:673-686). */
+                if (nOutNear == 8) visible = 0;
+                else if (nOutFar == 8) visible = 0;
+                else if (visible) { /* center hit above */ }
+                else {
+                    /* span check (Vw_ScreenRegionSpanCheck + edge-flag
+                     * verdicts): approximate the engine's 8-corner screen
+                     * regions — a box whose projected corners span BOTH
+                     * left-right or BOTH top-bottom is visible; corners
+                     * behind the near plane count as off-screen on ALL
+                     * sides (the GTE clips them to the screen edges)    */
+                    int side[8][2];
+                    int anySpan = 0;
+                    for (int ci = 0; ci < 8; ci++) {
+                        float ex = (float)((ci & 1) ? sx->bufs[b].maxX : sx->bufs[b].minX) / 256.0f
+                                  + (float)chunkEdgeX / 256.0f;
+                        float ey = (ci & 2) ? (1024.0f / 256.0f) : (-2048.0f / 256.0f);
+                        float ez = (float)((ci & 4) ? sx->bufs[b].maxZ : sx->bufs[b].minZ) / 256.0f
+                                  + (float)chunkEdgeZ / 256.0f;
+                        float wx = ex, wy = -ey, wz = -ez;   /* engine -> glTF */
+                        float vx = view.m[0]*wx + view.m[4]*wy + view.m[8]*wz + view.m[12];
+                        float vy = view.m[1]*wx + view.m[5]*wy + view.m[9]*wz + view.m[13];
+                        float vz = view.m[2]*wx + view.m[6]*wy + view.m[10]*wz + view.m[14];
+                        float d = -vz;
+                        if (d <= 0.05f) { side[ci][0] = -9; side[ci][1] = -9; continue; }
+                        /* v24.1 (audit #3): same GTE bounds. */
+                        float bx = d * (160.0f / 224.0f);      /* v40: GTE H=224 */
+                        float by = d * (112.0f / 224.0f);      /* v40: gsScreenHeight>>1=112 over H=224 (vw_calc.c:635-665) */
+                        side[ci][0] = (vx < -bx) ? 0 : (vx > bx ? 2 : 1);
+                        side[ci][1] = (vy < -by) ? 0 : (vy > by ? 2 : 1);
+                    }
+                    int L = 0, Rr = 0, T = 0, B = 0, C = 0;
+                    for (int ci = 0; ci < 8; ci++) {
+                        if (side[ci][0] == 0 || side[ci][0] == -9) L++;
+                        if (side[ci][0] == 2 || side[ci][0] == -9) Rr++;
+                        if (side[ci][1] == 0 || side[ci][1] == -9) T++;
+                        if (side[ci][1] == 2 || side[ci][1] == -9) B++;
+                        if (side[ci][0] == 1 && side[ci][1] == 1) C = 1;
+                    }
+                    if (C) anySpan = 1;
+                    else if (L && Rr) anySpan = 1;   /* spans left-right */
+                    else if (T && B) anySpan = 1;     /* spans top-bottom  */
+                    /* engine edge verdicts (flags0/flags1 exclusive-pair
+                     * rules): all-corners-left / all-right / all-top /
+                     * all-bottom with no center -> NOT visible          */
+                    if (anySpan) visible = 1;
+                }
+            }
+            bufVis[b] = (unsigned char)(visible ? 2 : 3);
+            if (getenv("FOGPOC_SH1X_DEBUG"))
+                fprintf(stderr, "[sh1x] buf %d inRange=%d visible=%d (minX %d maxX %d minZ %d maxZ %d)\n",
+                        b, inRange, visible, sx->bufs[b].minX, sx->bufs[b].maxX,
+                        sx->bufs[b].minZ, sx->bufs[b].maxZ);
+        }
+        /* mark items whose buffer is visible (engine draw order = the
+         * modelOrder range; the PoC's item index order is already the
+         * converter's buffer-ordered emission, so mask + keep order)   */
+        for (int i = 0; i < nItems; i++) {
+            const DrawItem *it = &sc->item[i];
+            /* v27.2: cutsceneOnly posed nodes (map7_s02 beans) are NOT
+             * drawn at engine-fresh — the engine adds them ONLY inside
+             * the bag cutscene (WorldObjects_Add lives in case 14 of
+             * the state machine; floorHitCount==16 ends it). Visible
+             * only while the driver is UNGATED and the drop has fired. */
+            if (it->cutsceneOnly) {
+                const Sh1xPropAnim *ca =
+                    (it->animIdx >= 0 && it->animIdx < sc->sh1x.nAnims)
+                        ? &sc->sh1x.anims[it->animIdx] : NULL;
+                int dropLive = ca && !ca->gated && ca->kickPhase >= 1;
+                if (!dropLive) { sh1xItemMask[i] = 0; continue; }
+            }
+            /* v40: STATIC WorldObjects (driver 23) — the posed scenery
+             * the game WorldObjects_Add's only when its gate is live
+             * (chunk + event polarity). A GATED static = the add never
+             * fired at this state -> NOT drawn (e.g. engine-fresh:
+             * KEY_HIDE 113-set hidden, MAL6_28_ 327-set hidden while
+             * MAL6_27_ 327-clear shows; --anims-demo opens all). */
+            if (it->animIdx >= 0 && it->animIdx < sc->sh1x.nAnims) {
+                const Sh1xPropAnim *ca = &sc->sh1x.anims[it->animIdx];
+                if (ca->driver == 23 && ca->gated) {
+                    sh1xItemMask[i] = 0; continue;
+                }
+            }
+            /* v24.1 FIX (audit #4): billboard anchor meshes ('BILLBOARDS_g{g}_{j}',
+             * extras {ot_base:0, billboard:true}, NO SH1X buffer tag) inherit
+             * the PARENT buffer's verdict — engine draws a buffer's anchors
+             * inside the same modelOrder range + visibility check
+             * (map.c:1424-1446). */
+            int parentBuf = it->buffer;
+            if (parentBuf < 0 && it->isBillboard &&
+                strncmp(it->name, "BILLBOARDS_g", 12) == 0)
+                parentBuf = atoi(it->name + 12);
+            if (parentBuf < 0) {
+                /* untagged items (billboard meshes, unused, legacy):
+                 * engine billboards are drawn per buffer AFTER instances
+                 * — v24 marks a billboard item visible iff its PARENT
+                 * buffer is visible (they are emitted under the same
+                 * buffer's node group; the converter's BILLBOARDS_gN).  */
+                sh1xItemMask[i] = 1;   /* untagged non-billboard: keep */
+            } else if (parentBuf < sx->nBuffers && parentBuf < 256 &&
+                       bufVis[parentBuf] == 2) {
+                sh1xItemMask[i] = 1;
+            }
+        }
+    }
+
     /* ---- collect the QUADS (ALL materials) as per-quad OT entries ------ */
     for (int i = 0; i < nItems; i++) {
         if (R->dbgItem >= 0 && i != R->dbgItem) continue;
+        if (sh1xItemMask && !sh1xItemMask[i]) continue;   /* v24 window  */
         const DrawItem *it = &sc->item[i];
+        if (getenv("FOGPOC_ITDBG"))
+            fprintf(stderr, "ITDBG i=%d name=%s mat=%d ic=%d vc=%d anim=%d modelT=(%.2f,%.2f,%.2f)\n",
+                    i, it->name, it->matIdx, it->icount, it->vcount, it->animIdx,
+                    it->model.m[12], it->model.m[13], it->model.m[14]);
         if (it->matIdx < 0 || it->matIdx >= sc->matCount) continue;
         const int ams = sc->mat[it->matIdx].alphaMode;
         for (int k = 0; k + 2 < it->icount;) {
@@ -983,7 +1298,7 @@ static int hw_build_batch(Frame *fb, const Renderer *R, const CamPose *cam) {
                     cz /= (float)nv;
                     int cq8 = (int)floorf(cz * 256.0f + 0.5f);
                     int cq6 = cq8 >> 2;
-                    if (cq6 > 32 && cq8 <= farCullQ8)
+                    if (cq6 > 32 && (cq8 & ~3) < farCullQ8) /* engine: >32, STRICT far cull */
                         bucket = cq6 >> 1;
                 } else {
                     int mz = 0;
@@ -1015,6 +1330,7 @@ static int hw_build_batch(Frame *fb, const Renderer *R, const CamPose *cam) {
     hw_batch_reset();
     if (!hw_batch_reserve((size_t)nQuadMax * 2 + 16)) {
         free(xv); free(post);
+        free(sh1xItemMask);
         return 0;
     }
     for (int bi = 0; bi < nPost; bi++) {
@@ -1035,6 +1351,7 @@ static int hw_build_batch(Frame *fb, const Renderer *R, const CamPose *cam) {
             if (!hw_sprite_push(post[bi].kind, &post[bi].fd, &post[bi].rfd,
                                 post[bi].tri0)) {
                 free(xv); free(post);
+                free(sh1xItemMask);
                 return 0;
             }
             continue;
@@ -1065,6 +1382,7 @@ static int hw_build_batch(Frame *fb, const Renderer *R, const CamPose *cam) {
         }
     }
     free(xv); free(post);
+    free(sh1xItemMask);   /* v24 window mask (NULL when off) */
     return 1;
 }
 

@@ -1150,6 +1150,11 @@ typedef struct {
     int alphaMode;            /* 0 = OPAQUE, 1 = MASK (billboard), 2 = BLEND (STP) */
     int waterLive;            /* v33: SH1X.waterLive — the DWAVE material the
                                * engine redirects to the animated tile   */
+    int waterLiveUvTile;       /* v45: 1 = the GLB's TEXCOORD_0 is TILE-relative
+                               * (u/32, (v-224)/32 — the floor.uvUnits extras
+                               * present); 0 = the v33..v44 legacy form
+                               * (sheet-normalized u/128, v/64 — the render
+                               * path still un-mangles those) */
 } MaterialInfo;
 
 typedef struct {
@@ -1516,6 +1521,7 @@ typedef struct {
     /* v3 FX (all optional — zeroed = feature off, v2 behavior) */
     int hasEnvEffects;             /* 1 = effectTexFlag present            */
     int envFlagIsWaterRefract;      /* DR/DRU shimmer flag                  */
+    int hasDrWave;                 /* v45: the waterRefract payload loaded */
     Sh1xWaterZone waterZones[4];    /* s_WaterZone, max 4 (decomp has <=2)  */
     int nWaterZones;
     Sh1xMapLink mapLink;
@@ -1815,8 +1821,10 @@ static void sh1x_load(Sh1x *sx, const JValue *json) {
     }
     /* v37: SH1X.waterFloor — see the Sh1x struct comment. clut15 = the
      * 16 RAW u16 5:5:5 entries of the room's slot-0 CLUT row 0 (the
-     * emitter's rip-side derivation is cited there). Absent (older GLB)
-     * = the legacy 32x32 RGB live-tile floor path. */
+     * emitter's rip-side derivation is cited there). V44: record-only —
+     * the waterLive floor ALWAYS renders the 32x32 direct-color tile
+     * (the engine's func_80059E34(1) path) whatever this block says; the
+     * full-width parse stays for contract/audit tooling. */
     const JValue *wfl = jget(sh, "waterFloor");
     if (wfl && wfl->type == JV_OBJ) {
         const JValue *cl = jarr(wfl, "clut15");
@@ -1825,16 +1833,61 @@ static void sh1x_load(Sh1x *sx, const JValue *json) {
             for (int k = 0; k < 16; k++) {
                 const JValue *cv = jat(cl, k);
                 /* v40 audit (D-F2): keep the FULL 16 bits — the ripper
-                 * emits the CLUT entry VERBATIM (& 0xFFFF, ipd2gltf.py
-                 * _room_water_floor) and the consumer's own floor builder
-                 * (g_waterFloorTex alpha classes) reads c & 0x8000 to
-                 * pick ABR-1 additive (alpha 255) vs opaque (alpha 127).
-                 * The old & 0x7FFF destroyed the STP bit, so every
-                 * STP-set palette entry (DR0100/DRFD00: ALL 16 entries,
-                 * e.g. 0x8421) classified as opaque-replace — the
-                 * engine's func_8008E4EC field_E=45 ABR-1 ADDITIVE
-                 * floor rendered wrong. */
+                 * emits the CLUT entry VERBATIM (& 0xFFFF). V44: the
+                 * waterFloor extras are RECORD-ONLY now (the renderer's
+                 * direct-color path never reads them — the v37 nibble
+                 * view was the UNUSED arg0==2 variant). */
                 if (cv) sx->waterFloorClut[k] = (unsigned short)((int)cv->num & 0xFFFF);
+            }
+        }
+    }
+    /* v45: SH1X.envEffects.waterRefract — the DR_WAVE payload (the sewer
+     * water). The ripper emits the verbatim TIM: "pixels" = the 4096
+     * img_data bytes (4bpp, LOW nibble = even u), "clut" = the 2 rows
+     * (16 u16 each). It OVERRIDES the compiled-in defaults
+     * (dr_wave_data.h — the same bytes for the authentic TIM), the SAME
+     * contract as waterTex/water_tim_data.h. Absent (older GLBs /
+     * non-water rooms) = the compiled-in defaults stand. The liveTile
+     * block (vramRect, the two layer windows, the ctr rule) is the
+     * engine's func_8008E5B4 spec — already implemented verbatim in
+     * fx_water_tile_update; the block is record/audit material for this
+     * consumer. */
+    if (ee && ee->type == JV_OBJ && sx->envFlagIsWaterRefract) {
+        const JValue *wr = jget(ee, "waterRefract");
+        if (wr && wr->type == JV_OBJ) {
+            const char *b64 = jstr(wr, "pixels", "");
+            unsigned char sheet[4096];
+            int nb = sh_b64_decode(b64, sheet, sizeof(sheet));
+            const JValue *cl = jarr(wr, "clut");
+            int clRows = jcount(cl);
+            if (nb == 4096 && clRows >= 2) {
+                /* 4bpp: 2 texels/byte, low nibble = even u (the same
+                 * TimFile layout the waterTex path decodes) */
+                for (int v = 0; v < 64; v++) {
+                    const unsigned char *row = sheet + (size_t)v * 64;
+                    for (int ub = 0; ub < 64; ub++) {
+                        g_drWaveIdx[v][ub * 2]     = row[ub] & 0xF;
+                        g_drWaveIdx[v][ub * 2 + 1] = row[ub] >> 4;
+                    }
+                }
+                for (int r = 0; r < 2; r++) {
+                    const JValue *cr = jat(cl, r);
+                    for (int k = 0; k < 16 && cr; k++) {
+                        const JValue *cv = jat(cr, k);
+                        if (cv)
+                            g_drWaveClut[r][k] =
+                                (unsigned short)((int)cv->num & 0xFFFF);
+                    }
+                }
+                sx->hasDrWave = 1;
+                g_waterTileEverUpdated = 0;  /* re-seed the live tile from
+                                                the new sheet (see
+                                                fx_water_live_rgba) */
+            } else if (nb >= 0) {
+                fprintf(stderr, "sh1x: waterRefract: decoded %d bytes "
+                                "(expect 4096) — the compiled-in DR_WAVE "
+                                "default stands\n",
+                        nb);
             }
         }
     }
@@ -2486,8 +2539,19 @@ static int glb_accessor(Glb *g, int accIdx, AccView *out) {
     if (!bv) return 0;
     int bufIdx = jint(bv, "buffer", -1);
     if (bufIdx != 0) return 0;                          /* GLB: buffer 0 = BIN */
-    size_t bvOff = (size_t)jint(bv, "byteOffset", 0);
-    size_t bvLen = (size_t)jint(bv, "byteLength", 0);
+    /* V42 D-5 (PR #64, gate EXTENDED): negative JSON integers cast to
+     * size_t WRAP to huge values and the sums below can overflow past
+     * the bound (a crafted accessor byteOffset -1200000 read 1.2 MB
+     * before the BIN — SEGV, ASan-proven). Reject the negatives at the
+     * source. The gate re-review found the IDENTICAL wrap hole in the
+     * image-decode path (still SEGV on the PR's own build) — the same
+     * guards land there too. */
+    int bvOffI = jint(bv, "byteOffset", 0);
+    int bvLenI = jint(bv, "byteLength", 0);
+    int strideI = jint(bv, "byteStride", 0);
+    if (bvOffI < 0 || bvLenI < 0 || strideI < 0) return 0;
+    size_t bvOff = (size_t)bvOffI;
+    size_t bvLen = (size_t)bvLenI;
     if (bvOff + bvLen > g->binLen) return 0;
     out->ptr = g->bin + bvOff;
     out->compType = jint(acc, "componentType", 0);
@@ -2495,8 +2559,10 @@ static int glb_accessor(Glb *g, int accIdx, AccView *out) {
     out->comps = !strcmp(ty, "SCALAR") ? 1 : !strcmp(ty, "VEC2") ? 2 :
                  !strcmp(ty, "VEC3") ? 3 : !strcmp(ty, "VEC4") ? 4 : 0;
     out->count = jint(acc, "count", 0);
-    size_t accOff = (size_t)jint(acc, "byteOffset", 0);
-    int stride = jint(bv, "byteStride", 0);
+    int accOffI = jint(acc, "byteOffset", 0);
+    int stride = strideI;
+    if (accOffI < 0 || out->count < 0) return 0;        /* V42 D-5 */
+    size_t accOff = (size_t)accOffI;
     int compSize = out->compType == GL_FLOAT ? 4 : out->compType == GL_UNSIGNED_SHORT ? 2 :
                    out->compType == GL_UNSIGNED_INT ? 4 : 0;
     if (!out->comps || !compSize) return 0;
@@ -2788,11 +2854,16 @@ static int scene_load_glb_q(Scene *s, const char *path, int quiet) {
          * (WorldMap_ChunkPropertiesSet -> func_8008E4EC matches the
          * material by NAME — "DWAVE" in the sewer IPDs — and rewrites
          * its tpage to 13 x=832, lens_flare.c:497-502 + map.c:1167-1186);
-         * func_8008E5B4 then rewrites the 32x32 window per frame. */
+         * func_8008E5B4 then rewrites the 32x32 window per frame.
+         * v45: the extras' "floor" spec (uvUnits) marks the TILE-relative
+         * UV form — the v45 ripper normalizes the MIZ floor prims' UVs on
+         * the 32x32 live tile (the v33..v44 GLBs carried the mangled
+         * sheet-normalized v 3.5..3.98). */
         {
             const JValue *ex = jget(m, "extras");
             const JValue *sx = jget(ex, "SH1X");
             s->mat[i].waterLive = jintb(sx, "waterLive", 0);
+            s->mat[i].waterLiveUvTile = jget(sx, "floor") != NULL;
         }
     }
 
@@ -2806,8 +2877,11 @@ static int scene_load_glb_q(Scene *s, const char *path, int quiet) {
         int bvIdx = jint(img, "bufferView", -1);
         const JValue *bv = jat(jarr(g.json, "bufferViews"), bvIdx);
         if (!bv) { s->tex[i].w = s->tex[i].h = -1; s->tex[i].off = 0; continue; }
-        size_t off = (size_t)jint(bv, "byteOffset", 0);
-        size_t len = (size_t)jint(bv, "byteLength", 0);
+        int offI = jint(bv, "byteOffset", 0);          /* V42 D-5 (the   */
+        int lenI = jint(bv, "byteLength", 0);          /* gate extension:*/
+        if (offI < 0 || lenI < 0) { s->tex[i].w = s->tex[i].h = -1; continue; }
+        size_t off = (size_t)offI;                     /* the image path*/
+        size_t len = (size_t)lenI;                     /* had the SAME */
         if (off + len > g.binLen) { s->tex[i].w = s->tex[i].h = -1; continue; }
         int w = 0, h = 0;
         uint8_t *rgba = png_decode_rgba(g.bin + off, len, &w, &h);
@@ -4846,12 +4920,16 @@ static int gte_dpcs_fc0(int c, int k) {
     int64_t inMac = (int64_t)c << 16;
     int IR = clamp16((int)(((int64_t)0 - inMac) >> 12));   /* FC = 0 */
     int64_t mac = ((int64_t)IR * k + inMac) >> 12;
-    /* v12 VERBATIM FIX (D8): DuckStation PushRGBFromMAC -> TruncateRGB:
-     *   r = (u32)(MAC1 >> 4); if (r > 0xFF) r = 0xFF;
-     * a NEGATIVE MAC reinterpreted unsigned saturates to 255 (not 0).
-     * Unreachable for k <= 4096, but byte-exact now. */
-    unsigned u = (unsigned)(mac >> 4);
-    return u > 0xFFu ? 0xFF : (int)u;
+    /* V42 C-1 (the v12 D8 comment misquoted DuckStation): swanstation
+     * gte.cpp:145-160 TruncateRGB takes the value SIGNED —
+     *   if (value < 0 || value > 0xFF) return (value < 0) ? 0 : 0xFF;
+     * (the uint32_t cast at the call site :404 is reinterpreted by the
+     * int32_t parameter — two's complement, negative stays negative).
+     * A NEGATIVE MAC>>4 therefore saturates to 0 on the hardware — NOT
+     * 255. psx-spx: "saturated to +00h..+FFh". Unreachable for k <=
+     * 4096 (IR0 <= 4096 keeps MAC >= 0), kept engine-exact anyway. */
+    int v = (int)(mac >> 4);
+    return v < 0 ? 0 : (v > 0xFF ? 0xFF : v);
 }
 
 /* GTE DPCL(RGB=tint, IR1=IR2=IR3=light<<5, IR0=fog<<4, FC=(0,0,0)) —
@@ -4864,9 +4942,17 @@ static int gte_dpcl_fc0(int tint, int lightIR, int fogIR0) {
     int64_t inMac = (int64_t)((int64_t)tint * lightIR) << 4;
     int IR = clamp16((int)(((int64_t)0 - inMac) >> 12));   /* FC = 0 */
     int64_t mac = ((int64_t)IR * fogIR0 + inMac) >> 12;
-    /* v12 VERBATIM FIX (D8): DuckStation TruncateRGB unsigned semantics */
-    unsigned u = (unsigned)(mac >> 4);
-    return u > 0xFFu ? 0xFF : (int)u;
+    /* V42 C-1: the SIGNED saturation (negative -> 0) — swanstation
+     * gte.cpp:145-160 TruncateRGB(int32_t) / psx-spx +00h..+FFh; the
+     * old unsigned form returned 255 on the negative-MAC path.
+     * REACHABLE (finder C): during the authentic night fade wLI
+     * sweeps low while fog is still ON (flips off only at w=4096)
+     * and the light's geoTerm has no lower clamp — 17,639/16.7M
+     * (tint, light, fog) triples diverge; runtime DRU0100 9,724/
+     * 16,074 DPCL calls/frame (all fog=255, delta <= 2/255 — sub-
+     * visual on the shipped battery but engine-true). */
+    int v = (int)(mac >> 4);
+    return v < 0 ? 0 : (v > 0xFF ? 0xFF : v);
 }
 
 /* LoadAverageCol(c0, c1, aFrom, aTo) — libgte gte_LoadAverageCol:
@@ -4933,6 +5019,16 @@ static void sh_env_entry_from_preset(ShEnvEntry *e, const ShEffectsInfo *p) {
  * progress blend) is the LOAD-SCREEN path — the night transition is
  * the INSTANT map-init Gfx_MapEnvSet, so slots swap directly).       */
 static void sh_env_set_pair(ShEnv *env, int presetIdx0, int presetIdx1) {
+    /* v43 WA1-1: WorldEnv_PresetsSet (effects.c:300-304) routes through
+     * WorldEnv_TransitionStart(idx0, idx1, PrimitiveType_None, ...) which
+     * writes progressType = None (effects.c:352) — an instant preset set
+     * CANCELS any in-flight S32 blend. Without this clear the next
+     * sh_env_tick (primType==1 arm, 5917-5931) overwrites the instant
+     * env1C = env84 copies below with blend(stale envEC -> env84) for
+     * the rest of the ~3 s transition — the stale pre-transition env
+     * bleeds back (wallpaper-only: the PoC has no transition state
+     * to clear).                                                        */
+    env->primType = 0;                 /* WorldEnv_PresetsSet: progressType = PrimitiveType_None */
     env->isFlashlightUnavailable = (presetIdx0 == presetIdx1);
     sh_env_entry_from_preset(&env->env84[0], &SH_MAP_EFFECTS_INFOS[presetIdx0]);
     sh_env_entry_from_preset(&env->env84[1], &SH_MAP_EFFECTS_INFOS[presetIdx1]);
@@ -6145,6 +6241,12 @@ static void sh_env_sync_live(ShEnv *env, double t, v3 camPos, Quat camQ,
 static void sh_env_reset(ShEnv *env, double t) {
     env->ticksDone = 0;
     env->lastTickT = t;
+    /* v43 WA1-1: restart == fresh boot parity. A fresh LiveApp is
+     * memset to 0 (primType = 0 = PrimitiveType_None); without this
+     * clear a restart mid-blend carries primType/envEC/transT and the
+     * next tick resumes the stale S32 blend (K_R never re-applies a
+     * preset — see 15152-15209).                                   */
+    env->primType = 0;                 /* cancel any in-flight S32 blend    */
 }
 
 /* ==================================================================== */
@@ -6861,6 +6963,10 @@ static void particle_environment_set(Snow *S, int arg0, uint32_t arg1) {
  *                                ? Q12(0.0005f) : Q12(0.0f)
  *   field_234A = false when the target differs (transition started)
  * Returns 1 when the switch was accepted, 0 when the lock refused it. */
+/* V42 D-1: the resolved boot weatherTarget (CLI --weather-target > the
+ * camdat track/env weatherTarget; -1 = none) — the K_R restart must
+ * re-arm the same cross-fade a fresh boot arms, else restart != fresh. */
+static int g_bootWeatherTarget = -1;
 static int sh_particle_weather_target_set(Snow *S, int arg0) {
     if (!S->transitionLock) {
         /* engine line 3946: `return false` — the whole body is skipped */
@@ -7507,7 +7613,7 @@ static inline void fb_put(Frame *fb, int x, int y, int r, int g, int b,
     p[0] = (uint8_t)r; p[1] = (uint8_t)g; p[2] = (uint8_t)b;
 }
 
-typedef enum { RP_OPAQUE, RP_BLEND_TEX, RP_ADD_TEX, RP_MASK_TEX } PassMode;
+typedef enum { RP_OPAQUE, RP_BLEND_TEX, RP_ADD_TEX, RP_MASK_TEX, RP_SUB_TEX } PassMode;
 
 /* texture sample: nearest, wrap (glTF sampler wrapS/T = REPEAT; the PS1
  * GPU has no linear filtering — engine-identical sampling).                 */
@@ -7785,50 +7891,46 @@ static void raster_tri(Frame *fb, const RVert *vA, const RVert *vB, const RVert 
              * saturates at 0x7FFF — they never cover the tile).        */
             if (pass == RP_OPAQUE || pass == RP_MASK_TEX)
                 fb->z[pi] = z;   /* flake-occlusion ref */
-            if (pass == RP_ADD_TEX && ta < 128) {
-                /* v37: the STP-CLEAR texel of a semi-trans prim — the PS1
-                 * rule (DuckStation gpu_sw_rasterizer): the ABR blend
-                 * applies ONLY to texels whose STP bit is SET; STP-clear
-                 * texels write OPAQUE. The engine water floor's room-CLUT
-                 * palette mixes both classes (the DRG04 row is all STP-set
-                 * 0x8421-style; DRUG03's rows mix 0x0001/0x0421 with
-                 * 0x0842) — the opaque texels REPLACE the background with
-                 * the modulated color, the STP-set ones add onto it.
-                 * fx_water_floor_rgba encodes the class in the alpha: 127
-                 * = opaque, 255 = additive, 0 = hole (handled above). */
-                int r = (((tr >> 3) * vr) >> 4) + orr;
-                int g = (((tg >> 3) * vg) >> 4) + og;
-                int b = (((tb >> 3) * vb) >> 4) + ob;
-                fb_put(fb, x, y, r, g, b, quantize, dither);
-                continue;
-            }
             if (pass == RP_ADD_TEX) {
                 /* v34 WATER: the runtime DWAVE material rewrite (func_8008E4EC
                  * -> Lm_MaterialFsImageApply1(..., blendMode=1) ->
                  * Material_FsImageApply: field_E = (tPage[0]&3)<<7 |
                  * (1<<5) | tPage[1]&0xF = 45 with img0 {tPage{0,13}}) makes
-                 * the water-floor prims SEMI-TRANSPARENT ABR-1 ADDITIVE:
+                 * the SCHOOL-water surfaces SEMI-TRANSPARENT ABR-1 ADDITIVE:
                  *   dst5 = B5 + F5, F5 = modulate(texel, vcolor) — clamp 31.
-                 * The blend is additive with the BACKGROUND (the fog color
-                 * under it), so the floor adds its animated texels over the
-                 * scene instead of replacing them (the DR street reference:
-                 * near-black water that only brightens where the flashlight
-                 * vcolor lights it — level 4 gray base + green/warm streaks
-                 * near the light, never a flat lit surface). The per-texel
-                 * STP 0x0000 hole is preserved (F=0 -> B+0, a no-op). The
-                 * fog veil (orr) still applies additively BELOW the floor
-                 * texels exactly like the engine's veil-quad-then-GT4 OT
-                 * order in the STP branch. No depth write (semi-trans
-                 * prims never occlude later flakes — engine-true).
-                 * UNITS: the same pre-dither "8-bit-ish" domain as the
-                 * opaque path ((T5*C)>>4 + veil); the CURRENT framebuffer
-                 * value (already expanded 8-bit) is added IN THE SAME
-                 * domain and fb_put's quantize8 clamps the 5-bit sum at
-                 * 31 — B5 + F5 saturating, engine-exact. */
+                 * (V44: this ADD branch now serves the school-water ABR-1
+                 * surfaces only — the DR floor quads moved to RP_SUB_TEX,
+                 * see the subtractive branch below. The v37 alpha<128
+                 * STP-class sub-branch died with fx_water_floor_rgba — the
+                 * nibble/CLUT interpretation was func_80059E34's UNUSED
+                 * arg0==2 variant.) */
                 const uint8_t *bg = fb->rgb + pi * 3;
                 int r = (((tr >> 3) * vr) >> 4) + orr + (int)bg[0];
                 int g = (((tg >> 3) * vg) >> 4) + og + (int)bg[1];
                 int b = (((tb >> 3) * vb) >> 4) + ob + (int)bg[2];
+                fb_put(fb, x, y, r, g, b, quantize, dither);
+                continue;
+            }
+            if (pass == RP_SUB_TEX) {
+                /* V44 (the VIN water-CLUT research): the MIZ water-floor
+                 * quads — func_80059E34(1) forces the tpage to
+                 * (prim->u1 & 0x1FFFFF) | (0x140<<16) = 0x14D
+                 * (bodyprog_80056D8C.c:1546): bits 0-3 = 0xD (x 832),
+                 * bit 4 = 0 (y 0), bits 5-6 = 2 = ABR-2 B-F SUBTRACTIVE
+                 * (swanstation GPUTransparencyMode::
+                 * BackgroundMinusForeground, gpu_sw_backend.cpp:182-189:
+                 * the blargg per-channel B5-F5 saturating at 0), bits 7-8
+                 * = 2 = 15-bit DIRECT COLOR. F = modulate(liveTile T5,
+                 * flat 56) — F8 = (T5*56)>>4, the same pre-dither
+                 * 8-bit-ish domain as the add path; fb_put's quantize8
+                 * clamps the negative at 0 = the 5-bit subtract's
+                 * saturation. All live-tile texels are STP-set -> every
+                 * texel blends (subtracts). No veil, no depth write
+                 * (semi-trans prims never occlude the flakes). */
+                const uint8_t *bg = fb->rgb + pi * 3;
+                int r = (int)bg[0] - (((tr >> 3) * vr) >> 4);
+                int g = (int)bg[1] - (((tg >> 3) * vg) >> 4);
+                int b = (int)bg[2] - (((tb >> 3) * vb) >> 4);
                 fb_put(fb, x, y, r, g, b, quantize, dither);
                 continue;
             }
@@ -7976,10 +8078,16 @@ static int fx_flare_target_rate(int light_eff_pow, int scr_z, int scr_ang_z) {
 static void fx_blit_sprite_quad(
     Frame *fb, int x0, int y0, int x1, int y1, int x2, int y2, int x3, int y3,
     const unsigned char *idx_plane, int sw, int sh,
-    const unsigned short clut[16], int primR, int primG, int primB) {
+    const unsigned short clut[16], int primR, int primG, int primB,
+    float zGate) {
     /* rasterize the (possibly rotated) sprite quad: affine UV via edge
      * walk — same approach as raster_tri but on the sprite plane, in
-     * PoC pixels (engine px scale fb->w/320). */
+     * PoC pixels (engine px scale fb->w/320).
+     * V42 C-2 (PR #51, gate re-derived): zGate > 0 = the engine's
+     * occluded-branch OT placement (lens_flare.c:338-349/364-375) — a
+     * pixel covered by NEARER opaque geometry (fb->z < zGate, the
+     * fx_blit_gouraud_tri depthM far-edge convention) is skipped.
+     * zGate <= 0 = front_ot (ungated — painted over everything). */
     int minX = x0, maxX = x0, minY = y0, maxY = y0;
     int xs[4] = { x0, x1, x2, x3 }, ys[4] = { y0, y1, y2, y3 };
     for (int i = 1; i < 4; i++) {
@@ -7993,29 +8101,72 @@ static void fx_blit_sprite_quad(
     if (minY < 0) minY = 0;
     if (maxX >= fb->w) maxX = fb->w - 1;
     if (maxY >= fb->h) maxY = fb->h - 1;
-    /* bilinear-free affine: UV corners map (u0,v0)->v0 ... (u3,v3)->v3 */
-    /* solve the affine map from the 3 first corners (parallelogram      */
-    /* sprites: the 4th is consistent)                                     */
-    double du_dx = (double)(sw - 0) / (double)(x1 - x0 + 0.0001);
-    double dv_dy = (double)(sh - 0) / (double)(y2 - y0 + 0.0001);
+    /* V42 A-2 (PR #53, gate re-derived): the general 2D affine UV solve
+     * — the engine's POLY_FT4 rule. The GPU (swanstation gpu_sw_backend.
+     * cpp:36-38) splits the quad (v0,v1,v2)+(v2,v1,v3) and CalcIDeltas
+     * (:287-322) derives a FULL 2D affine map per triangle — du_dx AND
+     * du_dy, dv_dx AND dv_dy — from the corner UVs; for the engine's
+     * parallelogram quads with the window (0,0),(sw,0),(0,sh),(sw,sh)
+     * both triangles interpolate the SAME map: u = sw*a, v = sh*b where
+     * (a,b) are the quad's own parallelogram coordinates P = P0 +
+     * a*(P1-P0) + b*(P2-P0) — u follows the V0->V1 EDGE, v the V0->V2
+     * edge, whatever the screen heading (the streaks' setUV4,
+     * lens_flare.c:424: u along V0->V1, v along V0->V2 at every
+     * rotation angle). The old solve took u from screen-x and v from
+     * screen-y alone — correct only for upright quads: the 16 STREAK
+     * kites (rotated, lens_flare.c:304-309) sheared their texture (u
+     * pinned to screen-x) and collapsed to 0 painted px whenever an
+     * edge went screen-vertical (the 0.0001 epsilon: x1-x0 or y2-y0 =
+     * 0 -> du_dx ~ sw/eps -> every sample lands outside the u window
+     * — a dead window per streak around the -45deg/135deg headings).
+     * Same sampling semantics as before: the pixel-center (ax,ay)
+     * sample, the (int) truncation, the [0,sw) x [0,sh) window reject
+     * — so upright cores/ghosts sample the same texels as the axis
+     * solve. det = 0 (P0,P1,P2 collinear — every reachable quad here is
+     * a parallelogram, so the whole quad is zero-area) rasterizes
+     * NOTHING on the GPU (CalcIDeltas returns false on denom 0,
+     * gpu_sw_backend.cpp:295-296; the zero-area early-out :449-450)
+     * -> skip the quad, like fx_blit_water_quad's degenerate guard.  */
+    double ax1 = (double)x1 - x0, ay1 = (double)y1 - y0;
+    double ax2 = (double)x2 - x0, ay2 = (double)y2 - y0;
+    double det = ax1 * ay2 - ax2 * ay1;
+    /* A2c CONTROL VARIANT (byte-identity proof): an EXACTLY axis-aligned
+     * quad (edge 0->1 horizontal AND edge 0->2 vertical — the
+     * cores/ghosts) keeps the LEGACY solve verbatim, bit-identical
+     * including the 0.0001 epsilon's integer-boundary quirks; every
+     * other quad (the rotated streak kites) takes the affine solve.   */
+    int axisAligned = (y1 == y0 && x2 == x0);
+    double du_dx = 0.0, dv_dy = 0.0;
+    if (axisAligned) {
+        du_dx = (double)(sw - 0) / (double)(x1 - x0 + 0.0001);
+        dv_dy = (double)(sh - 0) / (double)(y2 - y0 + 0.0001);
+    } else if (fabs(det) < 1e-9) {
+        return;                     /* zero-area quad: GPU paints 0 */
+    }
     for (int py = minY; py <= maxY; py++) {
         for (int px = minX; px <= maxX; px++) {
-            /* point-in-quad: the V41 gate fix (PoC fx-v41-gate 5e9489d +
-             * the AUD-FX split correction 461d0bd, ported verbatim).
-             * The OLD d1/d2/d3 were cross products evaluated at the
-             * TRIANGLE VERTICES, not at the sample point: d1 was
-             * NEGATIVE for every interior point while d2/d3 were the
-             * constant quad orientation, so !(neg&&pos) accepted only
-             * the outside strip past edge V0->V1 — which the UV bounds
-             * then discarded, and the axis-aligned core quads/ghosts
-             * painted 0 texels (GATE-C; the flare had been streaks-only
-             * since v26). The GPU-correct test (swanstation
-             * gpu_sw_backend.cpp:36-38 rasterizes a quad as
-             * (v0,v1,v2)+(v2,v1,v3) — the SHARED EDGE is v1-v2; the
-             * PoC's own caustic-ring inside-test does it right): the
-             * three edge functions AT the sample point, all three same
-             * sign = inside. UV bounds and the blit body unchanged. */
+            /* point-in-quad via two triangle tests — the fx_blit_gouraud_tri
+             * edge-function convention (v41-ENGFX bug 1). The old d1/d2/d3
+             * were cross products evaluated at the TRIANGLE VERTICES, not
+             * at the sample point: d1 = cross(B−A, V0−A) is NEGATIVE for
+             * every interior point while d2/d3 are the constant quad
+             * orientation, so !(neg&&pos) accepted only the outside strip
+             * past edge V0→V1 — which the UV bounds then discarded, and
+             * the axis-aligned core quads/ghosts painted 0 texels (GATE-C;
+             * the PoC flare had been streaks-only since v26). The GPU-
+             * correct test (swanstation gpu_sw_backend.cpp:36-38 rasterizes
+             * a quad as (v0,v1,v2)+(v2,v1,v3); the PoC's own caustic-ring
+             * inside-test does it right): the three edge functions AT the
+             * sample point, all three same sign = inside. tsel split, UV
+             * bounds and the blit body are unchanged.                     */
             double ax = px + 0.5, ay = py + 0.5;
+            /* swanstation gpu_sw_backend.cpp:36-38 rasterizes a quad as
+             * (v0,v1,v2)+(v2,v1,v3) — the SHARED EDGE is v1-v2. The
+             * v41-ENGFX first cut used (V0,V2,V3) for the second
+             * triangle — every FT4-order quad missed its right quarter
+             * (AUD-FX numeric harness: 76.25% coverage, the
+             * TR-BR-center triangle hole). The audit fix: the second
+             * triangle is (V2,V1,V3) — anchor V2, B stays V1, C V3. */
             int inside = 0;
             for (int tsel = 0; tsel < 2 && !inside; tsel++) {
                 const int ai = (tsel == 0) ? 0 : 2;
@@ -8023,6 +8174,8 @@ static void fx_blit_sprite_quad(
                 double axv = xs[ai], ayv = ys[ai];
                 double bx = xs[1], by = ys[1];
                 double cx = xs[ci], cy = ys[ci];
+                /* edge functions at (ax,ay) for triangle (A,B,C) — the
+                 * same three forms as fx_blit_gouraud_tri's e0/e1/e2    */
                 double e0 = (cx - bx) * (ay - by) - (cy - by) * (ax - bx);
                 double e1 = (axv - cx) * (ay - cy) - (ayv - cy) * (ax - cx);
                 double e2 = (bx - axv) * (ay - ayv) - (by - ayv) * (ax - axv);
@@ -8031,8 +8184,19 @@ static void fx_blit_sprite_quad(
                 if (!(neg && pos)) inside = 1;
             }
             if (!inside) continue;
-            int u = (int)((ax - x0) * du_dx);
-            int v = (int)((ay - y0) * dv_dy);
+            /* the parallelogram coordinates of the sample (the inverse
+             * 2x2 solve; u along the P0->P1 edge, v along P0->P2)      */
+            double rx = ax - x0, ry = ay - y0;
+            int u, v;
+            if (axisAligned) {
+                u = (int)(rx * du_dx);      /* legacy axis solve       */
+                v = (int)(ry * dv_dy);
+            } else {
+                double ua = (ay2 * rx - ax2 * ry) / det;
+                double vb = (ax1 * ry - ay1 * rx) / det;
+                u = (int)(ua * sw);
+                v = (int)(vb * sh);
+            }
             if (u < 0 || u >= sw || v < 0 || v >= sh) continue;
             unsigned idxv = idx_plane[(size_t)v * sw + u];
             unsigned short entry = clut[idxv];
@@ -8044,6 +8208,8 @@ static void fx_blit_sprite_quad(
             int fg = (t5g * primG) >> 7; if (fg > 31) fg = 31;
             int fbv = (t5b * primB) >> 7; if (fbv > 31) fbv = 31;
             size_t pi = (size_t)py * fb->w + px;
+            if (zGate > 0.0f && fb->z && fb->z[pi] < zGate)
+                continue;              /* V42 C-2: the occluded branch */
             uint8_t *bp = fb->rgb + pi * 3;
             /* SemiTrans: same additive rule as the verified snow path   */
             int or5 = (bp[0] >> 3) + fr; if (or5 > 31) or5 = 31;
@@ -11114,15 +11280,12 @@ static int fx_water_zone_collect(Frame *fb, const Renderer *R,
                         }
                     }
                 }
-                /* v43: the glint joins the OT at bucket 641 BEFORE the
-                 * ring segments (the engine's add order — func_8008E794
-                 * runs before func_8008EA68) = the LOWEST water seq =
-                 * painted LAST within 641 = ON TOP of the ring's opaque
-                 * pair (W1-13). */
-                if (glintOn)
-                    fx_emit_glint(post, nPost, seq, maxPost,
-                                  glintPx, glintPy,
-                                  glintR, glintG, glintB);
+                /* (the glint was ALREADY emitted above at its engine
+                 * position — BEFORE the ring segments: the v43 conversion
+                 * of this old tail blit left a SECOND fx_emit_glint here,
+                 * a double-additive glint against the engine's single
+                 * quad; found by the V42-gate re-review of PR #52 — the
+                 * duplicate emission deleted.) */
             break;      /* first matching zone wins (engine returns it) */
         }
     }
@@ -11180,8 +11343,15 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
      * shipped sewer/TV ahead-light (engine-true 27.07deg < 75deg) show
      * NO flare — engine-true (the tile is never drawn there).      */
     {
-        int px = g_flaresys.scrLPos[0] + fb->w / 2;
-        int py = g_flaresys.scrLPos[1] + fb->h / 2;
+        /* V42 A-3 (PR #54, gate re-derived): the probe must sample the
+         * pixel the light-center sprite actually paints — the FX_TO_PX/
+         * FX_TO_PY map (engine px * scale + center), not the raw engine
+         * coordinate. The unscaled form read a DIFFERENT pixel at every
+         * --res != 320x224 (at 640x448 the same scene reported nowRate
+         * 0 vs 275: a phantom occlusion flip). scale == 1 at 320x224:
+         * bit-identical. */
+        int px = g_flaresys.scrLPos[0] * scale + (int)(fb->w / 2);
+        int py = g_flaresys.scrLPos[1] * scale + (int)(fb->h / 2);
         int visible = 0;
         if (px >= 0 && px < (int)fb->w && py >= 0 && py < (int)fb->h) {
             float lightDepth = (float)g_flaresys.scrLPos[2] / 256.0f;
@@ -11212,6 +11382,31 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
     int hensinX = fx_q12_mul(sh_math_sin(angZ), sh_math_cos(angXY));
     int hensinY = fx_q12_mul(sh_math_sin(angZ), sh_math_sin(angXY));
 
+    /* V42 C-2 (PR #51 re-land, gate re-derived): the engine's occluded-
+     * branch OT placement for core quads 1-2 (lens_flare.c:338-349/364-
+     * 375, VERBATIM):
+     *   center_visible            -> AddPrim(front_ot)   (over all)
+     *   occluded, ang_z > 90deg   -> AddPrim(depth_ot)   (the LIGHT'S
+     *                                OWN bucket org[vz>>3])
+     *   occluded, ang_z <= 90deg  -> AddPrim(depth_ot+7) (7 buckets
+     *                                FARTHER = 56 Q8 = +0.21875 m)
+     * The PoC depth gate is the bucket's FAR edge (the fx_blit_gouraud_
+     * tri depthM convention): same-bucket geometry AddPrim'd before the
+     * quad (all world geometry precedes the flare pass) draws after it
+     * and covers it — the C-3 far-edge rule. Quad 3 and the ghosts/
+     * streaks stay front_ot (the engine adds them unconditionally,
+     * lens_flare.c:394/442/459/474/489). scrLPos[2] is fresh this frame
+     * (the sprite section runs only with syncDrawExecF set under Gate 2
+     * vz > 112 Q8), so lb >= 14 always. */
+    float flareGate = -1.0f;               /* visible: paint in front  */
+    if (!visF) {
+        int lb = g_flaresys.scrLPos[2] >> 3;   /* the light's OT bucket */
+        if (angZ > fx_q12_angle(90.0f))
+            flareGate = (float)((lb + 1) * 8) * (1.0f / 256.0f);
+        else
+            flareGate = (float)((lb + 8) * 8) * (1.0f / 256.0f);
+    }
+
     /* sprite blits in PoC px (engine px * scale, screen-centered)      */
     #define FX_TO_PX(v) ((int)((v) * scale) + (int)(fb->w / 2))
     #define FX_TO_PY(v) ((int)((v) * scale) + (int)(fb->h / 2))
@@ -11229,7 +11424,7 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
             FX_TO_PX(scrX + ox - half), FX_TO_PY(scrY + oy + half),
             FX_TO_PX(scrX + ox + half), FX_TO_PY(scrY + oy + half),
             (const unsigned char *)kFlareCore, 64, 64, kFlareClutCore,
-            prim, prim, prim);
+            prim, prim, prim, flareGate);
     }
     /* core quad 2: fixed color 0x10, half-size 11 (lens_flare.c:338-365) */
     fx_blit_sprite_quad(fb,
@@ -11238,7 +11433,7 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
         FX_TO_PX(scrX - 11), FX_TO_PY(scrY + 11),
         FX_TO_PX(scrX + 11), FX_TO_PY(scrY + 11),
         (const unsigned char *)kFlareCore, 64, 64, kFlareClutCore,
-        0x10, 0x10, 0x10);
+        0x10, 0x10, 0x10, flareGate);
     /* core quad 3 (lens_flare.c:367-396): grey min(rate*2,1)*48, offset
      * hensin*9/2? engine FP_MULTIPLY(hensin, 9, Q12_SHIFT-1) = h*9/2   */
     {
@@ -11253,7 +11448,7 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
             FX_TO_PX(scrX + ox - half), FX_TO_PY(scrY + oy + half),
             FX_TO_PX(scrX + ox + half), FX_TO_PY(scrY + oy + half),
             (const unsigned char *)kFlareCore, 64, 64, kFlareClutCore,
-            prim, prim, prim);
+            prim, prim, prim, 0.0f);
     }
 
     if (nowRate != 0) {
@@ -11294,7 +11489,7 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
             fx_blit_sprite_quad(fb, cxp[0], cyp[0], cxp[1], cyp[1],
                                 cxp[2], cyp[2], cxp[3], cyp[3],
                                 (const unsigned char *)kFlareStreak, 32, 32,
-                                kFlareClutStreak, prim, prim, prim);
+                                kFlareClutStreak, prim, prim, prim, 0.0f);
         }
 
         /* ghost 1 (lens_flare.c:447-459): RGB Q12_MULT(now,32/48/32) —
@@ -11311,7 +11506,7 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
                 FX_TO_PX(px + half), FX_TO_PY(py + half),
                 (const unsigned char *)kFlareGhost, 64, 64, kFlareClutGhost,
                 fx_q12_mul(nowRate, 32), fx_q12_mul(nowRate, 48),
-                fx_q12_mul(nowRate, 32));
+                fx_q12_mul(nowRate, 32), 0.0f);
         }
         /* ghost 2 (lens_flare.c:462-475): RGB ((u32)now*7)>>9,
          * ((u32)now*19)>>11, Q12_MULT(now,24) — M1: the v30 blue had the
@@ -11331,7 +11526,7 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
                 FX_TO_PX(px - half), FX_TO_PY(py + half),
                 FX_TO_PX(px + half), FX_TO_PY(py + half),
                 (const unsigned char *)kFlareGhost, 64, 64, kFlareClutGhost,
-                r, g, b);
+                r, g, b, 0.0f);
         }
         /* ghost 3 (lens_flare.c:477-487): RGB (u32)now>>6,
          * Q12_MULT(now,24), ((u32)now*47)>>11 — M1: the v30 green had
@@ -11347,10 +11542,11 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
                 FX_TO_PX(scrX - 10), FX_TO_PY(scrY + 10),
                 FX_TO_PX(scrX + 10), FX_TO_PY(scrY + 10),
                 (const unsigned char *)kFlareGhost3, 64, 64, kFlareClutCore,
-                r, g, b);
+                r, g, b, 0.0f);
         }
     }
-    (void)visF;
+    /* V42 C-2: visF now drives the occluded-branch depth gate above
+     * (the engine's 3-way core-quad placement) — no longer discarded. */
     #undef FX_TO_PX
     #undef FX_TO_PY
 }
@@ -11381,12 +11577,18 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
  * head-insert chain). */
 /* v33 (S20): the RGBA view of the live DR_WAVE tile the water-floor
  * materials sample (MaterialInfo.waterLive). Updated from the same
- * composite fx_water_tile_update writes (RGB + opaque alpha). */
+ * composite fx_water_tile_update writes (RGB + opaque alpha).
+ * V44 (the VIN water-CLUT research): this is THE engine view — the MIZ
+ * water-floor models (field_B=0x10) draw the live tile DIRECTLY as
+ * 15-bit RGB555 colors (func_80059E34(1)'s forced 15-bit tpage) and
+ * SUBTRACT the flat-(56,56,56)-modulated texel from the background
+ * (ABR-2, tpage 0x14D bits 5-6); the alpha is 255 for every texel
+ * because every DR_WAVE CLUT entry is STP-set -> every texel of the
+ * composite blends. The v37 nibble view (fx_water_floor_rgba /
+ * g_waterFloorTex) was func_80059E34's UNUSED arg0==2 variant (no
+ * shipped DR room models it) — REMOVED. */
 static unsigned char g_waterLiveRGBA[32 * 32 * 4];
 static void fx_water_live_rgba(void) {
-    /* legacy v33 view (pre-waterFloor GLBs): the 32x32 composite as an RGB
-     * texture sampled 1:1 — SUPERSEDED by fx_water_floor_rgba (v37) when
-     * the GLB carries SH1X.waterFloor; kept so old GLBs render as before. */
     if (!g_waterTileEverUpdated)
         fx_water_tile_update(0);
     for (int y = 0; y < 32; y++)
@@ -11395,55 +11597,6 @@ static void fx_water_live_rgba(void) {
             const unsigned char *s = g_waterTileRGB[y][x];
             d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = 255;
         }
-}
-
-/* v37: THE ENGINE FLOOR VIEW (W1-6 fixed). The engine's DWAVE material
- * after the redirect is 4bpp on page 13 (x 832) with CLUT (0,0) — the
- * ROOM's slot-0 palette — and the floor quads' page-texel UVs sit at
- * v 224..255 (the func_8008E5B4 write window D_800AFDA4 {832,224,32,32}),
- * so each 15-bit live-tile halfword is read as FOUR 4bpp texels:
- *   texel(u, row) = clut[(tile15[row][u>>2] >> (4*(u&3))) & 0xF]
- * (u = 0..127 = the 32-halfword patch's 128 texels; row = 0..31). The
- * palette comes from the GLB's SH1X.waterFloor.clut15 (verbatim slot-0
- * CLUT row). Texel classes (a semi-trans prim, DuckStation
- * gpu_sw_rasterizer): STP set + color != 0 -> alpha 255 (the ABR-1
- * additive blend); STP CLEAR -> alpha 127 (an OPAQUE write — the room
- * palettes MIX these, e.g. DRUG03's rows); 0x0000 -> alpha 0 (the hole). */
-static unsigned char g_waterFloorTex[32 * 128 * 4];
-static void fx_water_floor_rgba(const Sh1x *sx) {
-    if (!sx || !sx->hasWaterFloorClut) return;
-    if (!g_waterTileEverUpdated)
-        fx_water_tile_update(0);
-    for (int row = 0; row < 32; row++)
-        for (int col = 0; col < 128; col++) {
-            unsigned nib = (unsigned)((g_waterTile15[row][col >> 2] >>
-                                       (4 * (col & 3))) & 0xF);
-            unsigned short c = sx->waterFloorClut[nib];
-            unsigned r = c & 31u, g = (c >> 5) & 31u, b = (c >> 10) & 31u;
-            unsigned char *d = g_waterFloorTex + ((size_t)row * 128 + col) * 4;
-            d[0] = (unsigned char)((r << 3) | (r >> 2));
-            d[1] = (unsigned char)((g << 3) | (g >> 2));
-            d[2] = (unsigned char)((b << 3) | (b >> 2));
-            d[3] = (c & 0x8000u) ? ((c & 0x7FFFu) ? 255 : 0)
-                                 : (c ? 127 : 0);
-        }
-    static int dumped = 0;
-    if (!dumped && getenv("FOGPOC_WFLTEX")) {
-        dumped = 1;
-        /* upscale x2 for visibility */
-        unsigned char up[64 * 256 * 3];
-        for (int y = 0; y < 32; y++)
-            for (int x = 0; x < 128; x++) {
-                const unsigned char *s = g_waterFloorTex + ((size_t)y * 128 + x) * 4;
-                for (int dy = 0; dy < 2; dy++)
-                    for (int dx = 0; dx < 2; dx++) {
-                        unsigned char *d = up + (((size_t)y * 2 + dy) * 256 + (x * 2 + dx)) * 3;
-                        d[0] = s[0]; d[1] = s[1]; d[2] = s[2];
-                    }
-            }
-        write_png_rgb(getenv("FOGPOC_WFLTEX"), up, 256, 64);
-        fprintf(stderr, "WFLTEX dumped %s\n", getenv("FOGPOC_WFLTEX"));
-    }
 }
 
 /* v34: the water scroll counter advance moved to the TICK discipline.
@@ -11605,15 +11758,33 @@ static void fx_blit_water_quad(Frame *fb, const int sx[4], const int sy[4],
     for (int py = mny; py <= mxy; py++) {
         for (int px = mnx; px <= mxx; px++) {
             double ax = px + 0.5, ay = py + 0.5;
+            /* V42 A-1 (PR #52, gate re-derived): point-in-quad via two
+             * triangle tests — the fx_blit_sprite_quad edge-function
+             * convention (5e9489d; the swanstation quad split
+             * gpu_sw_backend.cpp:36-38 = (v0,v1,v2)+(v2,v1,v3)). The old
+             * d1/d2/d3 were cross products where d2/d3 are winding
+             * CONSTANTS (evaluated at triangle vertices, not at the
+             * sample) and only d1 tracked the sample — !(neg&&pos)
+             * then accepted only the OUTSIDE strip past edge V0->V1, so
+             * the ripple mesh quads/sprites painted mirrored garbage
+             * strips (or nothing when u0=v0=0 killed the strips). The
+             * GPU-correct test: the three edge functions AT the sample
+             * point, all three same sign = inside. UV solve + blend are
+             * unchanged (the A-6 parallelogram solve is correct).     */
             int inside = 0;
             for (int t = 0; t < 2 && !inside; t++) {
-                double bx = sx[1 + t], by = sy[1 + t];
-                double cx = sx[2 + t], cy = sy[2 + t];
-                double d1 = (bx - ax) * (sy[0] - ay) - (sx[0] - ax) * (by - ay);
-                double d2 = (cx - bx) * (sy[0 + t] - by) - (sx[0 + t] - bx) * (cy - by);
-                double d3 = (sx[0] - cx) * (sy[1 + t] - cy) - (sx[1 + t] - cx) * (sy[0] - cy);
-                int neg = (d1 < 0) || (d2 < 0) || (d3 < 0);
-                int pos = (d1 > 0) || (d2 > 0) || (d3 > 0);
+                const int ai = (t == 0) ? 0 : 2;
+                const int ci = (t == 0) ? 2 : 3;
+                double axv = sx[ai], ayv = sy[ai];
+                double bx = sx[1], by = sy[1];
+                double cx = sx[ci], cy = sy[ci];
+                /* edge functions at (ax,ay) for triangle (A,B,C) — the
+                 * same three forms as fx_blit_sprite_quad's e0/e1/e2    */
+                double e0 = (cx - bx) * (ay - by) - (cy - by) * (ax - bx);
+                double e1 = (axv - cx) * (ay - cy) - (ayv - cy) * (ax - cx);
+                double e2 = (bx - axv) * (ay - ayv) - (by - ayv) * (ax - axv);
+                int neg = (e0 < 0) || (e1 < 0) || (e2 < 0);
+                int pos = (e0 > 0) || (e1 > 0) || (e2 > 0);
                 if (!(neg && pos)) inside = 1;
             }
             if (!inside) continue;
@@ -12363,9 +12534,10 @@ static void sh1x_water_fx_draw(Frame *fb, const Renderer *R,
              * particle's own value (field_B=0), NOT sprite 0's.     */
             int sel = a->wrSel[12];
             unsigned char tile[32][32][3];
-            /* v41 (A-5): the lazy first-composite gate the two material
-             * views already run (fx_water_live_rgba / fx_water_floor_rgba)
-             * — g_waterTileRGB is static zero-init and ONLY
+            /* v41 (A-5): the lazy first-composite gate the material view
+             * already runs (fx_water_live_rgba — the V44 direct-color
+             * path; the v37 nibble view was removed) — g_waterTileRGB is
+             * static zero-init and ONLY
              * fx_water_tile_update writes it, so an ungated sel-2 read
              * before the first pass sampled BLACK (and the per-shot reset
              * clears g_waterTileEverUpdated but NOT g_waterTileRGB — a
@@ -13626,11 +13798,25 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
                     }
                     if (mz > 0 && mz <= farCullQ8) {    /* engine: <=0 skip; >field_1C skip */
                         if (mz < 32) mz = 32;           /* engine: <=32 -> 32 */
-                        /* v16: the per-model OT section base — the engine's
-                         * addPrim target is org[func_800571D0(field_B_1) +
-                         * ((OTZ >> otShift) >> 2)] (func_80057090 hands
-                         * Gfx_MeshDraw the base-offset tag pointer)        */
-                        bucket = it->otBase + (mz >> 3);/* base + (Q8>>1)>>2, otShift 1 */
+                        if (sc->mat[it->matIdx].waterLive) {
+                            /* V44 (the VIN water-CLUT research): the MIZ
+                             * water-floor models are field_B=0x10 ->
+                             * func_80059D50(1) -> func_80059E34(1), whose
+                             * addPrim target is the FIXED org[640] tag
+                             * (bodyprog_80056D8C.c:1455) — NOT the depth
+                             * bucket: the quads ride one fixed far overlay
+                             * slot (occluded by nearer geometry, added over
+                             * everything beyond it; the caustic ring's 641
+                             * and the glint's 639 bracket it exactly like
+                             * the engine). */
+                            bucket = 640;
+                        } else {
+                            /* v16: the per-model OT section base — the engine's
+                             * addPrim target is org[func_800571D0(field_B_1) +
+                             * ((OTZ >> otShift) >> 2)] (func_80057090 hands
+                             * Gfx_MeshDraw the base-offset tag pointer)        */
+                            bucket = it->otBase + (mz >> 3);/* base + (Q8>>1)>>2, otShift 1 */
+                        }
                     }
                 }
             }
@@ -13714,42 +13900,45 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
         if (t->w <= 0) continue;
         const uint8_t *tex = sc->texBlob + t->off;
         int tw = t->w, th = t->h;
-        int waterFloorEngine = 0;
+        int waterLiveEngine = 0;
         if (m->waterLive) {
             /* v33 (S20): the LIVE DR_WAVE tile — the engine's material
              * redirect (func_8008E4EC rewrites the DWAVE material to
              * tpage 13 x=832 at every chunk load) makes the water-floor
              * prims sample the region func_8008E5B4 rewrites per frame
              * (the 32x32 two-quad composite at (832,224)).
-             * v37 (W1-6): the ENGINE consumption is 4bpp NIBBLES through
-             * the ROOM's CLUT (0,0) — Material_FsImageApply's field_E=45
-             * (4bpp, ABR-1 ADDITIVE) + field_10=0 with the img0 window
-             * (u,v)=(0,0): the floor quads' PAGE-texel UVs (u 0..62,
-             * v 224..255) read the live patch as 4 texels per 15-bit
-             * halfword. fx_water_floor_rgba builds that 128x32 pattern;
-             * the UV remap below maps u_norm*256 = page_u onto pattern
-             * columns (u'=u*2) and v_norm*64-224 onto pattern rows
-             * (v'=v*2-7). GLBs without SH1X.waterFloor keep the legacy
-             * v33 RGB view. */
-            if (R->sc->sh1x.hasWaterFloorClut) {
-                fx_water_floor_rgba(&R->sc->sh1x);
-                tex = g_waterFloorTex;
-                tw = 128; th = 32;
-                waterFloorEngine = 1;
-            } else {
-                fx_water_live_rgba();
-                tex = g_waterLiveRGBA;
-                tw = th = 32;
-            }
+             * V44 (the VIN water-CLUT research): the ENGINE consumption is
+             * 15-bit DIRECT COLOR — the MIZ water-floor models are
+             * field_B=0x10 -> func_80059D50(1) -> func_80059E34(1), whose
+             * packet generator FORCES the tpage to (prim->u1 & 0x1FFFFF) |
+             * (0x140<<16) = 0x14D (bodyprog_80056D8C.c:1546): bits 7-8 = 2
+             * = 15-bit DIRECT COLOR, bits 5-6 = 2 = ABR-2 B-F
+             * SUBTRACTIVE, a FLAT code-0x2E POLY_FT4 with color
+             * (56,56,56) (packedColor 0x2E383838) at the FIXED OT bucket
+             * org[640] — the quads read the live 32x32 tile DIRECTLY as
+             * RGB555, NO CLUT, and SUBTRACT the flat-modulated dapple
+             * from the background. The v37 nibble/CLUT interpretation
+             * (fx_water_floor_rgba / g_waterFloorTex) was
+             * func_80059E34's UNUSED arg0==2 variant — REMOVED. The
+             * glTF UVs: the v45 GLBs carry TILE-relative coords
+             * (waterLiveUvTile — floor.uvUnits present); the v33..v44
+             * GLBs carry the sheet-normalized form (u/128, v/64) whose
+             * un-mangle (u*4, v*2-7) recovers the tile coords. */
+            fx_water_live_rgba();
+            tex = g_waterLiveRGBA;
+            tw = th = 32;
+            waterLiveEngine = 1;
         }
-        /* v34: waterLive forces the ADDITIVE semi-trans pass (the runtime
-         * field_E=45 rewrite); everything else follows the ripper's
-         * alphaMode exactly as before.
+        /* V44: waterLive (the DR/DRU MIZ floor quads) = the forced
+         * func_80059E34(1) packet path: 15-bit direct color + ABR-2
+         * SUBTRACTIVE + flat (56,56,56) + fixed bucket 640 — RP_SUB_TEX.
+         * Everything else follows the ripper's alphaMode exactly as
+         * before.
          * V41 C-5: MASK (alphaMode 1) gets its OWN pass value so the
          * raster can write fb->z for its ta>0 texels (the engine's leaf
          * GT4s are opaque ST-clear punch-through — see raster_tri);
          * BLEND (alphaMode 2) stays RP_BLEND_TEX (no depth write). */
-        const PassMode quadPass = m->waterLive ? RP_ADD_TEX
+        const PassMode quadPass = m->waterLive ? RP_SUB_TEX
             : ((m->alphaMode == 0) ? RP_OPAQUE
                : ((m->alphaMode == 1) ? RP_MASK_TEX : RP_BLEND_TEX));
         for (int ti = 0; ti < post[bi].ntri && post[bi].tri0 + ti * 3 + 2 < it->icount; ti++) {
@@ -13770,15 +13959,23 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
              * with the SAME engine formula as opaque prims (see raster_tri)
              * + the additive fog veil ON TOP (engine semi-trans G4 after the
              * textured quad in draw order). Holes stay truly transparent. */
-            if (waterFloorEngine) {
-                /* v37: the page-texel UV remap — the converter normalized
-                 * the quads' PAGE texel coords by the DR_WAVE image's
-                 * 256x64 (u_norm = u_page/256, v_norm = v_page/64), and
-                 * the floor samples the 128x32 pattern at (u_page,
-                 * v_page-224): u' = u_norm*256/128 = u*2, v' =
-                 * (v_norm*64-224)/32 = v*2-7. Both stay inside the pattern
-                 * (u 0..62 < 128; v 224..255 -> rows 0..31) — no wrap, the
-                 * GPU reads the page rows directly. */
+            if (waterLiveEngine) {
+                /* V44: the flat (56,56,56) modulation + NO fog veil — the
+                 * engine's func_80059E34 writes packedColor 0x2E383838
+                 * (r0=g0=b0=56) for every vertex and adds NO veil G4 (the
+                 * fog veil is Gfx_MeshDraw's STP-branch companion; the
+                 * alternate path replaces that draw entirely); the depth
+                 * fade is the far cull alone (var_t9 =
+                 * MIN(Q8(7.61)<<3, fog.far) — the same farCullQ8 above).
+                 * V45 UV forms: the v45 GLBs carry TILE-relative
+                 * TEXCOORD_0 (u/32, (v-224)/32 — the extras'
+                 * floor.uvUnits) used AS-IS; the v33..v44 GLBs carry the
+                 * sheet-normalized form (u/128, v/64) whose un-mangle
+                 * (u*4, v*2-7) recovers the tile coords 0..0.9688. All
+                 * live-tile texels are STP-set (every DR_WAVE CLUT entry
+                 * >= 0x8000) -> every texel blends (SUBTRACTS — ABR-2,
+                 * see the RP_SUB_TEX raster branch); the 0x0000-hole rule
+                 * never fires on the direct view. */
                 if (getenv("FOGPOC_WFLDBG")) {
                     static int cnt = 0;
                     fprintf(stderr, "WFLDBG[%d] item=%d name=%s buf=%d vcol=(%d,%d,%d) z=%.2f\n",
@@ -13787,9 +13984,18 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
                     cnt++;
                 }
                 RVert ra = *a, rb = *b, rc = *c;
-                ra.u = a->u * 2.0f;  ra.v = a->v * 2.0f - 7.0f;
-                rb.u = b->u * 2.0f;  rb.v = b->v * 2.0f - 7.0f;
-                rc.u = c->u * 2.0f;  rc.v = c->v * 2.0f - 7.0f;
+                if (!m->waterLiveUvTile) {
+                    /* the legacy (v33..v44) sheet-normalized form */
+                    ra.u = a->u * 4.0f;  ra.v = a->v * 2.0f - 7.0f;
+                    rb.u = b->u * 4.0f;  rb.v = b->v * 2.0f - 7.0f;
+                    rc.u = c->u * 4.0f;  rc.v = c->v * 2.0f - 7.0f;
+                }
+                ra.vcol[0] = ra.vcol[1] = ra.vcol[2] = 56;
+                rb.vcol[0] = rb.vcol[1] = rb.vcol[2] = 56;
+                rc.vcol[0] = rc.vcol[1] = rc.vcol[2] = 56;
+                ra.ocol[0] = ra.ocol[1] = ra.ocol[2] = 0;
+                rb.ocol[0] = rb.ocol[1] = rb.ocol[2] = 0;
+                rc.ocol[0] = rc.ocol[1] = rc.ocol[2] = 0;
                 raster_tri(fb, &ra, &rb, &rc, tex, tw, th, quadPass,
                            &R->opts, R->opts.ps1, R->dither,
                            R->enginePixScale, R->enginePixScaleY);
@@ -14720,8 +14926,26 @@ static CamPose live_advance(LiveApp *A, double dt) {
     int fired = 0;
     while (!A->play.paused && A->tickPending >= tickDt - 1e-9) {
         A->tickPending -= tickDt;
+        /* V42 D-2 (PR #67, gate RE-DERIVED — the branch's own form hung
+         * the window: clamping the FRAME dt to a boundary epsilon left
+         * dt > 0 with no tick able to fire, and live_done's exact >=
+         * never terminated — D=3/4/5/6 spun forever, SIGKILL-only). The
+         * gate's root-cause trace: 180 whole ticks accumulate
+         * sessionT = 5.9999999999999885 < 6.0 — one EXTRA tick fired
+         * past the requested duration (window != --shot t=D). The
+         * correct form: the boundary tick fires the REMAINING dt only
+         * (never past the requested duration — the --shot tick-grid
+         * parity); an epsilon remainder (<= 1e-12 s) fires NOTHING (the
+         * state holds at the last whole tick = exactly what --shot
+         * renders) and the epsilon-tolerant live_done below ends the
+         * run. All three window loops (win32/sdl/x11) run through HERE. */
+        double tdt = tickDt;
+        if (A->duration > 0 && A->play.sessionT + tdt > A->duration) {
+            tdt = A->duration - A->play.sessionT;
+            if (tdt <= 1e-12) break;   /* the boundary epsilon: hold   */
+        }
         fired = 1;
-        cp = playback_step(&A->play, A->track, tickDt,
+        cp = playback_step(&A->play, A->track, tdt,
                            A->sc->bounds.diag, &A->ovr);
         /* v23: the engine SELF_VIEW tick (vcExecCamera discipline — one
          * camera update per game tick, on the same tick as the env/light
@@ -14743,13 +14967,17 @@ static CamPose live_advance(LiveApp *A, double dt) {
         }
         A->R.snow = A->snow.enabled ? &A->snow : NULL;
         sh_env_sync_live(&A->env, A->play.t, cp.pos, cp.q, 0);
-        /* v38 (synced from the PoC engine — the 'no fan spin' root cause):
-         * the live wallpaper loop rendered directly and NEVER ticked the
-         * SH1X propAnim drivers / water FX. One Map_WorldObjectsUpdate +
-         * water pass per FIRED tick now, in the shot path's order. */
+        /* v38 FIX (the RUN_SU0203.bat 'no fan spin' root cause): the
+         * realtime window / benchmark loops render_frame()d directly and
+         * NEVER ticked the SH1X propAnim drivers / water FX — only the
+         * --shot/--r2shot deterministic paths did (the static-cam proofs
+         * that 'verified' v33 animations all ran the shot path). The
+         * engine's own discipline (one Map_WorldObjectsUpdate + the
+         * LensFlare/water pass per game tick) is now mirrored per FIRED
+         * tick, in the same order as the shot path's fast-forward. */
         sh1x_anims_sync((Sh1x *)&A->R.sc->sh1x, A->play.sessionT);
-        fx_water_scroll_sync(&A->R.sc->sh1x, &A->env, &cp);
-        sh1x_water_ripple_tick((Sh1x *)&A->R.sc->sh1x, &A->env, &cp);
+        fx_water_scroll_sync(&A->R.sc->sh1x, &A->env, &cp); /* v34: scroll */
+        sh1x_water_ripple_tick((Sh1x *)&A->R.sc->sh1x, &A->env, &cp); /* v37 */
         sh1x_waterfall_tick((Sh1x *)&A->R.sc->sh1x, &cp,
                             A->play.sessionT); /* v39: the school water */
     }
@@ -14763,10 +14991,15 @@ static CamPose live_advance(LiveApp *A, double dt) {
         cp = r2view_pose(&A->r2, &cp);
     A->R.snow = A->snow.enabled ? &A->snow : NULL;
     sh_env_sync_live(&A->env, A->play.t, cp.pos, cp.q, 0);
-    /* v38: the boot-frame pose call (dt=0 — computes the drivers' GATE
-     * state once so event-gated drivers are hidden on frame 1).
-     * (v38-audit-A2: the WATER pair is NOT called here — both are
-     * per-tick-only systems with no gate state to prime.) */
+    /* v38: the boot-frame pose call (the shot path's post-loop sync): the
+     * very first presented frame owes < 1/30 s to the tick grid, so no
+     * tick has fired yet — compute the drivers' GATE state once (dt=0,
+     * state holds at the parse-fresh pose) so event-gated drivers are
+     * already hidden on frame 1. (v38-audit-A2: the WATER pair is NOT
+     * called here — fx_water_scroll_sync advances the D_800AFDAC counter
+     * and sh1x_water_ripple_tick draws the shared RNG, both PER-TICK-only
+     * systems with no gate state to prime; calling them here desynced the
+     * live water/RNG streams by one step vs the shot path.) */
     if (!A->animsPrimed) {
         A->animsPrimed = 1;
         sh1x_anims_sync((Sh1x *)&A->R.sc->sh1x, A->play.sessionT);
@@ -15362,6 +15595,16 @@ static int live_action(LiveApp *A, LiveKey k, int down) {
                 A->snow.snowDensitySel = 0;
         }
         snow_reset(&A->snow);            /* re-seed snow (seek semantics) */
+        /* V42 D-1: re-arm the boot/camdat weatherTarget cross-fade — the
+         * fresh boot's sharedFunc_800D0B18 (CLI --weather-target > the
+         * camdat track/env weatherTarget) was never re-applied here, so
+         * the restarted session locked at the room recipe (restart !=
+         * fresh). The boot order is recipe load THEN the event arm —
+         * mirrored here (the re-sync above, then this). transitionLock
+         * was just set to 1, so the arm is accepted exactly like the
+         * boot call. */
+        if (g_bootWeatherTarget >= 0)
+            sh_particle_weather_target_set(&A->snow, g_bootWeatherTarget);
         /* v41-ENGFX bug 3b (ported): the fresh-session flashlight fade —
          * the restart carried the env's converged flashlightIntensity
          * (4096) while a fresh session ramps 0->4096; mirror the boot. */
@@ -15597,7 +15840,13 @@ static int live_done(LiveApp *A) {
      * cycle boundary, so a phase comparison never fired for durations
      * beyond one cycle). For durations < T the two are identical, so all
      * v5-v9 bridge goldens are unchanged. */
-    return A->duration > 0 && !A->play.paused && A->play.sessionT >= A->duration;
+    /* V42 D-2: the epsilon-tolerant boundary — the 180-tick float
+     * accumulation lands 1.15e-13 UNDER the requested duration; the
+     * exact >= would miss it (one extra tick fired past the duration).
+     * The 1e-9 s tolerance is 3e-8 of one tick — finer than any
+     * accumulated float error at these durations by ~4 orders. */
+    return A->duration > 0 && !A->play.paused &&
+           A->play.sessionT >= A->duration - 1e-9;
 }
 
 /* write the final frame; with --duration the track time is forced to the
@@ -17293,9 +17542,20 @@ int main(int argc, char **argv) {
                 g_userLightMode = 2;
                 g_userLightAheadM = (float)atof(v + 6);
                 if (g_userLightAheadM < 0) g_userLightAheadM = 0;
+                /* V42 D-3: NaN/Inf accepted here produced a silent dark
+                 * garbage frame (the E-F1 isfinite gates missed these
+                 * sites — atof("nan")/atof("inf") parse fine). */
+                if (!(g_userLightAheadM == g_userLightAheadM) || g_userLightAheadM == (float)HUGE_VAL)
+                    { fprintf(stderr, "--userlight ahead:D: D must be finite\n"); return 1; }
             } else {
                 float fx2, fy2, fz2;
                 if (sscanf(v, "%f,%f,%f", &fx2, &fy2, &fz2) == 3) {
+                    /* V42 D-3: reject NaN/Inf world positions */
+                    if (!(fx2 == fx2 && fy2 == fy2 && fz2 == fz2) ||
+                        fx2 == (float)HUGE_VAL || fx2 == -(float)HUGE_VAL ||
+                        fy2 == (float)HUGE_VAL || fy2 == -(float)HUGE_VAL ||
+                        fz2 == (float)HUGE_VAL || fz2 == -(float)HUGE_VAL)
+                        { fprintf(stderr, "--userlight x,y,z: values must be finite\n"); return 1; }
                     g_userLightMode = 1;
                     g_userLightWorld[0] = fx2; g_userLightWorld[1] = fy2;
                     g_userLightWorld[2] = fz2;
@@ -17314,6 +17574,12 @@ int main(int argc, char **argv) {
             float p2 = 0.0f, y2 = 0.0f, r2 = 0.0f;
             int got = sscanf(argv[++i], "%f,%f,%f", &p2, &y2, &r2);
             if (got == 2 || got == 3) {
+                /* V42 D-3: reject NaN/Inf aim angles */
+                if (!(p2 == p2 && y2 == y2 && r2 == r2) ||
+                    p2 == (float)HUGE_VAL || p2 == -(float)HUGE_VAL ||
+                    y2 == (float)HUGE_VAL || y2 == -(float)HUGE_VAL ||
+                    r2 == (float)HUGE_VAL || r2 == -(float)HUGE_VAL)
+                    { fprintf(stderr, "--userlightrot: values must be finite\n"); return 1; }
                 g_userLightCLI = 1;
                 g_userLightHasRot = 1;
                 g_userLightRot[0] = p2; g_userLightRot[1] = y2;
@@ -17561,7 +17827,7 @@ int main(int argc, char **argv) {
                 tStart = CLI_T_MAX_S;
             }
         }
-        else if (!strcmp(a, "--cam") && i + 7 < argc) {
+        else if (!strcmp(a, "--cam") && i + 6 < argc) {
             ovr.useFixed = 1;
             ovr.eye.x = (float)atof(argv[++i]); ovr.eye.y = (float)atof(argv[++i]);
             ovr.eye.z = (float)atof(argv[++i]);
@@ -18482,6 +18748,7 @@ int main(int argc, char **argv) {
      * so the boot call is accepted exactly like the engine's map event).
      * The full 0..8 argument range is exposed (the shipped game only ever
      * calls D0B18(6) — its snow->rain street event). */
+    g_bootWeatherTarget = bootWeatherTarget;   /* V42 D-1: for the K_R re-arm */
     if (bootWeatherTarget >= 0) {
         if (sh_particle_weather_target_set(&A.snow, bootWeatherTarget)) {
             printf("[weather] boot sharedFunc_800D0B18(%d) — sine cross-fade "

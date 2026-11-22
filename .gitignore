@@ -9,3 +9,6 @@ local.properties
 bench/fog_poc
 bench/anim_shots/
 bench/shots/
+
+# the host engine writes shots/ relative to the CWD (repo root when run by hand)
+shots/
