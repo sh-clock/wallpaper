@@ -12518,9 +12518,10 @@ static void sh1x_water_fx_draw(Frame *fb, const Renderer *R,
              * particle's own value (field_B=0), NOT sprite 0's.     */
             int sel = a->wrSel[12];
             unsigned char tile[32][32][3];
-            /* v41 (A-5): the lazy first-composite gate the two material
-             * views already run (fx_water_live_rgba / fx_water_floor_rgba)
-             * — g_waterTileRGB is static zero-init and ONLY
+            /* v41 (A-5): the lazy first-composite gate the material view
+             * already runs (fx_water_live_rgba — the V44 direct-color
+             * path; the v37 nibble view was removed) — g_waterTileRGB is
+             * static zero-init and ONLY
              * fx_water_tile_update writes it, so an ungated sel-2 read
              * before the first pass sampled BLACK (and the per-shot reset
              * clears g_waterTileEverUpdated but NOT g_waterTileRGB — a
