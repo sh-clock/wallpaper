@@ -7891,6 +7891,25 @@ static void raster_tri(Frame *fb, const RVert *vA, const RVert *vB, const RVert 
              * saturates at 0x7FFF — they never cover the tile).        */
             if (pass == RP_OPAQUE || pass == RP_MASK_TEX)
                 fb->z[pi] = z;   /* flake-occlusion ref */
+            if (pass == RP_ADD_TEX && ta < 128) {
+                /* v37: the STP-CLEAR texel of a semi-trans prim — the PS1
+                 * rule (DuckStation gpu_sw_rasterizer): the ABR blend
+                 * applies ONLY to texels whose STP bit is SET; STP-clear
+                 * texels write OPAQUE. Reachable only through a texture
+                 * that mixes STP classes (the V44 direct-color water tile
+                 * is uniformly STP-set — every DR_WAVE CLUT entry has bit
+                 * 15 — so this branch never fires for it); kept for the
+                 * rule's sake.
+                 * (v1.13.1 branch-update: transplanted VERBATIM from the
+                 * PoC src/fog_poc.c:7801 — the v1.12.0 twin port dropped
+                 * it with the fx_water_floor_rgba deletion, but the PoC
+                 * keeps the rule branch; twin-verbatim wins.)            */
+                int r = (((tr >> 3) * vr) >> 4) + orr;
+                int g = (((tg >> 3) * vg) >> 4) + og;
+                int b = (((tb >> 3) * vb) >> 4) + ob;
+                fb_put(fb, x, y, r, g, b, quantize, dither);
+                continue;
+            }
             if (pass == RP_ADD_TEX) {
                 /* v34 WATER: the runtime DWAVE material rewrite (func_8008E4EC
                  * -> Lm_MaterialFsImageApply1(..., blendMode=1) ->
