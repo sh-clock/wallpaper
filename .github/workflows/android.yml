@@ -45,7 +45,7 @@ jobs:
     # an orphaned tag can block the next bump (the S23 repair: delete the
     # orphaned tag + a consolidated manual bump + a NON-[skip ci] tag
     # commit to re-trigger the release via the tags: ['v*'] path).
-: the same result-condition
+    # GATED on the two test gates (V45 H-6): the same result-condition
     # shape the build job below uses — the bump + tag push happens ONLY
     # after both gates pass. (The 'skipped' allowances mirror build's;
     # on a push to main the gates always run.)
