@@ -31,6 +31,12 @@
  *
  * Fallback contract: any init/render failure returns 0 and the caller
  * (sh1_hw_render.c) falls back to the software renderer (logged).
+ * v45 audit H-5: every init-failure path now also TEARS DOWN its
+ * partial state (sh1_vk_hw_shutdown — the post-device paths' pattern):
+ * no leaked VkInstance / device objects / dlopen'd libvulkan, and the
+ * failure latch behaves identically on every path (shutdown resets it,
+ * so each engine restart re-attempts init once — the pre-v45 early
+ * paths leaked AND were sticky, the asymmetric combination H-5 flagged).
  * ============================================================================
  */
 #include "sh1_hw_types.h"
@@ -63,7 +69,12 @@
  * state
  * ========================================================================*/
 static bool g_vk_ok = false;          /* fully initialized                   */
-static bool g_vk_failed = false;      /* failed once — stay on software     */
+static bool g_vk_failed = false;      /* init failed — set by every failure
+                                         path; sh1_vk_hw_shutdown() RESETS it
+                                         (v45 H-5), so all failures retry on
+                                         the next engine restart, exactly
+                                         like the post-device paths always
+                                         have                             */
 static VkInstance g_inst = VK_NULL_HANDLE;
 static VkPhysicalDevice g_pdev = VK_NULL_HANDLE;
 static uint32_t g_gfxQueueFamily = 0;
@@ -235,18 +246,29 @@ extern "C" int sh1_vk_hw_init(int w, int h, const unsigned char *texBlob,
     if (vkCreateInstance(&ici, nullptr, &g_inst) != VK_SUCCESS) {
         VKLOGE("vkCreateInstance failed");
         g_vk_failed = true;
+        sh1_vk_hw_shutdown();   /* v45 H-5: no instance — release the dlopen */
         return 0;
     }
     if (!Vulkan::LoadVulkanInstanceFunctions(g_inst)) {
         VKLOGE("instance function loading failed");
         g_vk_failed = true;
+        /* v45 audit H-5: symmetric cleanup, with one guard — a load
+         * FAILURE means some REQUIRED instance point is null, possibly
+         * exactly vkDestroyInstance (which shutdown() would call on
+         * the live g_inst). If so, the instance cannot be destroyed
+         * and leaks to process exit; the dlopen'd library is still
+         * released.                                                          */
+        if (vkDestroyInstance != nullptr)
+            sh1_vk_hw_shutdown();
+        else
+            Vulkan::UnloadVulkanLibrary();
         return 0;
     }
 
     /* --- physical device + graphics queue ------------------------------ */
     uint32_t nDev = 0;
     vkEnumeratePhysicalDevices(g_inst, &nDev, nullptr);
-    if (nDev == 0) { VKLOGE("no Vulkan devices"); g_vk_failed = true; return 0; }
+    if (nDev == 0) { VKLOGE("no Vulkan devices"); g_vk_failed = true; sh1_vk_hw_shutdown(); return 0; }
     std::vector<VkPhysicalDevice> devs(nDev);
     vkEnumeratePhysicalDevices(g_inst, &nDev, devs.data());
     bool found = false;
@@ -265,7 +287,7 @@ extern "C" int sh1_vk_hw_init(int w, int h, const unsigned char *texBlob,
         }
         if (found) break;
     }
-    if (!found) { VKLOGE("no graphics queue"); g_vk_failed = true; return 0; }
+    if (!found) { VKLOGE("no graphics queue"); g_vk_failed = true; sh1_vk_hw_shutdown(); return 0; }
 
     /* --- format check: R32F as a color attachment (the z attachment;
      * core Vulkan makes this OPTIONAL — query, and fall back cleanly) --- */
@@ -276,6 +298,8 @@ extern "C" int sh1_vk_hw_init(int w, int h, const unsigned char *texBlob,
             VKLOGE("R32F not color-attachable on this device — staying on "
                    "software");
             g_vk_failed = true;
+            sh1_vk_hw_shutdown();   /* v45 H-5: was a bare return — leaked
+                                     * the VkInstance + the dlopen'd lib */
             return 0;
         }
     }
@@ -291,11 +315,26 @@ extern "C" int sh1_vk_hw_init(int w, int h, const unsigned char *texBlob,
     if (vkCreateDevice(g_pdev, &dci, nullptr, &g_dev) != VK_SUCCESS) {
         VKLOGE("vkCreateDevice failed");
         g_vk_failed = true;
+        sh1_vk_hw_shutdown();   /* v45 H-5: was a bare return — leaked */
         return 0;
     }
     if (!Vulkan::LoadVulkanDeviceFunctions(g_dev)) {
         VKLOGE("device function loading failed");
         g_vk_failed = true;
+        /* v45 audit H-5: same guard class as the instance loader site
+         * above — a failed device load may have nulled exactly the
+         * pointers shutdown() needs for the live g_dev (vkDeviceWaitIdle
+         * / vkDestroyDevice are REQUIRED points). Best effort then:
+         * destroy the instance (its points ARE fully loaded) and
+         * release the library; the device object cannot be destroyed
+         * and leaks to process exit.                                       */
+        if (vkDeviceWaitIdle != nullptr && vkDestroyDevice != nullptr) {
+            sh1_vk_hw_shutdown();
+        } else {
+            vkDestroyInstance(g_inst, nullptr);
+            g_inst = VK_NULL_HANDLE;
+            Vulkan::UnloadVulkanLibrary();
+        }
         return 0;
     }
     vkGetDeviceQueue(g_dev, g_gfxQueueFamily, 0, &g_queue);
@@ -332,6 +371,8 @@ extern "C" int sh1_vk_hw_init(int w, int h, const unsigned char *texBlob,
                       VK_IMAGE_VIEW_TYPE_2D)) {
         VKLOGE("attachment image allocation failed");
         g_vk_failed = true;
+        sh1_vk_hw_shutdown();   /* v45 H-5: the audit's ":307/:313/:316/..."
+                                 * claim missed this one — same pattern */
         return 0;
     }
 
@@ -352,6 +393,7 @@ extern "C" int sh1_vk_hw_init(int w, int h, const unsigned char *texBlob,
                       VK_IMAGE_VIEW_TYPE_2D_ARRAY)) {
         VKLOGE("texture array allocation failed");
         g_vk_failed = true;
+        sh1_vk_hw_shutdown();   /* v45 H-5 */
         return 0;
     }
 
@@ -411,6 +453,7 @@ extern "C" int sh1_vk_hw_init(int w, int h, const unsigned char *texBlob,
                           VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) {
             VKLOGE("staging buffer failed");
             g_vk_failed = true;
+            sh1_vk_hw_shutdown();   /* v45 H-5 */
             return 0;
         }
         memset(g_stagingMap, 0, total);
@@ -605,6 +648,7 @@ extern "C" int sh1_vk_hw_init(int w, int h, const unsigned char *texBlob,
                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)) {
         VKLOGE("vertex buffer allocation failed");
         g_vk_failed = true;
+        sh1_vk_hw_shutdown();   /* v45 H-5 */
         return 0;
     }
 
@@ -617,6 +661,7 @@ extern "C" int sh1_vk_hw_init(int w, int h, const unsigned char *texBlob,
                       VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
         VKLOGE("readback buffer allocation failed");
         g_vk_failed = true;
+        sh1_vk_hw_shutdown();   /* v45 H-5 */
         return 0;
     }
 
