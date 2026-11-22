@@ -639,9 +639,15 @@ static void hw_push_tri(const RVert *vA, const RVert *vB, const RVert *vC,
     g_hwBatch.nVert += 3;
     g_hwBatch.nInst += 1;
     /* the z pass takes OPAQUE triangles only (raster_tri writes fb->z
-     * ONLY for RP_OPAQUE non-hole fragments — the shader's discard gives
-     * the hole rule; this filter gives the pass rule)                    */
-    if (pass == RP_OPAQUE) {
+     * ONLY for RP_OPAQUE / RP_MASK_TEX non-hole fragments — the shader's
+     * discard gives the hole rule; this filter gives the pass rule.
+     * V41 C-5 (the twin fog_poc.c:7892 rule, ported for PR #14's MASK
+     * half): MASK (ST-clear punch-through leaf) prims write the depth
+     * reference TOO — the engine's leaf GT4s are OPAQUE (Gfx_BillboardDraw
+     * billboard.c:283 setPolyGT4, no setSemiTrans; only their 0x0000
+     * texels are holes), so a ta>0 leaf texel COVERS the flare probe's
+     * 1x1 white TILE — without this the flare/flakes see through leaves) */
+    if (pass == RP_OPAQUE || pass == RP_MASK_TEX) {
         if ((size_t)g_hwBatch.nZVert + 3 <= g_hwBatch.capZVert) {
             memcpy(&g_hwBatch.zverts[g_hwBatch.nZVert], Vv[0], sizeof(HwVert) * 3);
             memcpy(&g_hwBatch.zinsts[g_hwBatch.nZVert], in, sizeof(HwInst));
@@ -721,6 +727,26 @@ static void hw_push_tri(const RVert *vA, const RVert *vB, const RVert *vC,
  * ========================================================================*/
 static int hw_build_batch(Frame *fb, const Renderer *R, const CamPose *cam) {
     const Scene *sc = R->sc;
+    /* V44/V45 water gate (PR #14's waterLive half — the sole merger's
+     * reimplementation): the MIZ water-floor quads are the engine's
+     * forced func_80059E34(1) path — 15-bit DIRECT color + ABR-2 B-F
+     * SUBTRACTIVE (dst = dst - modulate(tile, 56)), the animated 32x32
+     * live tile re-uploaded to VRAM every frame (func_8008E5B4's two
+     * POLY_FT4s composited INTO the VRAM rect). Neither HW backend has
+     * the dst-read chain (pure replacers: blend-off pipelines, the
+     * shaders' only blending is the z-pass color mask) nor the per-frame
+     * texture re-upload — a REPLACER draw of the frozen frame-0 tile
+     * with a fog veil would be flat WRONG. Engine-exact accuracy wins:
+     * bail the whole frame to the software twin (render_frame draws the
+     * RP_SUB_TEX branch + the live tile engine-verbatim). The same
+     * fallback class as the OOM/overflow paths in sh1_hw_render.      */
+    for (int i = 0; i < sc->matCount; i++) {
+        if (sc->mat[i].waterLive) {
+            HWLOGE("waterLive material idx %d — the dst-read water floor is "
+                   "software-twin territory; falling back for this frame", i);
+            return 0;
+        }
+    }
     if (g_lightDump && R->env) {
         const ShLight *Ld = &R->env->light;
         fprintf(g_lightDump, "POSE F%d pos=%d,%d,%d dir=%d,%d,%d f28=%d,%d,%d f30=%d,%d,%d dqa=%d int=%d cam=%.3f,%.3f,%.3f\n",
@@ -1412,7 +1438,20 @@ static int hw_build_batch(Frame *fb, const Renderer *R, const CamPose *cam) {
         const TexInfo *t = &sc->tex[m->texIdx];
         if (t->w <= 0) continue;
         const uint8_t *tex = sc->texBlob + t->off;
-        const PassMode quadPass = (m->alphaMode == 0) ? RP_OPAQUE : RP_BLEND_TEX;
+        /* V44/V45 (PR #14's waterLive half — the twin fog_poc.c:13947
+         * form, verbatim): waterLive (the DR/DRU MIZ floor quads) = the
+         * forced func_80059E34(1) packet path — 15-bit direct color +
+         * ABR-2 SUBTRACTIVE + flat (56,56,56) + fixed bucket 640 =
+         * RP_SUB_TEX. V41 C-5: MASK (alphaMode 1) gets its OWN pass value
+         * so the z pass writes depth for its ta>0 texels (see
+         * hw_push_tri); BLEND (alphaMode 2) stays RP_BLEND_TEX (no depth
+         * write). NB: RP_SUB_TEX never reaches hw_push_tri here — the
+         * frame-level water gate below falls the whole frame back to the
+         * software twin (neither backend implements the dst-read chain);
+         * the expression stays twin-verbatim for the day one does.     */
+        const PassMode quadPass = m->waterLive ? RP_SUB_TEX
+            : ((m->alphaMode == 0) ? RP_OPAQUE
+               : ((m->alphaMode == 1) ? RP_MASK_TEX : RP_BLEND_TEX));
         for (int ti = 0; ti < post[bi].ntri && post[bi].tri0 + ti * 3 + 2 < it->icount; ti++) {
             int k = post[bi].tri0 + ti * 3;
             uint32_t ia = sc->idxs[it->ibase + k], ib = sc->idxs[it->ibase + k + 1],
