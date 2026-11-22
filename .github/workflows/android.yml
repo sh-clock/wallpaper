@@ -39,7 +39,13 @@ jobs:
   # condition skipped the build — a pushed tag with no release (exactly
   # v1.10.0's state at the V45 audit, when the unit gate was red).
   bump:
-    # GATED on the two test gates (V45 H-6): the same result-condition
+    # OPERATIONAL NOTE (the S23 race lesson): a burst of merges can race
+    # two bump runs off the same pre-merge version state — the loser's
+    # `git push origin main "v$NEW"` fails at the tag (already exists) and
+    # an orphaned tag can block the next bump (the S23 repair: delete the
+    # orphaned tag + a consolidated manual bump + a NON-[skip ci] tag
+    # commit to re-trigger the release via the tags: ['v*'] path).
+: the same result-condition
     # shape the build job below uses — the bump + tag push happens ONLY
     # after both gates pass. (The 'skipped' allowances mirror build's;
     # on a push to main the gates always run.)
