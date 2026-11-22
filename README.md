@@ -14,7 +14,7 @@ wallpaper.
 
 ## Features
 
-* 44 scenes (the town streets, both schools, the hospital, the resort,
+* 45 scenes (the town streets, both schools, the hospital, the resort,
   the sewers, the amusement park, Nowhere), rasterized exactly like the
   PSX original (320×224, PSX wobble, 15-bit color, ordered dither)
 * All 21 environment presets of the game (MAP_EFFECTS_INFOS, verbatim)

@@ -212,7 +212,7 @@ jobs:
           # the corpus rides in the APK: every GLB + camdat.json
           GLBS=$(unzip -l app/build/outputs/apk/release/app-release.apk | grep -c 'assets/sh1/.*\.glb')
           echo "release APK scene GLBs: $GLBS"
-          test "$GLBS" -ge 44
+          test "$GLBS" -ge 45
           unzip -l app/build/outputs/apk/release/app-release.apk | grep 'assets/sh1/camdat.json'
 
       - name: Read the app version (release naming + verification)
