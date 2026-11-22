@@ -32,8 +32,19 @@ jobs:
   # build job below runs AFTER the bump (needs:) with ref: main and
   # publishes the release itself. Pushes without releasable changes do
   # not bump.
+  # V45 (audit H-6): the bump is GATED — it needs anim-gate + unit-tests
+  # and runs only when BOTH passed, so a red gate burns no version number
+  # and pushes no tag. Before V45 the bump ran in PARALLEL with the gates:
+  # a red gate still bumped + tagged, then the build job's own gate
+  # condition skipped the build — a pushed tag with no release (exactly
+  # v1.10.0's state at the V45 audit, when the unit gate was red).
   bump:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # GATED on the two test gates (V45 H-6): the same result-condition
+    # shape the build job below uses — the bump + tag push happens ONLY
+    # after both gates pass. (The 'skipped' allowances mirror build's;
+    # on a push to main the gates always run.)
+    needs: [anim-gate, unit-tests]
+    if: always() && (needs.anim-gate.result == 'success' || needs.anim-gate.result == 'skipped') && (needs.unit-tests.result == 'success' || needs.unit-tests.result == 'skipped') && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:
       did: ${{ steps.bump.outputs.did }}
