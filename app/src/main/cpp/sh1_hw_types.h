@@ -26,7 +26,12 @@ typedef struct {
 typedef struct {
     uint32_t ddaU0, ddaV0, ddaDudx, ddaDudy;   /* a_ddaA (u32 Q24)         */
     uint32_t ddaDvdx, ddaDvdy;                 /* a_ddaB (u32 Q24)         */
-    int32_t  ddaX0, ddaY0, ddaKX, ddaKY;       /* a_ddaAnchor (Q12)        */
+    int32_t  ddaX0, ddaY0, ddaKX, ddaKY;       /* a_ddaAnchor: X0,Y0 (Q12);
+                                                  KX,KY = FLOAT BITS of
+                                                  4096/scale (v45 H-1: the
+                                                  shaders widen + multiply
+                                                  in float — the engine's
+                                                  single-truncation DDA) */
     int32_t  texW, texH;                       /* a_texSize                */
     int32_t  flags;                            /* a_flags.x: bit0 dither, bit1 quantize */
     int32_t  useDDA;                           /* a_flags.y                */

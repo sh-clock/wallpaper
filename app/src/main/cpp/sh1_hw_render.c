@@ -31,6 +31,11 @@
  * nearer-OT-bucket covering quad has interpolated z FARTHER than the
  * sprite's depth at that pixel, or where a later STP/BLEND quad would
  * have painted over a farther sprite. Bounded to sprite-covered pixels.
+ * (A former undisclosed third class — the DDA anchor KX/KY int32
+ * pre-quantization, which drifted the DDA up to 0.078 engine px at
+ * fractional-scale resolutions — was CLOSED by the v45 audit H-1 fix:
+ * hw_push_tri now passes the factor's float bits and the shaders
+ * multiply in float, matching raster_tri's single-truncation math.)
  *
  * The wobble (GTE snap) stays CPU-side in the shared transform —
  * bit-identical in ALL backends by construction (the user's explicit
@@ -613,8 +618,26 @@ static void hw_push_tri(const RVert *vA, const RVert *vB, const RVert *vC,
             in->ddaV0 = ((uint32_t)(uint8_t)iv[0] << 24) + (2048u << 12);
             in->ddaX0 = (int32_t)((int64_t)ex[0] << 12);
             in->ddaY0 = (int32_t)((int64_t)ey[0] << 12);
-            in->ddaKX = (int32_t)(4096.0 / (double)engScaleX);
-            in->ddaKY = (int32_t)(4096.0 / (double)engScaleY);
+            /* v45 audit H-1: raster_tri keeps ddaKX/KY as DOUBLES
+             * (fog_poc.c:7724-7725) and truncates ONCE per pixel,
+             * (int64_t)(x * ddaKX). The old (int32_t) cast here pre-
+             * quantized the factor (4096/1.5 = 2730.666.. -> 2730) and
+             * the residue grew linearly from the anchor vertex: up to
+             * 319 Q12 units (0.078 engine px) at the 480x336 ladder
+             * entry, 0 at the integral scales. The anchor's int slots
+             * now carry the FLOAT BITS of the exact engine factor
+             * (4096.0 / (double)engScale, narrowed to float); the
+             * shaders multiply in float and truncate once — the
+             * engine's own arithmetic (integral scales: the factor is
+             * an exact power of two, so those modes stay bit-identical;
+             * fractional scales: within 1 Q12 unit of the engine's
+             * double evaluation everywhere).                              */
+            {
+                float kxF = (float)(4096.0 / (double)engScaleX);
+                float kyF = (float)(4096.0 / (double)engScaleY);
+                memcpy(&in->ddaKX, &kxF, sizeof kxF);
+                memcpy(&in->ddaKY, &kyF, sizeof kyF);
+            }
             in->useDDA = 1;
         }
     }

@@ -16,7 +16,11 @@
  * gpu_hw_shadergen.cpp's fragment emission, with shadergen's own
  * WriteHeader ambient macros) is carried over CHARACTER-FOR-CHARACTER
  * from the v9.8 PoC. The DuckStation UV DDA block (mul_u32 /
- * shr_s64_12 / add64 + the Q24 evaluation) is carried over VERBATIM.
+ * shr_s64_12 / add64 + the Q24 evaluation) is carried over VERBATIM;
+ * v45 audit H-1 changed ONLY the anchor step (dxq/dyq): the KX/KY
+ * slots now carry FLOAT BITS and the multiply runs in float, keeping
+ * raster_tri's double-precision factor through the DDA (the old int
+ * pre-truncation drifted up to 0.08 engine px at fractional scales).
  *
  * The PERSP (modern/--modern wobble-off) path: gl_Position.w carries
  * the view depth; UV varyings then interpolate perspective-correctly
@@ -49,7 +53,7 @@ static const char* HW_VS_MESH_GLES = (
     "layout(location = 4) in float a_z;     /* view depth (m)                    */\n"
     "layout(location = 5) in uvec4 a_ddaA;      /* U0,V0,Dudx,Dudy (u32 Q24)     */\n"
     "layout(location = 6) in uvec2 a_ddaB;      /* Dvdx,Dvdy (u32 Q24)           */\n"
-    "layout(location = 7) in ivec4 a_ddaAnchor; /* X0,Y0 (Q12), KX,KY           */\n"
+    "layout(location = 7) in ivec4 a_ddaAnchor; /* X0,Y0 (Q12), KX,KY (float bits)  */\n"
     "layout(location = 8) in ivec2 a_texSize;   /* tw,th                        */\n"
     "layout(location = 9) in ivec4 a_flags;     /* mode,useDDA,persp,layer      */\n"
     "uniform vec2 u_fbSize;\n"
@@ -197,13 +201,24 @@ static const char* HW_FS_MESH_GLES = (
     "  /* ---- texture sampling ------------------------------------------------ */\n"
     "  vec4 texel;\n"
     "  if (v_flags.y != 0) {\n"
-    "    /* raster_tri's exact integer sequence (the DuckStation UV DDA):\n"
-    "     *   dxq = (int64)(x * ddaKX) - ddaX0    (<= 2^24, s32-safe at 320x)\n"
+    "    /* raster_tri's exact sequence (the DuckStation UV DDA). v45 audit\n"
+    "     * H-1: the anchor's z,w slots carry the FLOAT BITS of the\n"
+    "     * double factor 4096/scale — the multiply runs in float and\n"
+    "     * truncates ONCE, the engine's own single-truncation\n"
+    "     * arithmetic (the old int32 pre-truncation lost up to\n"
+    "     * 0.667 Q12/px from the anchor and drifted the sampled texel\n"
+    "     * by up to 0.078 engine px at fractional-scale modes):\n"
+    "     *   dxq = (int64)(x * ddaKX) - ddaX0  (x < 320*scale, so\n"
+    "     *   x*ddaKX < 320*4096 = 1,310,720: s32-safe at EVERY scale;\n"
+    "     *   bit-identical at integral scales, where 4096/scale is an\n"
+    "     *   exact power of two and the float product is exact)\n"
     "     *   usum = (int64)U0 + (((int64)(s32)Dudx * dxq) >> 12)\n"
     "     *                       + (((int64)(s32)Dudy * dyq) >> 12)\n"
     "     *   texel = Truncate8(usum >> 24) % tw  (the u8 texcoord wrap)      */\n"
-    "    int dxq = pix.x * v_ddaAnchor.z - v_ddaAnchor.x;\n"
-    "    int dyq = pix.y * v_ddaAnchor.w - v_ddaAnchor.y;\n"
+    "    int dxq = int(float(pix.x) * uintBitsToFloat(uint(v_ddaAnchor.z)))\n"
+    "             - v_ddaAnchor.x;\n"
+    "    int dyq = int(float(pix.y) * uintBitsToFloat(uint(v_ddaAnchor.w)))\n"
+    "             - v_ddaAnchor.y;\n"
     "    uvec2 t1 = shr_s64_12(mul_u32(v_ddaA.z, uint(dxq)));\n"
     "    uvec2 t2 = shr_s64_12(mul_u32(v_ddaA.w, uint(dyq)));\n"
     "    uvec2 t3 = shr_s64_12(mul_u32(v_ddaB.x, uint(dxq)));\n"
