@@ -171,6 +171,10 @@ public class CamtrackEditorActivity extends AppCompatActivity
   /* v10.3: the last frame timestamp the callback re-posted itself at —
      guards the synchronous-loop hazard (see the frameTick comment) */
   private long lastPostedFrameNs;
+  /* v48 WAJ-14: whether frameTick is currently pending on the choreographer —
+     guards onResume/onCreate against double-posting the SAME callback (on
+     pre-35 platforms a duplicate post runs doFrame twice per vsync) */
+  private boolean frameTickPosted;
   private final Choreographer choreographer = Choreographer.getInstance();
   private Choreographer.FrameCallback frameTick;
 
@@ -291,6 +295,10 @@ public class CamtrackEditorActivity extends AppCompatActivity
     // initial post — this also hardens the callback against any
     // non-advancing doFrame source.
     frameTick = frameTimeNs -> {
+      // this doFrame consumed the pending post (Choreographer removes the
+      // callback before invoking it), so the flag no longer reflects a
+      // queued callback
+      frameTickPosted = false;
       if (playing) {
         if (lastFrameNs > 0 && frameTimeNs > lastFrameNs) {
           double dt = (frameTimeNs - lastFrameNs) / 1.0e9;
@@ -302,9 +310,38 @@ public class CamtrackEditorActivity extends AppCompatActivity
       updatePoseMarker();
       if (frameTimeNs > lastPostedFrameNs) {
         lastPostedFrameNs = frameTimeNs;
-        choreographer.postFrameCallback(frameTick);
+        postFrameTick();
       }
     };
+    postFrameTick();
+  }
+
+  @Override
+  protected void onResume() {
+    super.onResume();
+    // restart the chrome clock after a pause (no-op when already pending,
+    // e.g. the initial post from onCreate)
+    postFrameTick();
+  }
+
+  @Override
+  protected void onPause() {
+    // v48 WAJ-14: stop the per-vsync chrome loop while this activity is not
+    // visible — the self-re-posting frameTick otherwise keeps running
+    // updatePlaybarChrome (setText + slider setValue) and updatePoseMarker
+    // (path view invalidate) every vsync behind whatever covers us
+    choreographer.removeFrameCallback(frameTick);
+    frameTickPosted = false;
+    super.onPause();
+  }
+
+  /** v48 WAJ-14: post frameTick exactly once — duplicate posts of the same
+   *  callback would run doFrame twice per vsync on pre-35 platforms. */
+  private void postFrameTick() {
+    if (frameTickPosted || frameTick == null) {
+      return;
+    }
+    frameTickPosted = true;
     choreographer.postFrameCallback(frameTick);
   }
 
