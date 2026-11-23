@@ -643,7 +643,9 @@ public class CamtrackPathView extends View {
     float w = 7 * d;
     float h = 5 * d;
     canvas.save();
-    canvas.rotate((float) Math.toDegrees(Math.atan2(fx, fz)), sx, sy);
+    // v48 WAJ-6: canvas.rotate(θ) maps local +Y (the 5d depth side) to
+    // (-sinθ, cosθ) — aligning it with the beam (fx, fz) needs atan2(-fx, fz)
+    canvas.rotate((float) Math.toDegrees(Math.atan2(-fx, fz)), sx, sy);
     canvas.drawRoundRect(new RectF(sx - w / 2, sy - h / 2, sx + w / 2, sy + h / 2),
         2 * d, 2 * d, paintCam);
     canvas.restore();
