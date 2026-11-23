@@ -2499,63 +2499,77 @@ public class Sh1WallpaperService extends WallpaperService {
     @Override
     public void onSurfaceCreated(SurfaceHolder holder) {
       super.onSurfaceCreated(holder);
-      copyAssetsIfNeeded(Sh1WallpaperService.this);
       Sh1Native.surfaceCreated(mGen, holder.getSurface());
+      // v48 WAJ-10: the first-run asset copy (per-file SHA-256 + stream
+      // copy of the ~61 MB bundled corpus) ran on the MAIN thread here —
+      // WallpaperService engine callbacks are main-thread, an ANR risk.
+      // Mirror the editor path (beginEditorPreview): copy + boot on the
+      // single engine executor (sExecutor), the copy BEFORE the start,
+      // so the engine never boots without its data files and
+      // Sh1Native.start still happens exactly once (the !sEngineStarted
+      // guard now runs INSIDE the serialized task).
       // v9.7: while the Camtrack editor preview session owns the engine,
       // a (re)created wallpaper surface only BINDS (a lower generation —
       // newest-live-wins keeps the editor's preview on the raster); the
       // wallpaper's own boot happens at endEditorPreview -> restartEngine
-      if (!sEngineStarted && !sEditorSession) {
-        sEngineStarted = true;
-        SharedPreferences prefs = getPrefs(Sh1WallpaperService.this);
-        // Boot argv: --glb <scene> --track N --preset <effective env>
-        // + optional --weather-target (user override; -1 keeps the
-        // scene's own camdat recipe) + v7 --res/--fps (F17/F18).
-        // The native side re-reads nothing: these ARE the persisted prefs.
-        Object[] scene = resolveBootScene(Sh1WallpaperService.this, prefs);
-        String glb = (String) scene[0];
-        int track = (Integer) scene[1];
-        String trackId = (String) scene[2];
-        int ovrEnv = getTrackEnvOverride(prefs, trackId);
-        if (ovrEnv < 0) {
-          ovrEnv = getSceneEnvOverride(prefs, glb);
+      sExecutor.execute(() -> {
+        try {
+          copyAssetsIfNeeded(Sh1WallpaperService.this);
+        } catch (RuntimeException e) {
+          Log.e(TAG, "engine boot: asset copy failed", e);
         }
-        int ovrWeather = getTrackWeatherOverride(prefs, trackId);
-        if (ovrWeather < 0) {
-          ovrWeather = getSceneWeatherOverride(prefs, glb);
+        if (!sEngineStarted && !sEditorSession) {
+          sEngineStarted = true;
+          SharedPreferences prefs = getPrefs(Sh1WallpaperService.this);
+          // Boot argv: --glb <scene> --track N --preset <effective env>
+          // + optional --weather-target (user override; -1 keeps the
+          // scene's own camdat recipe) + v7 --res/--fps (F17/F18).
+          // The native side re-reads nothing: these ARE the persisted prefs.
+          Object[] scene = resolveBootScene(Sh1WallpaperService.this, prefs);
+          String glb = (String) scene[0];
+          int track = (Integer) scene[1];
+          String trackId = (String) scene[2];
+          int ovrEnv = getTrackEnvOverride(prefs, trackId);
+          if (ovrEnv < 0) {
+            ovrEnv = getSceneEnvOverride(prefs, glb);
+          }
+          int ovrWeather = getTrackWeatherOverride(prefs, trackId);
+          if (ovrWeather < 0) {
+            ovrWeather = getSceneWeatherOverride(prefs, glb);
+          }
+          int bootPreset = ovrEnv >= 0 ? ovrEnv
+              : getEffectiveEnv(Sh1WallpaperService.this, prefs, glb, trackId);
+          int bootWeather = ovrWeather >= 0 ? ovrWeather : getUserWeather(prefs);
+          int[] res = getBootResolution(prefs);
+          double fps = getBootFps(prefs);
+          int wobble = getBootWobble(prefs);
+          int dither = getBootDither(prefs);
+          Sh1Native.start(Sh1Storage.engineDataPath(Sh1WallpaperService.this),
+              bootPreset, bootWeather, glb, track, res[0], res[1], fps, wobble,
+              dither, getBootBackend(prefs));
+          sUserCap = fps;
+          sAppliedEnv = bootPreset;
+          sAppliedScene = glb;
+          sAppliedTrackId = trackId;
+          sAppliedWeather = bootWeather != SH1.WEATHER_SCENE
+              ? bootWeather : getSceneWeather(Sh1WallpaperService.this);
+          // v10.1 TASK 4: the fresh engine presents with the user's crop window
+          float[] crop = getCropOffsets(prefs);
+          Sh1Native.setCropOffset(crop[0], crop[1]);
+          sAppliedCropX = crop[0];
+          sAppliedCropY = crop[1];
+          Log.i(TAG, "engine boot: scene " + glb + " track " + track
+              + ", preset " + bootPreset + " (" + SH1.getEnvModeName(bootPreset)
+              + "), weather " + (bootWeather == SH1.WEATHER_SCENE
+              ? "scene default" : bootWeather)
+              + ", res " + (res[0] > 0 ? res[0] + "x" + res[1] : "default")
+              + ", fps " + (int) fps);
+          // apply the current freeze state to the fresh engine
+          applyFreezeState();
+          evaluatePacing(Sh1WallpaperService.this, prefs);
+          scheduleObserver(Sh1WallpaperService.this, glb, track);
         }
-        int bootPreset = ovrEnv >= 0 ? ovrEnv
-            : getEffectiveEnv(Sh1WallpaperService.this, prefs, glb, trackId);
-        int bootWeather = ovrWeather >= 0 ? ovrWeather : getUserWeather(prefs);
-        int[] res = getBootResolution(prefs);
-        double fps = getBootFps(prefs);
-        int wobble = getBootWobble(prefs);
-        int dither = getBootDither(prefs);
-        Sh1Native.start(Sh1Storage.engineDataPath(Sh1WallpaperService.this),
-            bootPreset, bootWeather, glb, track, res[0], res[1], fps, wobble,
-            dither, getBootBackend(prefs));
-        sUserCap = fps;
-        sAppliedEnv = bootPreset;
-        sAppliedScene = glb;
-        sAppliedTrackId = trackId;
-        sAppliedWeather = bootWeather != SH1.WEATHER_SCENE
-            ? bootWeather : getSceneWeather(Sh1WallpaperService.this);
-        // v10.1 TASK 4: the fresh engine presents with the user's crop window
-        float[] crop = getCropOffsets(prefs);
-        Sh1Native.setCropOffset(crop[0], crop[1]);
-        sAppliedCropX = crop[0];
-        sAppliedCropY = crop[1];
-        Log.i(TAG, "engine boot: scene " + glb + " track " + track
-            + ", preset " + bootPreset + " (" + SH1.getEnvModeName(bootPreset)
-            + "), weather " + (bootWeather == SH1.WEATHER_SCENE
-            ? "scene default" : bootWeather)
-            + ", res " + (res[0] > 0 ? res[0] + "x" + res[1] : "default")
-            + ", fps " + (int) fps);
-        // apply the current freeze state to the fresh engine
-        applyFreezeState();
-        evaluatePacing(Sh1WallpaperService.this, prefs);
-        scheduleObserver(Sh1WallpaperService.this, glb, track);
-      }
+      });
     }
 
     @Override
