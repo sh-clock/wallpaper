@@ -348,7 +348,9 @@ public class OtherFragment extends BaseFragment
     filter.addAction(ACTION.SETTINGS_CHANGED);
     try {
       if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-        requireActivity().registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
+        // SETTINGS_CHANGED is app-internal (senders use
+        // setPackage(getPackageName())) — never expose it to other apps.
+        requireActivity().registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED);
       } else {
         requireActivity().registerReceiver(receiver, filter);
       }

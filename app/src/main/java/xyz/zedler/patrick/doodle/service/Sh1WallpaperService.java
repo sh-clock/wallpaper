@@ -2308,7 +2308,10 @@ public class Sh1WallpaperService extends WallpaperService {
     filter.addAction(Intent.ACTION_USER_UNLOCKED);   // v10.6: CE data migration
     try {
       if (VERSION.SDK_INT >= VERSION_CODES.TIRAMISU) {
-        registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
+        // SETTINGS_CHANGED is app-internal (every sender uses
+        // setPackage(getPackageName())); the rest are protected system
+        // broadcasts, which are still delivered to NOT_EXPORTED receivers.
+        registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED);
       } else {
         registerReceiver(receiver, filter);
       }

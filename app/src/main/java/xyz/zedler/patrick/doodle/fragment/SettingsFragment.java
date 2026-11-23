@@ -252,7 +252,10 @@ public class SettingsFragment extends BaseFragment
     filter.addAction(Intent.ACTION_TIMEZONE_CHANGED);
     try {
       if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-        requireActivity().registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
+        // SETTINGS_CHANGED is app-internal (senders use
+        // setPackage(getPackageName())); the time/timezone actions are
+        // protected system broadcasts, still delivered to NOT_EXPORTED.
+        requireActivity().registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED);
       } else {
         requireActivity().registerReceiver(receiver, filter);
       }
