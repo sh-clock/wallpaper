@@ -51,7 +51,7 @@ public class EditorTrackAdapter
     void onDragHandleRequested(RecyclerView.ViewHolder viewHolder);
   }
 
-  private final List<CamtrackDoc.Track> tracks;
+  private List<CamtrackDoc.Track> tracks;
   private CamtrackDoc.Model model;
   private final TrackAdapterListener listener;
   private String selectedTrackId;
@@ -67,6 +67,10 @@ public class EditorTrackAdapter
   @SuppressLint("NotifyDataSetChanged")
   public void swapModel(CamtrackDoc.Model newModel) {
     this.model = newModel;
+    // v48 WAJ-2: rebind the LIST too — `tracks` is captured once at
+    // construction, so without this the TRACKS page kept listing (and
+    // drag-reordering) the PREVIOUS model's tracks
+    this.tracks = newModel.tracks;
     notifyDataSetChanged();
   }
 
