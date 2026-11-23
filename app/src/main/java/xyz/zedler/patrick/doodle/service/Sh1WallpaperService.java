@@ -794,6 +794,28 @@ public class Sh1WallpaperService extends WallpaperService {
   }
 
   /**
+   * v48 WAJ-11: camdat.json parse cache. ACTION_TIME_TICK (every minute,
+   * on by default) -> refreshAutoMode -> getEffectiveEnv -> getCamdatEnv
+   * -> readActiveCamdat re-read the file from disk and re-built the
+   * whole JSONObject tree each tick even when the file never changed.
+   * Keyed on (source, length, lastModified): any mismatch re-parses, so
+   * a CHANGED file behaves exactly as before (the Camtrack editor's
+   * save changes both). The asset fallback is immutable within a
+   * process (an APK update restarts it), so it is cached for the
+   * process lifetime.
+   *
+   * The cached instance is shared, NOT defensively copied: both callers
+   * here (getSceneWeather / getCamdatEnv) only READ the tree — a future
+   * caller that MUTATES the returned JSONObject must re-parse its own
+   * copy. Un-synchronized on purpose: a racing double parse is benign
+   * (last writer wins with an equivalent tree).
+   */
+  private static JSONObject sCamdatCacheRoot;
+  private static long sCamdatCacheLen = -1L;
+  private static long sCamdatCacheMtime = -1L;
+  private static boolean sCamdatCacheIsAsset = false;
+
+  /**
    * v9.6 (Camtrack v13): the ACTIVE camdat.json root — the user-editable
    * copy in filesDir/sh1 first (the in-app Camtrack editor writes there),
    * the bundled asset as the fallback. Extracted from getSceneWeather so
@@ -801,8 +823,15 @@ public class Sh1WallpaperService extends WallpaperService {
    */
   private static JSONObject readActiveCamdat(Context context) throws Exception {
     File camdat = new File(Sh1Storage.sh1Dir(context), "camdat.json");
+    boolean isAsset = !camdat.exists();
+    long len = isAsset ? -1L : camdat.length();
+    long mtime = isAsset ? -1L : camdat.lastModified();
+    if (sCamdatCacheRoot != null && sCamdatCacheIsAsset == isAsset
+        && sCamdatCacheLen == len && sCamdatCacheMtime == mtime) {
+      return sCamdatCacheRoot;   // unchanged since the last parse
+    }
     JSONObject root;
-    if (camdat.exists()) {
+    if (!isAsset) {
       try (InputStream in = new java.io.FileInputStream(camdat)) {
         root = readJson(in);
       }
@@ -812,6 +841,10 @@ public class Sh1WallpaperService extends WallpaperService {
         root = readJson(in);
       }
     }
+    sCamdatCacheRoot = root;
+    sCamdatCacheIsAsset = isAsset;
+    sCamdatCacheLen = len;
+    sCamdatCacheMtime = mtime;
     return root;
   }
 
