@@ -2438,6 +2438,14 @@ public class Sh1WallpaperService extends WallpaperService {
     }
     SharedPreferences prefs = getPrefs(context);
     sExecutor.execute(() -> {
+      // v48 WAJ-12: re-check the session INSIDE the serialized task — the
+      // caller-thread check above races a session-end flip: endEditorPreview
+      // (its own sExecutor task) could restore the wallpaper BETWEEN the
+      // check and this task's run, leaving a stale task stopping the
+      // wallpaper engine and booting the preview after the session ended.
+      if (!sEditorSession) {
+        return;
+      }
       // v10.1 BUG 2: same standalone-session guarantee as begin (the
       // idempotent copy is a no-op after the first call)
       try {
