@@ -185,6 +185,29 @@ static int g_gl_layers = 0, g_gl_maxW = 0, g_gl_maxH = 0;
 static void (*p_glColorMaski)(GLuint, GLboolean, GLboolean, GLboolean,
                               GLboolean) = NULL;
 
+/* forward: gles_hw_init's failure paths reuse the full teardown below */
+static void gles_hw_shutdown(void);
+
+/* v48 WAN-2: the init-failure teardown. Every gles_hw_init failure path
+ * AFTER eglInitialize used to just set g_gl_failed=1 and return 0,
+ * LEAKING the initialized EGL display, the context, the pbuffer surface
+ * and any created GL objects. Nothing else ever released them: the
+ * gles_hw_shutdown callers (sh1_hw_shutdown / sh1_hw_set_backend) only
+ * run while backend==1 with g_sh1_hw_inited set — a failed init clears
+ * neither (sh1_hw_render falls straight back to software), and
+ * g_gl_failed short-circuits every retry (gles_hw_init's first guard).
+ * Run the existing full teardown here instead — it re-asserts the
+ * context where one exists (so the glDelete* calls land), deletes the
+ * GL objects (every id is still zero-guarded on the early paths),
+ * releases the binding and destroys surface/context/display, then
+ * resets every id — and re-latch g_gl_failed afterwards (the teardown
+ * resets it: init failed once, stay on software).                        */
+static int gles_hw_init_fail(void) {
+    gles_hw_shutdown();
+    g_gl_failed = 1;
+    return 0;
+}
+
 static int gles_check(const char *what) {
     GLenum e = glGetError();
     if (e != GL_NO_ERROR) {
@@ -275,34 +298,29 @@ static int gles_hw_init(int w, int h, const Scene *sc) {
     EGLint n = 0;
     if (!eglChooseConfig(dpy, cfgAttribs, &cfg, 1, &n) || n < 1) {
         HWLOGE("EGL: no ES3 pbuffer config");
-        g_gl_failed = 1;
-        return 0;
+        return gles_hw_init_fail();
     }
     EGLint ctxAttribs[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
     g_gl_ctx = eglCreateContext(dpy, cfg, EGL_NO_CONTEXT, ctxAttribs);
     if (g_gl_ctx == EGL_NO_CONTEXT) {
         HWLOGE("EGL: ES3 context failed");
-        g_gl_failed = 1;
-        return 0;
+        return gles_hw_init_fail();
     }
     EGLint pbAttribs[] = {EGL_WIDTH, w, EGL_HEIGHT, h, EGL_NONE};
     g_gl_surf = eglCreatePbufferSurface(dpy, cfg, pbAttribs);
     if (g_gl_surf == EGL_NO_SURFACE) {
         HWLOGE("EGL: pbuffer failed");
-        g_gl_failed = 1;
-        return 0;
+        return gles_hw_init_fail();
     }
     if (!eglMakeCurrent(dpy, g_gl_surf, g_gl_surf, g_gl_ctx)) {
         HWLOGE("EGL: makeCurrent failed");
-        g_gl_failed = 1;
-        return 0;
+        return gles_hw_init_fail();
     }
     p_glColorMaski = (void (*)(GLuint, GLboolean, GLboolean, GLboolean,
                                 GLboolean))eglGetProcAddress("glColorMaski");
     if (!p_glColorMaski) {
         HWLOGE("GLES: glColorMaski unavailable — staying on software");
-        g_gl_failed = 1;
-        return 0;
+        return gles_hw_init_fail();
     }
     HWLOGI("GLES backend: %s | %s | %s",
            (const char *)glGetString(GL_VENDOR),
@@ -312,7 +330,7 @@ static int gles_hw_init(int w, int h, const Scene *sc) {
     /* --- program ------------------------------------------------------- */
     GLuint vs = gles_compile(GL_VERTEX_SHADER, HW_VS_MESH_GLES);
     GLuint fs = gles_compile(GL_FRAGMENT_SHADER, HW_FS_MESH_GLES);
-    if (!vs || !fs) { g_gl_failed = 1; return 0; }
+    if (!vs || !fs) return gles_hw_init_fail();
     g_gl_prog = glCreateProgram();
     glAttachShader(g_gl_prog, vs);
     glAttachShader(g_gl_prog, fs);
@@ -325,8 +343,7 @@ static int gles_hw_init(int w, int h, const Scene *sc) {
         char log[2048]; log[0] = 0;
         glGetProgramInfoLog(g_gl_prog, sizeof(log) - 1, NULL, log);
         HWLOGE("program link FAILED: %s", log);
-        g_gl_failed = 1;
-        return 0;
+        return gles_hw_init_fail();
     }
     glUseProgram(g_gl_prog);
     GLint un_fbSize = glGetUniformLocation(g_gl_prog, "u_fbSize");
@@ -384,10 +401,9 @@ static int gles_hw_init(int w, int h, const Scene *sc) {
                "needs EXT_color_buffer_float) — staying on the software "
                "renderer", (unsigned)fbSt);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        g_gl_failed = 1;
-        return 0;
+        return gles_hw_init_fail();
     }
-    if (!gles_check("setup")) { g_gl_failed = 1; return 0; }
+    if (!gles_check("setup")) return gles_hw_init_fail();
 
     /* --- the scene texture array (padded layers; wrap is in-shader) ----- */
     g_gl_layers = sc->texCount > 0 ? sc->texCount : 1;
@@ -419,7 +435,7 @@ static int gles_hw_init(int w, int h, const Scene *sc) {
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    if (!gles_check("texture array")) { g_gl_failed = 1; return 0; }
+    if (!gles_check("texture array")) return gles_hw_init_fail();
     HWLOGI("GLES: texture array %dx%d x %d layers (FBO %dx%d MRT RGBA8+R32F)",
            g_gl_maxW, g_gl_maxH, g_gl_layers, w, h);
     g_gl_ready = 1;
@@ -440,6 +456,15 @@ static void gles_hw_shutdown(void) {
     if (g_gl_ztex) glDeleteTextures(1, &g_gl_ztex);
     if (g_gl_texarr) glDeleteTextures(1, &g_gl_texarr);
     if (g_gl_dpy != EGL_NO_DISPLAY) {
+        /* v48 WAN-2: release the thread's context binding BEFORE the
+         * destroys — the EGL contract DEFERS the actual deletion of a
+         * CURRENT context/surface until it is no longer bound. The
+         * engine thread keeps running after an init-failure teardown
+         * (it falls back to the software renderer), so without this
+         * release the driver would hold the pbuffer/context alive for
+         * the rest of the process. Legal no-op when nothing is bound. */
+        eglMakeCurrent(g_gl_dpy, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                       EGL_NO_CONTEXT);
         if (g_gl_surf != EGL_NO_SURFACE) eglDestroySurface(g_gl_dpy, g_gl_surf);
         if (g_gl_ctx != EGL_NO_CONTEXT) eglDestroyContext(g_gl_dpy, g_gl_ctx);
         eglTerminate(g_gl_dpy);
