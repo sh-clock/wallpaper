@@ -2491,10 +2491,15 @@ public class CamtrackEditorActivity extends AppCompatActivity
         this, R.style.ThemeOverlay_Doodle_AlertDialog);
     builder.setTitle(title);
     builder.setView(dialogBinding.getRoot());
-    androidx.appcompat.app.AlertDialog dialog = builder.create();
+    // v48 WAJ-3: the buttons MUST be set BEFORE create() — appcompat's
+    // AlertController.AlertParams.apply() copies the builder state into
+    // the dialog AT create() time, so set*Button calls made after it never
+    // reached the shown dialog (the input could only be committed through
+    // the IME Done key)
     builder.setPositiveButton(android.R.string.ok, (d, which) ->
         onDone.accept(dialogBinding.inputEditorNumber.getText().toString()));
     builder.setNegativeButton(android.R.string.cancel, null);
+    androidx.appcompat.app.AlertDialog dialog = builder.create();
     dialogBinding.inputEditorNumber.setOnEditorActionListener(
         (v, action, event) -> {
           if (action == EditorInfo.IME_ACTION_DONE) {
