@@ -478,9 +478,18 @@ public final class CamtrackDoc {
       }
       List<Object> tracks = CamtrackJson.asArr(CamtrackJson.jget(m, "tracks"));
       if (tracks != null) {
+        /* w5-audit (A8-2): the canonical JS re-ids duplicate track ids
+           (camtrack.html sanitizeDoc, the V41 B-5 rule) — mirror it so a
+           hand-edited/imported camdat round-trips identically and
+           selectedTrackId stays unambiguous */
+        java.util.HashSet<String> seenIds = new java.util.HashSet<>();
         for (Object to : tracks) {
           Track t = sanitizeTrack(CamtrackJson.asObj(to));
           if (t != null) {
+            if (!seenIds.add(t.id)) {
+              t.id = newIdPublic();
+              seenIds.add(t.id);
+            }
             entry.tracks.add(t);
           } else {
             doc.droppedTracks++;
