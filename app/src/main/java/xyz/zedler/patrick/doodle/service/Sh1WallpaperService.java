@@ -285,8 +285,15 @@ public class Sh1WallpaperService extends WallpaperService {
   private static volatile int sGovernorGood = 0;       // consecutive headroom samples
   private static volatile boolean sHalfRate = false;   // F12 active
 
-  /** last reported visibility of the surface-owning engine (watchdog guard) */
-  private static volatile boolean sAnyVisible = false;
+  /** v48 WAJ-8: the live wallpaper engine instances (was the process-global
+   *  sAnyVisible boolean — with multi-engine a supported state (mGen /
+   *  sEngineInstances), a second engine (preview/keyguard) reporting
+   *  invisible clobbered the live engine's visibility and killed its
+   *  watchdog + tilt listener). Visibility is PER-ENGINE state now;
+   *  CopyOnWriteArrayList: written on the main thread, read from the
+   *  watchdog executor. */
+  private static final java.util.concurrent.CopyOnWriteArrayList<Sh1Engine>
+      sLiveEngines = new java.util.concurrent.CopyOnWriteArrayList<>();
 
   /** randomizer scratch state (not persisted; triggers persist anchors) */
   private static final Random sRandom = new Random();
@@ -1755,6 +1762,19 @@ public class Sh1WallpaperService extends WallpaperService {
 
   /* ---- v7 F6 watchdog + F9 thumbnails (post-start observer) ---- */
 
+  /** v48 WAJ-8: true when ANY live engine reports visible — the shared
+   *  native engine presents while any of its surface consumers shows it,
+   *  so one engine's invisible report must not disable the watchdog or
+   *  unregister the tilt sensor for the still-visible one. */
+  private static boolean anyEngineVisible() {
+    for (Sh1Engine engine : sLiveEngines) {
+      if (engine.anyVisible) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private static void scheduleObserver(Context context, String glb, int track) {
     if (sEditorSession) {
       return;   // v9.7: the watchdog/thumbnail observer tracks the
@@ -1782,7 +1802,7 @@ public class Sh1WallpaperService extends WallpaperService {
       // ~4.5 s after start -> fall back to the bundled scene. Guarded by
       // visibility so an engine that simply never became visible (preview
       // edge case) can not trigger a false fallback.
-      if (!prefs.getBoolean(PREF.SH1_WATCHDOG, DEF.SH1_WATCHDOG) || !sAnyVisible) {
+      if (!prefs.getBoolean(PREF.SH1_WATCHDOG, DEF.SH1_WATCHDOG) || !anyEngineVisible()) {
         return;
       }
       if (!frameLooksBroken()) {
@@ -2105,7 +2125,7 @@ public class Sh1WallpaperService extends WallpaperService {
     SharedPreferences prefs = getPrefs(this);
     boolean frozen = sFreezeBattery || sFreezePowerSave || sFreezeAod || sFreezeManual;
     boolean want = prefs.getBoolean(PREF.SH1_TILT, DEF.SH1_TILT)
-        && sEngineStarted && sAnyVisible && !frozen;
+        && sEngineStarted && anyEngineVisible() && !frozen;
     if (want && !mTiltRegistered) {
       Sensor rot = mSensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR);
       if (rot == null) {
@@ -2452,10 +2472,16 @@ public class Sh1WallpaperService extends WallpaperService {
     /** identity of this engine instance for the native side */
     private final int mGen = sGen.incrementAndGet();
 
+    /** v48 WAJ-8: THIS engine's last reported visibility (per-instance;
+     *  read via anyEngineVisible()) */
+    volatile boolean anyVisible = false;
+
     Sh1Engine() {
       // v10.1 BUG 2: track live wallpaper engines so the editor's
       // standalone session teardown knows whether any consumer exists
       sEngineInstances.incrementAndGet();
+      // v48 WAJ-8: per-engine visibility registry (see anyEngineVisible)
+      sLiveEngines.add(this);
     }
 
     @Override
@@ -2524,7 +2550,7 @@ public class Sh1WallpaperService extends WallpaperService {
     public void onVisibilityChanged(boolean visible) {
       super.onVisibilityChanged(visible);
       Sh1Native.visible(mGen, visible);
-      sAnyVisible = visible;
+      anyVisible = visible;
       if (visible) {
         // catch up on boundaries missed while the screen was off
         refreshAutoMode(Sh1WallpaperService.this, getPrefs(Sh1WallpaperService.this));
@@ -2550,6 +2576,8 @@ public class Sh1WallpaperService extends WallpaperService {
       Sh1Native.surfaceDestroyed(mGen);
       // v10.1 BUG 2: this wallpaper engine instance is gone
       sEngineInstances.decrementAndGet();
+      // v48 WAJ-8: its visibility no longer counts (anyEngineVisible)
+      sLiveEngines.remove(this);
       super.onDestroy();
     }
   }
