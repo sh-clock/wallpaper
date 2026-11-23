@@ -675,6 +675,9 @@ public class CamtrackEditorActivity extends AppCompatActivity
     rate = 1.0;
     trackTime = 0;
     updatePlayButtonIcon();
+    // v48 WAJ-5: the rate chip must follow the reset too — without this it
+    // kept showing the pre-reboot rate ("2x"...) while the engine runs 1x
+    binding.textEditorRate.setText(rateLabel(rate));
   }
 
   /**
