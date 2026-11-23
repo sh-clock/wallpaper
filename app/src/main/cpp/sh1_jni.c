@@ -102,8 +102,25 @@ static void *engine_thread(void *p) {
     for (int i = 0; i < ma->argc; i++) free(ma->argv[i]);
     free(ma->argv);
     free(ma);
+    /* v48 WAN-4: the two lifecycle-flag clears need g_start_lock. start()
+     * writes this exact pair under the lock (below) and stop() reads it
+     * under the lock; unlocked, a start() could squeeze BETWEEN the two
+     * stores — observe g_started==0 (already cleared), boot a fresh
+     * engine (g_started=1, g_thread_valid=1) — and have this thread's
+     * second store clobber the NEW engine's g_thread_valid back to 0:
+     * every future stop() then early-returns "already stopped" while the
+     * new engine runs unstoppably. With the lock the pair clears
+     * atomically vs start()'s guarded check — either start() sees the
+     * old g_started==1 and no-ops, or it runs entirely after both
+     * clears. Thread exit: contention with start()/stop() is a
+     * non-issue, and no lock-ordering hazard exists — g_start_lock is
+     * never held while acquiring s_bind_lock/g_and_lock (verified:
+     * start() releases it before the s_bind_lock re-publish; stop()
+     * releases it before the join; nothing inside main() takes it). */
+    pthread_mutex_lock(&g_start_lock);
     g_started = 0;
     g_thread_valid = 0;
+    pthread_mutex_unlock(&g_start_lock);
     return NULL;
 }
 
