@@ -1697,10 +1697,17 @@ public class CamtrackEditorActivity extends AppCompatActivity
           tr.fovDeg = v;
           commitEdit();
         });
-    addPickerRow(body, getString(R.string.sh1_camtrack_loop), loopLabel(tr.loopMode),
-        options(CamtrackDoc.LOOP_LOOP, CamtrackDoc.LOOP_PINGPONG,
-            CamtrackDoc.LOOP_ONCE),
-        value -> {
+    List<Sh1Option> loopOptions = new ArrayList<>();
+    for (String lm : new String[]{CamtrackDoc.LOOP_LOOP,
+        CamtrackDoc.LOOP_PINGPONG, CamtrackDoc.LOOP_ONCE}) {
+      // v48 WAJ-4: decorated TITLE + raw-constant payload (the lookMode
+      // pattern) — the row summary shows loopLabel(tr.loopMode), which
+      // could never equal the raw-constant titles the old options carried,
+      // so the sheet never opened with the current mode checked
+      loopOptions.add(new Sh1Option(0, loopLabel(lm), lm));
+    }
+    addPickerRow(body, getString(R.string.sh1_camtrack_loop),
+        loopLabel(tr.loopMode), loopOptions, value -> {
           tr.loopMode = value;
           commitEdit();
         });
@@ -2121,8 +2128,11 @@ public class CamtrackEditorActivity extends AppCompatActivity
       List<Sh1Option> options, PickConsumer onPick) {
     // value carries the display string; options map label->payload
     List<Sh1Option> opt = new ArrayList<>();
-    for (Sh1Option o : options) {
-      opt.add(new Sh1Option(0, o.getTitle(), o.getSummary()));
+    for (int i = 0; i < options.size(); i++) {
+      Sh1Option o = options.get(i);
+      // v48 WAJ-4: DISTINCT values — Sh1OptionAdapter highlights by VALUE
+      // and the old constant 0 let at most the FIRST row ever match
+      opt.add(new Sh1Option(i, o.getTitle(), o.getSummary()));
     }
     addValueRow(parent, label, value, v ->
         PickerSheet.show(getSupportFragmentManager(), label, null, opt,
@@ -2528,20 +2538,21 @@ public class CamtrackEditorActivity extends AppCompatActivity
   private void showPresetPicker(String title, int current,
       boolean inheritFirst, IntConsumer onPick) {
     List<Sh1Option> options = new ArrayList<>();
-    int selected = 0;
+    // v48 WAJ-4: Sh1OptionAdapter highlights by option VALUE (not by
+    // position — the sheet pattern of Sh1EnvModesBottomSheetDialogFragment):
+    // the Inherit row carries -1 and every preset its index, so `current`
+    // IS the value to match. The old 0/1 pseudo-indices highlighted
+    // preset [0] for Inherit and preset [1] for every override >= 0.
+    int selected = current;
     if (inheritFirst) {
       options.add(new Sh1Option(-1,
           getString(R.string.sh1_camtrack_inherit_model), ""));
-      selected = current < 0 ? 0 : 1;
     }
     for (int i = 0; i < SH1.ENV_COUNT; i++) {
       Sh1Option opt = new Sh1Option(i,
           "[" + i + "] " + SH1.ENV_MODES[i], SH1.ENV_MODES_SUMMARY[i]);
       opt.setAssetThumb("sh1/thumbs/preset_" + i + ".png");
       options.add(opt);
-      if (!inheritFirst && i == current) {
-        selected = i;
-      }
     }
     PickerSheet.show(getSupportFragmentManager(), title,
         getString(R.string.sh1_camtrack_pick_preset), options, selected,
@@ -2553,14 +2564,19 @@ public class CamtrackEditorActivity extends AppCompatActivity
     List<Sh1Option> options = new ArrayList<>();
     Object[][] pairs = Sh1Pairs.PAIRS;
     int selected = -1;
-    for (Object[] pair : pairs) {
+    for (int pos = 0; pos < pairs.length; pos++) {
+      Object[] pair = pairs[pos];
       int a = (Integer) pair[0];
       int b = (Integer) pair[1];
       String label = (String) pair[2];
       String cite = (String) pair[3];
-      options.add(new Sh1Option(a, label, cite));
+      // v48 WAJ-4: the adapter matches by VALUE and `a` alone is not a
+      // unique row id ({5,5} and {5,0} share 5, {12,12} and {12,5} share
+      // 12) — the row's position is the unique value, which is exactly
+      // what the pick callback already indexes `pairs` by
+      options.add(new Sh1Option(pos, label, cite));
       if (a == pairSlot(0) && b == pairSlot(1)) {
-        selected = options.size() - 1;
+        selected = pos;
       }
     }
     PickerSheet.show(getSupportFragmentManager(),
@@ -2586,12 +2602,13 @@ public class CamtrackEditorActivity extends AppCompatActivity
       IntConsumer onPick) {
     List<Sh1Option> options = new ArrayList<>();
     int[] values = {-1, 0, 1, 2, 5, 6};
-    int selected = 0;
+    // v48 WAJ-4: the adapter matches by option VALUE — the rows carry
+    // their weather constant (-1..6), not their position, so `current`
+    // selects the boot recipe's own row. The old pseudo-index highlighted
+    // "0 — none" for the -1 default and "5 — rain" for "6 — rain + wind".
+    int selected = current;
     for (int i = 0; i < values.length; i++) {
       options.add(new Sh1Option(values[i], bootWeatherLabel(values[i]), ""));
-      if (values[i] == current) {
-        selected = i;
-      }
     }
     PickerSheet.show(getSupportFragmentManager(), title, null, options,
         selected, value -> onPick.accept(values[value]));
