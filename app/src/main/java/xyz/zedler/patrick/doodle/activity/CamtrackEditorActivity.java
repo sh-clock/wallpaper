@@ -976,8 +976,16 @@ public class CamtrackEditorActivity extends AppCompatActivity
     binding.textEditorTime.setText(String.format(Locale.ROOT,
         "%.1f / %.1f s", trackTime, playable));
     if (!scrubbing) {
-      binding.sliderEditorScrub.setValue(
-          (float) (trackTime / playable * 1000.0));
+      // v48 WAJ-1: trackTime can exceed the CURRENT track's playable span
+      // (a track/model switch or a committed edit that shortens the cycle
+      // keeps the old clock running) — BaseSlider only validates a
+      // programmatic setValue at DRAW time (the SliderStepCrashTest class),
+      // so the per-mille playhead must be clamped into the XML range
+      // (valueFrom 0 .. valueTo 1000) before it reaches the slider.
+      float playhead = playable > 0
+          ? (float) (trackTime / playable * 1000.0) : 0f;
+      playhead = Math.min(Math.max(playhead, 0f), 1000f);
+      binding.sliderEditorScrub.setValue(playhead);
     }
   }
 
