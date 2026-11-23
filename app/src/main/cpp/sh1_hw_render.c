@@ -1606,8 +1606,26 @@ void sh1_hw_render(LiveApp *A, const CamPose *cam) {
         HWLOGI("hardware backend %d initialized (%dx%d)",
                g_sh1_hw_backend, fb->w, fb->h);
     }
+    /* v48 WAN-1: the TV flicker pad (g_tvpaint_pad, D_800DB924.pad) is
+     * persistent engine state that sh_tvpaint_collect advances EXACTLY
+     * ONCE per rendered frame (the engine's func_800D7718 rule — the
+     * source of the 188/164 & 0xB bright/dim flicker phase). hw_build_batch
+     * runs the collect at the engine's position (WA2-3); when the frame
+     * later FAILS — batch OOM/overflow at the reserve or sprite pushes,
+     * or the GPU frame render failing (context loss) — the SW fallback
+     * render_frame re-runs the WHOLE collect and the pad would advance
+     * TWICE in one frame: on persistently failing GPU frames the flicker
+     * sequence skips a phase every frame. Snapshot the pad before the
+     * batch and roll it back at both fallback sites below — the
+     * re-entered collect is then the frame's single advance, exactly the
+     * pure-SW frame's net state. (The batch's OTHER collect-side calls
+     * need no rollback: sh1x_anims_draw_apply is idempotent per frame by
+     * construction, and fx_lens_exec / fx_water_zone_collect only append
+     * to the frame-local OT/prim lists — audited idempotent, untouched.) */
+    const int tvpad0 = g_tvpaint_pad;
     /* build the batch (the engine's own walk) */
     if (!hw_build_batch(fb, R, cam)) {
+        g_tvpaint_pad = tvpad0;   /* WAN-1: undo the batch's pad advance */
         render_frame(fb, R, cam);
         return;
     }
@@ -1633,6 +1651,9 @@ void sh1_hw_render(LiveApp *A, const CamPose *cam) {
     }
     if (!ok) {
         HWLOGE("hardware frame failed — falling back to software (this frame)");
+        g_tvpaint_pad = tvpad0;   /* WAN-1: same rollback — the SW re-render
+                                   * re-runs sh_tvpaint_collect; the batch
+                                   * build's advance must not double it */
         render_frame(fb, R, cam);
         return;
     }
