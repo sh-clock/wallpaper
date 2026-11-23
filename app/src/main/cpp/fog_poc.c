@@ -16534,6 +16534,18 @@ static ANativeWindow *g_and_win = NULL;
 static pthread_mutex_t g_and_lock = PTHREAD_MUTEX_INITIALIZER;
 static volatile int g_and_visible = 1;
 static volatile int g_and_key = -1;    /* single-slot queued UI key */
+/* v48 WAN-3: the dedicated QUIT request. stop() (sh1_jni.c) used to
+ * post K_QUIT through the single key slot above — a key() call landing
+ * between the post and the loop's poll OVERWROTE the pending quit, the
+ * engine never exited and stop()'s pthread_join blocked forever (every
+ * later lifecycle call queued behind the app's single-threaded
+ * executor). A user key cannot clobber a separate flag; the loop ORs
+ * it into its poll (quit wins over any pending user key). Set by
+ * sh1_android_request_quit(1); the boot reset in run_window_android
+ * deliberately does NOT clear it — a stop() racing engine boot must
+ * survive until the loop's first poll — and stop() withdraws it (0)
+ * after the join so an unconsumed request can't poison the next boot. */
+static volatile int g_and_quit = 0;
 
 /* v6 battery/power-save freeze seam (Android integration only — the same
  * class of gate as g_and_visible above; NO engine math is touched).
@@ -16571,6 +16583,9 @@ void sh1_android_set_window(ANativeWindow *win) {
 void sh1_android_set_visible(int vis) { g_and_visible = vis ? 1 : 0; }
 
 void sh1_android_post_key(int k) { g_and_key = k; }
+
+/* v48 WAN-3: the stop() quit request — see g_and_quit above */
+void sh1_android_request_quit(int on) { g_and_quit = on ? 1 : 0; }
 
 /* v10.1 TASK 4: the user's crop-window offsets (normalized -1..1, 0 =
  * center) consumed by and_blit at EVERY presented frame — presentation-
@@ -16965,8 +16980,22 @@ static int run_window_android(LiveApp *A) {
     int    stat_frames = 0;
     double stat_window = prev;
 
+    /* v48 WAN-3: the engine starts with a CLEAN key slot. The slot is
+     * process-global and was never reset at boot, so a key posted to a
+     * PREVIOUS engine that died before consuming it — e.g. stop()'s
+     * legacy slot-posted K_QUIT landing while main() was still loading
+     * and the load failing before the loop's first poll — survived into
+     * THIS engine's first loop pass and killed it instantly (a black
+     * wallpaper until the Java watchdog re-booted it). A user key
+     * racing this reset is at worst one dropped toggle (the engine was
+     * not polling yet). ONLY the user-key slot is reset here — g_and_quit
+     * is deliberately NOT cleared (see its declaration: a stop() racing
+     * this boot must survive until the poll below). */
+    g_and_key = -1;
+
     while (1) {
         int k = g_and_key; g_and_key = -1;
+        if (g_and_quit) { g_and_quit = 0; k = K_QUIT; }   /* v48 WAN-3 */
         if (k >= 0 && live_action(A, (LiveKey)k, 1)) break;
 
         /* v5 settings bridge: consume pending preset / weather set via

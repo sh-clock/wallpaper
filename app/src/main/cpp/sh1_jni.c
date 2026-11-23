@@ -48,6 +48,7 @@ extern int main(int argc, char **argv);
 extern void sh1_android_set_window(ANativeWindow *win);
 extern void sh1_android_set_visible(int vis);
 extern void sh1_android_post_key(int k);
+extern void sh1_android_request_quit(int on);  /* v48 WAN-3: stop()'s quit */
 extern void sh1_android_set_env(int idx);
 extern void sh1_android_set_weather(int w);
 extern void sh1_android_set_env_trans(int idx);  /* v9 F20: gradual transition */
@@ -62,11 +63,13 @@ extern void sh1_android_seek(double t);              /* v9.7: editor scrub      
 extern void sh1_android_set_paused(int on);          /* v9.7: editor pause      */
 extern void sh1_android_set_rate(double rate);       /* v9.7: editor rate       */
 
-/* LiveKey K_QUIT value (sh1_keys.h enum order: NONE=0, ESC=1, QUIT=2).
- * Posting it makes run_window_android's own key poll break the loop
- * through live_action() -> the engine's OWN quit path (no new engine
- * code). Kept in sync with sh1_keys.h manually, like the header itself. */
-#define SH1_KEY_QUIT 2
+/* v48 WAN-3: stop() no longer posts K_QUIT through the single key slot
+ * (g_and_key, fog_poc.c) — a key() call landing between the post and
+ * the engine's poll OVERWROTE the pending quit, the engine never quit
+ * and stop()'s pthread_join blocked forever. The quit now rides a
+ * dedicated volatile flag (sh1_android_request_quit) that
+ * run_window_android ORs into its key poll; the LiveKey values live in
+ * sh1_keys.h / fog_poc.c's own enum. */
 
 #define ALOGI(...) __android_log_print(ANDROID_LOG_INFO,  "sh1poc-jni", __VA_ARGS__)
 #define ALOGE(...) __android_log_print(ANDROID_LOG_ERROR, "sh1poc-jni", __VA_ARGS__)
@@ -376,11 +379,18 @@ SH1_JNI_FN(start)(JNIEnv *env, jclass clz, jstring filesDir,
     pthread_mutex_unlock(&s_bind_lock);
 }
 
-/* stop the engine thread through its OWN quit path: K_QUIT is polled at
- * the top of run_window_android BEFORE the visibility gate, so it works
- * even while invisible; main() then returns normally (full teardown),
- * engine_thread clears g_started. Call from a BACKGROUND thread — the
- * join normally completes within one 33 ms loop pass plus teardown. */
+/* stop the engine thread through its OWN quit path: the dedicated quit
+ * request (sh1_android_request_quit — a volatile flag OR-ed into
+ * run_window_android's key poll at the loop top, BEFORE the visibility
+ * gate, so it works even while invisible) makes the loop's live_action
+ * see K_QUIT; main() then returns normally (full teardown), engine_thread
+ * clears g_started. NOT the single key slot: a key() call landing between
+ * the request and the engine's poll used to OVERWRITE a slot-posted
+ * K_QUIT — the engine never quit and the join below blocked FOREVER
+ * (every later lifecycle call queued behind the app's single-threaded
+ * sExecutor). The flag survives any number of user keys.
+ * Call from a BACKGROUND thread — the join normally completes within one
+ * 33 ms loop pass plus teardown. */
 JNIEXPORT jboolean JNICALL
 SH1_JNI_FN(stop)(JNIEnv *env, jclass clz) {
     (void)env; (void)clz;
@@ -389,10 +399,21 @@ SH1_JNI_FN(stop)(JNIEnv *env, jclass clz) {
         pthread_mutex_unlock(&g_start_lock);
         return JNI_TRUE;   /* already stopped */
     }
-    sh1_android_post_key(SH1_KEY_QUIT);
+    sh1_android_request_quit(1);
     pthread_t t = g_thread;
     pthread_mutex_unlock(&g_start_lock);
     pthread_join(t, NULL);
+    /* v48 WAN-3: withdraw the quit request and clear the key slot AFTER
+     * the join. If the engine died before consuming the request (e.g. a
+     * failed load: main() returns before the loop's first poll), the
+     * still-set flag would be consumed by the NEXT engine's first loop
+     * pass and kill it instantly (black wallpaper until the watchdog);
+     * the same holds for any never-consumed user key in the slot. Both
+     * are meaningless once the engine is dead — wipe them so the next
+     * boot starts clean (the engine ALSO resets the slot at
+     * run_window_android entry; belt and suspenders). */
+    sh1_android_request_quit(0);
+    sh1_android_post_key(-1);
     ALOGI("stop: engine thread joined, g_started=%d", g_started);
     return g_started == 0 ? JNI_TRUE : JNI_FALSE;
 }
