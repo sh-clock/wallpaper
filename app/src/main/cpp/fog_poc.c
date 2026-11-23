@@ -811,7 +811,11 @@ static uint8_t *png_decode_rgba(const uint8_t *d, size_t n, int *wOut, int *hOut
                        ((uint32_t)d[p+2] << 8) | d[p+3];
         const char *typ = (const char *)d + p + 4;
         const uint8_t *data = d + p + 8;
-        if (p + 8 + (size_t)len + 4 > n) return NULL;
+        /* v48 (PNG-1): a chunk whose declared length runs past the buffer
+         * early-returns — but idat (the heap buffer accumulated from any
+         * prior IDAT chunks) was NOT freed on this path (every other
+         * failure path frees it); free it here like the rest. */
+        if (p + 8 + (size_t)len + 4 > n) { free(idat); return NULL; }
         if (!memcmp(typ, "IHDR", 4) && len >= 13) {
             w = (int)(((uint32_t)data[0] << 24) | ((uint32_t)data[1] << 16) |
                       ((uint32_t)data[2] << 8) | data[3]);
@@ -841,6 +845,15 @@ static uint8_t *png_decode_rgba(const uint8_t *d, size_t n, int *wOut, int *hOut
     if (!idat || w <= 0 || h <= 0 || interlace != 0 || depth != 8) { free(idat); return NULL; }
     int channels = ctype == 6 ? 4 : ctype == 2 ? 3 : ctype == 3 ? 1 : ctype == 0 ? 1 : ctype == 4 ? 2 : -1;
     if (channels < 0) { free(idat); return NULL; }
+    /* v48 (PNG-2): color-type-3 (palette) without a usable PLTE — palN 0
+     * (chunk missing, or shorter than one RGB entry) — used to decode
+     * "successfully" with palette[idx*3..] read UNINITIALIZED (the
+     * idx >= palN clamp routes every index to palette[0..2], stack
+     * garbage painted as the texture). A paletted image without a
+     * palette is spec-invalid; fail the decode like the other
+     * invalid-PNG cases. (palN >= 1 keeps the clamp: palette[0..2] is
+     * then initialized.) */
+    if (ctype == 3 && palN == 0) { free(idat); return NULL; }
 
     size_t rawN = 0;
     uint8_t *raw = inflate_zlib(idat, idatN, &rawN);
@@ -1346,6 +1359,18 @@ typedef struct {
                                      * carousel horses' D_800EBAFC yaws) */
     int rot0PerInstN;
     int pendSlot[5];                /* ferris arm i pendulum slot (4 aliased) */
+    /* ---- v44 (C-6): the driveGate proximity rects (ferris/lissajous) ----
+     * map6_s04_2.c:3493-3508 gates the WHOLE ride update on
+     * !Get(452/453) (the eventGate half) AND two PLAYER_NEAR_POS rects
+     * (game.h:67-69: |pos - Q12(base)| < Q12(tol), strict <). Engine
+     * literals: ferris (vx,8.0,20.0)/(vz,-28.0,22.0) (:3494), lissajous
+     * (vx,-16.0,20.0)/(vz,-64.0,20.0) (:3501); the ripper emits them in
+     * the ferris entries' driveGate doc string (ipd2gltf.py:1441-1443).
+     * Stored as engine Q12 raw counts (the rects' decimal bases/tols are
+     * exact 1/4096 multiples). */
+    int dgNear;                     /* 1 = both PLAYER_NEAR_POS rects parsed */
+    int dgBaseXQ12, dgTolXQ12;      /* |vx - base| < tol (raw Q12)           */
+    int dgBaseZQ12, dgTolZQ12;      /* |vz - base| < tol (raw Q12)           */
     /* ---- v32 (S18): the deferred driver families (A_SWEEP §4b) ---- */
     int slideIdx;                   /* slideDoor: g_WorldObject_Dr[i] index  */
     int slideVelRaw;                /* slideDoor live vel (raw Q12 m/s)      */
@@ -2315,6 +2340,54 @@ static void sh1x_load(Sh1x *sx, const JValue *json) {
                 a->eventGate2Pol = !strcmp(p2, "clear") ? 1 : 0;
             }
         }
+        /* v44 (C-6): the driveGate PLAYER_NEAR_POS rects — the ripper
+         * emits the engine literals verbatim in the driveGate doc string
+         * ("!Get(452) && PLAYER_NEAR_POS(vx,8.0,20.0) &&
+         * PLAYER_NEAR_POS(vz,-28.0,22.0) && AABB visible", ipd2gltf.py:
+         * 1441-1443 — the exact map6_s04_2.c:3493-3495 literals). The
+         * !Get(452/453) half is the eventGate (parsed above); the AABB
+         * screen test is a camera-frustum check (not ported); the RECTS
+         * gate the ride tick (sh1x_anims_tick). Bases/tols quantized to
+         * engine Q12 raw counts — the C TO_FIXED(x,12) truncation. */
+        a->dgNear = 0;
+        {
+            const char *dg = jstr(e, "driveGate", "");
+            const char *px = strstr(dg, "PLAYER_NEAR_POS(vx,");
+            const char *pz = strstr(dg, "PLAYER_NEAR_POS(vz,");
+            float bx = 0.0f, tx = 0.0f, bz = 0.0f, tz = 0.0f;
+            if (px && pz &&
+                sscanf(px, "PLAYER_NEAR_POS(vx,%f,%f", &bx, &tx) == 2 &&
+                sscanf(pz, "PLAYER_NEAR_POS(vz,%f,%f", &bz, &tz) == 2) {
+                a->dgBaseXQ12 = (int)(bx * 4096.0f);
+                a->dgTolXQ12  = (int)(tx * 4096.0f);
+                a->dgBaseZQ12 = (int)(bz * 4096.0f);
+                a->dgTolZQ12  = (int)(tz * 4096.0f);
+                a->dgNear = 1;
+            }
+        }
+        /* The ripper catalog carries the driveGate field ONLY on the five
+         * FERRIS entries (FW1/FW2/FW3WIR/FWBOX1/FWBOX2, ipd2gltf.py:1441/
+         * 1452/1464/1488/1511) — the lissajous WHEEL_BA entry (:1515-1525)
+         * was never given one, and pre-field GLBs would lack it entirely.
+         * Default BOTH ride families to their ENGINE literals (verbatim,
+         * map6_s04_2.c:3494 ferris / :3501 lissajous); an explicit
+         * driveGate field always wins (the !dgNear guard above). */
+        if (!a->dgNear && (a->driver == 14 || a->driver == 15)) {
+            if (a->driver == 14) {          /* ferris: (vx,8.0,20.0)/
+                                             * (vz,-28.0,22.0), :3494     */
+                a->dgBaseXQ12 = (int)(8.0f * 4096.0f);
+                a->dgTolXQ12  = (int)(20.0f * 4096.0f);
+                a->dgBaseZQ12 = (int)(-28.0f * 4096.0f);
+                a->dgTolZQ12  = (int)(22.0f * 4096.0f);
+            } else {                        /* lissajous: (vx,-16.0,20.0)/
+                                             * (vz,-64.0,20.0), :3501     */
+                a->dgBaseXQ12 = (int)(-16.0f * 4096.0f);
+                a->dgTolXQ12  = (int)(20.0f * 4096.0f);
+                a->dgBaseZQ12 = (int)(-64.0f * 4096.0f);
+                a->dgTolZQ12  = (int)(20.0f * 4096.0f);
+            }
+            a->dgNear = 1;
+        }
         const JValue *cg = jarr(e, "chunkGate");
         a->hasChunkGate = 0;
         if (cg && cg->count >= 2) {
@@ -3209,6 +3282,14 @@ typedef struct {
     float lightOffset[3];       /* camera-local meters (glTF axes) */
     int hasLightOffset;         /* offset authored in the camdat */
     float lightAhead;           /* meters along the beam (>= 0) */
+    /* v49 (task 3): the LINE light — the camtrack editor twin's travel
+     * surface (models[].light mode "line": start->end at speedMS with
+     * loopMode; the camtrack lightWorldPos math mirrored 1:1)          */
+    int   lightLine;            /* 1 = mode line (or start/end/speedMS auto) */
+    float lightLineStart[3];     /* world meters */
+    float lightLineEnd[3];      /* world meters */
+    float lightLineSpeedMS;     /* m/s (speedMS; >0 arms the travel) */
+    int   lightLineLoop;        /* 0 loop, 1 once, 2 pingPong */
 } Camdat;
 
 static int camdat_parse_loop(const char *s, int def) {
@@ -3357,9 +3438,17 @@ static int camdat_load_track(const JValue *raw, CamTrack *t) {
          * format itself stores only arcMinDeg/arcMaxDeg — trackToJSON never
          * writes an "arcBounds" field):
          *   arcBounds = raw.arcMinDeg != null && raw.arcMaxDeg != null &&
-         *               num(raw.arcMaxDeg, 1) > num(raw.arcMinDeg, 0)      */
-        t->arcBounds = jget(raw, "arcMinDeg") != NULL &&
-                       jget(raw, "arcMaxDeg") != NULL &&
+         *               num(raw.arcMaxDeg, 1) > num(raw.arcMinDeg, 0)
+         * v48 audit (A18-1): the JS `!= null` gate rejects an EXPLICIT JSON
+         * null too (camtrack.html:6621; the Java twin CamtrackDoc.java:1382
+         * `if (mn == null || mx == null) return false;` likewise), but the C
+         * presence gate jget()!=NULL passes a JV_NULL node through — so
+         * {"arcMinDeg": null, "arcMaxDeg": null} parsed as arcBounds=TRUE
+         * with the -90/90 defaults (bounded/ricochet) here while the editor
+         * and the Java twin give false (free rotation). A key must be present
+         * AND non-null to count. */
+        t->arcBounds = jget(raw, "arcMinDeg") != NULL && jget(raw, "arcMinDeg")->type != JV_NULL &&
+                       jget(raw, "arcMaxDeg") != NULL && jget(raw, "arcMaxDeg")->type != JV_NULL &&
                        jnum(raw, "arcMaxDeg", 1.0) > jnum(raw, "arcMinDeg", 0.0);
         t->arcMinDeg = (float)jnum(raw, "arcMinDeg", -90.0);
         t->arcMaxDeg = (float)jnum(raw, "arcMaxDeg", 90.0);
@@ -3461,12 +3550,15 @@ static int camdat_load_track(const JValue *raw, CamTrack *t) {
         t->pitchSpeedDegS = (float)jnum(raw, "pitchSpeedDegS", 0.0);
         /* sanitizeTrack reconstruction (same rule as the circle arc):
          *   yawBounds = raw.yawMinDeg != null && raw.yawMaxDeg != null &&
-         *               num(raw.yawMaxDeg, 1) > num(raw.yawMinDeg, 0)       */
-        t->yawBounds = jget(raw, "yawMinDeg") != NULL &&
-                       jget(raw, "yawMaxDeg") != NULL &&
+         *               num(raw.yawMaxDeg, 1) > num(raw.yawMinDeg, 0)
+         * v48 audit (A18-1): the JS `!= null` gate (camtrack.html:6767) also
+         * rejects an explicit JSON null — see the arcBounds note above. */
+        t->yawBounds = jget(raw, "yawMinDeg") != NULL && jget(raw, "yawMinDeg")->type != JV_NULL &&
+                       jget(raw, "yawMaxDeg") != NULL && jget(raw, "yawMaxDeg")->type != JV_NULL &&
                        jnum(raw, "yawMaxDeg", 1.0) > jnum(raw, "yawMinDeg", 0.0);
-        t->pitchBounds = jget(raw, "pitchMinDeg") != NULL &&
-                         jget(raw, "pitchMaxDeg") != NULL &&
+        /* camtrack.html:6769 — same `!= null` semantics for the pitch pair. */
+        t->pitchBounds = jget(raw, "pitchMinDeg") != NULL && jget(raw, "pitchMinDeg")->type != JV_NULL &&
+                         jget(raw, "pitchMaxDeg") != NULL && jget(raw, "pitchMaxDeg")->type != JV_NULL &&
                          jnum(raw, "pitchMaxDeg", 1.0) > jnum(raw, "pitchMinDeg", 0.0);
         t->yawMinDeg = (float)jnum(raw, "yawMinDeg", -45.0);
         t->yawMaxDeg = (float)jnum(raw, "yawMaxDeg", 45.0);
@@ -3535,7 +3627,13 @@ static int camdat_load(Camdat *cd, const char *path, const char *glbName) {
         if (env && env->type == JV_OBJ) {
             cd->hasEnv = 1;
             const JValue *pair = jarr(env, "pair");
-            if (pair && pair->count >= 2 &&
+            /* v43 (audit E-04-1): camtrack.html sanitizeEnv is STRICT
+             * length===2 (camtrack.html:6044-6045: Array.isArray(raw.pair)
+             * && raw.pair.length === 2) — a 3+-element pair is DROPPED
+             * (falls back to the consumer default) by the editor; the old
+             * >= 2 KEPT the first two and the two sides booted different
+             * env presets for the same hand-edited file. */
+            if (pair && pair->count == 2 &&
                 jat(pair, 0) && jat(pair, 0)->type == JV_NUM &&
                 jat(pair, 1) && jat(pair, 1)->type == JV_NUM) {
                 int p0 = (int)jat(pair, 0)->num;
@@ -3622,6 +3720,44 @@ static int camdat_load(Camdat *cd, const char *path, const char *glbName) {
             }
             cd->lightAhead = (float)jnum(lt, "ahead", 0.0);
             if (cd->lightAhead < 0.0f) cd->lightAhead = 0.0f;
+            /* v49 (task 3): the LINE light — the camtrack editor twin's
+             * travel surface (mode "line", or the start/end/speedMS>0
+             * auto-detect exactly like camtrack.html:5684-5685). The
+             * camtrack lightWorldPos math (dur = len/speedMS; loop /
+             * once / pingPong) is mirrored by sh_user_light_world_pos.  */
+            {
+                const JValue *lst = jarr(lt, "start");
+                const JValue *len2 = jarr(lt, "end");
+                int hasStart = (lst && lst->count >= 3 &&
+                    jat(lst, 0)->type == JV_NUM && jat(lst, 1)->type == JV_NUM &&
+                    jat(lst, 2)->type == JV_NUM);
+                int hasEnd = (len2 && len2->count >= 3 &&
+                    jat(len2, 0)->type == JV_NUM && jat(len2, 1)->type == JV_NUM &&
+                    jat(len2, 2)->type == JV_NUM);
+                cd->lightLineSpeedMS = (float)jnum(lt, "speedMS", 0.0);
+                if (hasStart) {
+                    cd->lightLineStart[0] = (float)jat(lst, 0)->num;
+                    cd->lightLineStart[1] = (float)jat(lst, 1)->num;
+                    cd->lightLineStart[2] = (float)jat(lst, 2)->num;
+                }
+                if (hasEnd) {
+                    cd->lightLineEnd[0] = (float)jat(len2, 0)->num;
+                    cd->lightLineEnd[1] = (float)jat(len2, 1)->num;
+                    cd->lightLineEnd[2] = (float)jat(len2, 2)->num;
+                }
+                const char *lm2 = jstr(lt, "mode", NULL);
+                if (lm2 && !strcmp(lm2, "line")) cd->lightLine = 1;
+                else if (hasStart && hasEnd && cd->lightLineSpeedMS > 0.0f)
+                    cd->lightLine = 1;    /* the camtrack auto-detect twin */
+                if (cd->lightLine && hasStart && hasEnd) {
+                    const char *llm = jstr(lt, "loopMode", NULL);
+                    if (llm && !strcmp(llm, "once")) cd->lightLineLoop = 1;
+                    else if (llm && !strcmp(llm, "pingPong")) cd->lightLineLoop = 2;
+                    else cd->lightLineLoop = 0;   /* loop (the twin default) */
+                } else {
+                    cd->lightLine = 0;    /* incomplete line data: not a line */
+                }
+            }
         }
     }
 
@@ -5277,6 +5413,93 @@ static int   g_userLightHasOffset = 0;  /* 1 = an authored camera-local off */
 static float g_userLightOffset[3] = { -0.08f, 0.28f, -0.12f }; /* glTF m   */
 static int   g_userLightCLI = 0;        /* 1 = the CLI authored the light  */
 
+/* v49 (THE FLASHLIGHT-CIRCLE-REFLECTION FIX): the ENGINE TRAILING ANCHOR.
+ * The game's camera TRAILS the player 1.8-2.5 m (vc_main.c:2137-2151) and
+ * Harry's flashlight rides the torso bone (Game_FlashlightAttribsSet,
+ * effects.c:210-218 -> Gfx_FlashlightPositionUpdate). The PoC camera
+ * stands in for the eye, so the engine-true default light = the PLAYER
+ * ~2.5 m ahead of the camera — the v48-verified ahead:2.5 A/B geometry
+ * (the ring lands ON the water band). The pre-v49 default (camera-
+ * coincident + the 0.12 m local offset) failed Gate 2 (vz > 112 Q8 —
+ * lens_flare.c:73-75's early return kills the water branch too) and
+ * killed the WHOLE reflection family (measured: zero water prims); with
+ * --userlight-ahead the camera-locked beam kept ang_z < 40 deg (sin<=0)
+ * so the glint color clamped to BLACK — the engine's Harry aims from the
+ * player, ~2 m ahead of the eye, so ang_z lands near 180 deg = MAX
+ * brightness. The light beam rotation itself stays the verbatim -15 deg
+ * fixed pitch (Game_FlashlightAttribsSet — the engine has NO player
+ * pitch control of the beam).                                        */
+#define SH_LIGHT_TRAIL_M 2.5f
+
+/* v49: the LINE light runtime state (the camdat light mode "line").   */
+static int    g_userLightLine = 0;
+static float  g_userLightLineStart[3];
+static float  g_userLightLineEnd[3];
+static float  g_userLightLineSpeedMS = 0.0f;
+static int    g_userLightLineLoop = 0;   /* 0 loop, 1 once, 2 pingPong */
+static double g_userLightLineT = 0.0;   /* travel clock (30Hz tick dt) */
+
+/* v49: the ONE light anchor — the engine's g_WorldEnvRenderWork.light
+ * is ONE struct computed ONCE per tick (Gfx_FlashlightPositionUpdate)
+ * feeding BOTH the per-vertex mesh lighting AND shLensFlareExec. The
+ * pre-v49 PoC split it: the mesh light at camPos (the v6 directive),
+ * the FX light at cam+offset+ahead — the flashlight's lit floor circle
+ * and its water reflection anchored at DIFFERENT points. Shared now by
+ * sh_env_update_pose (the mesh light) and fx_light_anchor (the FX
+ * light): mode 1 = the free-world pose (or the LINE travel); modes 0/2
+ * = the camera frame + the verbatim Harry offset + ahead — mode 0 the
+ * engine 2.5 m TRAIL default, mode 2 the authored ahead.              */
+static void sh_user_light_world_pos(v3 camPos, Quat camQ, float out[3]) {
+    if (g_userLightMode == 1) {
+        if (g_userLightLine) {
+            /* the camtrack lightWorldPos twin (camtrack.html:11446-11464):
+             * f = t/dur on start->end; loop / once / pingPong            */
+            float ax = g_userLightLineStart[0], ay = g_userLightLineStart[1],
+                  az = g_userLightLineStart[2];
+            float dx = g_userLightLineEnd[0] - ax, dy = g_userLightLineEnd[1] - ay,
+                  dz = g_userLightLineEnd[2] - az;
+            float len = (float)sqrt((double)dx*dx + (double)dy*dy + (double)dz*dz);
+            if (len > 1e-9f && g_userLightLineSpeedMS > 1e-6f) {
+                float dur = len / g_userLightLineSpeedMS;
+                double f = g_userLightLineT / (double)dur;
+                if (g_userLightLineLoop == 1)      f = (f < 1.0) ? f : 1.0;
+                else if (g_userLightLineLoop == 2) { double c = fmod(f, 2.0);
+                                                      f = (c <= 1.0) ? c : 2.0 - c; }
+                else                              f = fmod(f, 1.0);
+                out[0] = ax + dx * (float)f;
+                out[1] = ay + dy * (float)f;
+                out[2] = az + dz * (float)f;
+            } else {
+                out[0] = ax; out[1] = ay; out[2] = az;
+            }
+        } else {
+            out[0] = g_userLightWorld[0]; out[1] = g_userLightWorld[1];
+            out[2] = g_userLightWorld[2];
+        }
+        return;
+    }
+    /* the verbatim Game_FlashlightAttribsSet local, engine->glTF (x,-y,-z) */
+    float ox = -0.08f, oy = 0.28f, oz = -0.12f;
+    if (g_userLightHasOffset) {
+        ox = g_userLightOffset[0]; oy = g_userLightOffset[1];
+        oz = g_userLightOffset[2];
+    }
+    /* mode 0: the engine TRAIL default; mode 2: the authored ahead      */
+    float extraAhead = (g_userLightMode == 2) ? g_userLightAheadM
+                                              : SH_LIGHT_TRAIL_M;
+    /* the engine applies the offset in the BONE (camera) frame with NO
+     * light-rotation pitch (M5); ahead extends along camera-forward     */
+    v3 X, Y, Z;
+    quat_axes(camQ, &X, &Y, &Z);
+    float wx = X.x * ox + Y.x * oy + Z.x * oz + camPos.x;
+    float wy = X.y * ox + Y.y * oy + Z.y * oz + camPos.y;
+    float wz = X.z * ox + Y.z * oy + Z.z * oz + camPos.z;
+    if (extraAhead > 0.0f) {          /* -Z is camera-forward (glTF)       */
+        wx -= Z.x * extraAhead; wy -= Z.y * extraAhead; wz -= Z.z * extraAhead;
+    }
+    out[0] = wx; out[1] = wy; out[2] = wz;
+}
+
 
 /* engine beam dir (y-down local): (0, -sin(-15deg), cos(-15deg)*cos(0)) =
  * (0, +1061, 3957) -> camera-local glTF (x, -y, -z) = (0, -1061, -3957)
@@ -5862,14 +6085,19 @@ static void sh_env_update_pose(ShEnv *env, v3 camPos, Quat camQ) {
      * to the authored world pose too — the free-world light lights the
      * geometry from its OWN position, not the camera's eye (the 6-DOF
      * user light the task asked for).                                */
-    if (g_userLightMode == 1) {
-        L->pos[0] = (int)(g_userLightWorld[0] * 4096.0f);
-        L->pos[1] = (int)(g_userLightWorld[1] * 4096.0f);
-        L->pos[2] = (int)(g_userLightWorld[2] * 4096.0f);
-    } else {
-        L->pos[0] = (int)(camPos.x * 4096.0f);
-        L->pos[1] = (int)(camPos.y * 4096.0f);
-        L->pos[2] = (int)(camPos.z * 4096.0f);
+    {
+    /* v49: ONE light — the mesh light rides the SAME anchor the FX light
+     * rides (the engine's single g_WorldEnvRenderWork.light feeds both;
+     * the pre-v49 camera-coincident mesh light split the flashlight's lit
+     * floor circle from its water reflection). sh_user_light_world_pos
+     * = the fx_light_anchor twin: the verbatim Harry offset rotated by
+     * the camera frame + the engine TRAIL (ahead) — mode 1 the authored
+     * world pose (the LINE travel included).                          */
+        float wp[3];
+        sh_user_light_world_pos(camPos, camQ, wp);
+        L->pos[0] = (int)(wp[0] * 4096.0f);
+        L->pos[1] = (int)(wp[1] * 4096.0f);
+        L->pos[2] = (int)(wp[2] * 4096.0f);
     }
 
     /* v40 audit (C-F1): the decomp's ONE multiply site — effects.c:476
@@ -5964,6 +6192,12 @@ static void sh_env_transition_start(ShEnv *env, int presetIdx0, int presetIdx1) 
 }
 
 static void sh_env_tick(ShEnv *env, int dtQ12, v3 camPos, Quat camQ) {
+    /* v49: the LINE light's travel clock — the engine advances every
+     * effect on the SAME game-frame dt (D_800AFDAC++ only when
+     * g_DeltaTime != 0); the camtrack twin rides state.t (frozen when
+     * paused, exactly like the 30Hz tick grid here).                     */
+    if (g_userLightLine && dtQ12 > 0)
+        g_userLightLineT += (double)dtQ12 / 4096.0;
     /* Gfx_EffectsUpdate — flashlight ramp + blend + fog params + light */
     if (env->isFlashlightOn)
         env->flashlightIntensity += (int)(((int64_t)dtQ12 * 16384) >> 12); /* dt*4.0 */
@@ -6303,6 +6537,8 @@ typedef struct {
     uint8_t   spawnCount;      /* g_ParticleSpawnCount (per tick)      */
     int32_t   boxX, boxZ;      /* g_Particle_Position x/z (Q12)        */
     int32_t   prevX, prevZ;    /* g_Particle_PrevPosition x/z (Q12)    */
+    int32_t   prevYawQ12;      /* g_WeatherParticle_PrevRotationY — written every tick
+                               * (particle.c:1424), BSS 0 at load        */
     int       camMoved;        /* g_ParticleCameraMoved                */
     int       ticksDone;       /* 30Hz ticks simulated so far          */
     double    lastTickT;       /* track time at the last tick          */
@@ -6336,6 +6572,9 @@ typedef struct {
     int       drawCase;        /* D_800C39A0 (map0_s00 field_16 = 1)     */
     int32_t   rainIntensity;   /* 800E32D0 (0..135000)                  */
     int32_t   rainGravity;     /* 800E32D4 (30, map0_s00)               */
+    int       sp64;            /* the splash growth-rate tier — snapshotted
+                               * at the HEAD of WeatherParticle_Update
+                               * (particle.c:839-854), i.e. PRE-ramp      */
     int       weatherTick;     /* 800DD598 transition counter           */
     int       snowTypeEnable;  /* 800DD592                              */
     int       snowEnable;      /* 800DFB6C                              */
@@ -6670,6 +6909,11 @@ static void snow_position_randomize_r(Snow *S, SnowPart *p, uint16_t *randv, int
     int x = t - r;
     p->pos[0] = x;
     int rr = r - (x < 0 ? -x : x);
+    if (rr <= 0) { p->pos[2] = 0; return; }  /* rr==0 (both mods 0): MIPS DIV
+                                              * by zero is UNPREDICTABLE (no
+                                              * hardware exception) — the x86
+                                              * build must not SIGFPE; guard
+                                              * only, p(r) ~ 3.7e-9 per call  */
     p->pos[2] = (int)(*randv % (uint32_t)rr) + (int)((uint32_t)snow_rand16(S) % (uint32_t)rr) - rr;
 }
 static void snow_position_randomize(Snow *S, SnowPart *p, uint16_t *randv) {
@@ -6731,7 +6975,11 @@ static void snow_rest_handler(Snow *S, SnowPart *p, int32_t deltaX, int32_t delt
 
 /* ---- Particle_MovementUpdate (case 0, type Snow) — 1:1 -------------- */
 static void snow_movement_update(Snow *S, SnowPart *p, uint16_t *randv,
-                                 int32_t deltaX, int32_t deltaZ) {
+                                 int32_t deltaX, int32_t deltaZ, int dtQ12) {
+    /* v43 (E-09-4): dtQ12 threads g_DeltaTime through the TS30 factors
+     * (engine particle.c:3218-3220 — every position component is
+     * TS30(dt, ·); at the 136 tick rate TS30(136, x) == x, the identity
+     * the old code hard-coded). */
     /* v12 VERBATIM (D3): the RNG drift block runs ONLY for
      * ParticleType_Snow (type 0). ParticleType_Unk1 (1) takes the
      * engine's separate vy ramp (Particle_MovementUpdate lines
@@ -6755,13 +7003,13 @@ static void snow_movement_update(Snow *S, SnowPart *p, uint16_t *randv,
         p->mv[1] = (int16_t)vy;
     }
 
-    /* pos += TS30((mv << 2) + wind + camDelta) — v12: the engine adds
+    /* pos += TS30(dt, (mv << 2) + wind + camDelta) — v12: the engine adds
      * g_Particle_SpeedX/Z here VERBATIM (v11 hardcoded 0 because the wind
      * machinery was unreachable; windy weather (D0B18 args 2-4/6-8) makes
      * it live — ramped by the wind block in snow_tick). */
-    p->pos[0] += ((int32_t)(p->mv[0] * 4) + S->windX + deltaX) * SNOW_TS30 / SNOW_TS30;
-    p->pos[1] += ((p->mv[1] >> 1) * 4);
-    p->pos[2] += ((int32_t)(p->mv[2] * 4) + S->windZ + deltaZ) * SNOW_TS30 / SNOW_TS30;
+    p->pos[0] += ((int32_t)(p->mv[0] * 4) + S->windX + deltaX) * dtQ12 / SNOW_TS30;
+    p->pos[1] += ((p->mv[1] >> 1) * 4) * dtQ12 / SNOW_TS30;
+    p->pos[2] += ((int32_t)(p->mv[2] * 4) + S->windZ + deltaZ) * dtQ12 / SNOW_TS30;
 
     int ax = p->pos[0] < 0 ? -p->pos[0] : p->pos[0];
     int az = p->pos[2] < 0 ? -p->pos[2] : p->pos[2];
@@ -6845,14 +7093,16 @@ static void rain_spawn_movement_apply(Snow *S, SnowPart *p, int dt) {
  * position) — the PoC tracks prevViewX/Z (updated at the end of each
  * SystemUpdate, like g_ParticleVectors1 = g_ParticleVectors0).           */
 static void rain_movement_update(Snow *S, SnowPart *p, uint16_t *randv,
-                                 int32_t deltaX, int32_t deltaZ) {
+                                 int32_t deltaX, int32_t deltaZ, int dtQ12) {
+    /* v43 (E-09-4): dtQ12 threads g_DeltaTime through the TS30 factors
+     * (engine particle.c:3281-3289 — vx/vy/vz all TS30(dt, ·)). */
     p->pos1[0] = p->pos[0];
     p->pos1[2] = p->pos[2];
     p->pos1[1] = p->pos[1] - p->mv[1];
-    p->pos[0] += S->windX + deltaX;
+    p->pos[0] += (S->windX + deltaX) * dtQ12 / SNOW_TS30;
     p->mv[1] = (int16_t)(p->mv[1] + S->rainGravity);
-    p->pos[1] += p->mv[1] << 2;
-    p->pos[2] += S->windZ + deltaZ;
+    p->pos[1] += (p->mv[1] << 2) * dtQ12 / SNOW_TS30;
+    p->pos[2] += (S->windZ + deltaZ) * dtQ12 / SNOW_TS30;
     if (S->camMoved) {
         p->pos1[0] = p->pos[0];
         p->pos1[2] = p->pos[2];
@@ -6911,6 +7161,16 @@ static void sh_particle_draw_case_merge(Snow *S, int caseArg) {
                                     ((S->weatherBits >> 12) & 0x1110));
 }
 
+/* v43 (E-09-3): the sp64 splash-tier selection — WeatherParticle_Update
+ * snapshots it at its HEAD (particle.c:839-854): E32D0 < 27000 -> 3,
+ * < 135000 -> 4, else 5. The pass-1 intensity ramp (E32D0 += count,
+ * particle.c:1393-1394) runs LATER, inside the draw loop — so tick-N
+ * splash draws use the tier of E32D0 as it stood AFTER tick N-1's ramp. */
+static int snow_sp64_of(int32_t rainIntensity) {
+    return (rainIntensity < 27000) ? 3 :
+           (rainIntensity < 135000) ? 4 : 5;
+}
+
 /* Particle_EnvironmentSet — 1:1 (the runtime weather dispatcher).
  * arg0: 0 none / 1 snow / 2 snow+windFlag / 5 rain / 6 rain+windFlag
  * arg1: the draw case (127 = keep; 2 maps to 3 — the engine quirk).     */
@@ -6948,6 +7208,12 @@ static void particle_environment_set(Snow *S, int arg0, uint32_t arg1) {
     sh_particle_draw_case_merge(S, S->drawCase);
     S->weatherClass = var_s1;              /* 800E0CA8 */
     S->windFlag = var_s0;                  /* 800E0CAC */
+    /* v43 (E-09-3): sp64 follows the rain intensity this call just set
+     * (rain recipes 5/6 reset E32D0 to 135000 -> tier 5; everything else
+     * zeroes it -> tier 3), so a render between this reset and the first
+     * snow_tick draws the engine's tier (the next WeatherParticle_Update
+     * head would snapshot the same value).                              */
+    S->sp64 = snow_sp64_of(S->rainIntensity);
 }
 
 /* sharedFunc_800D0B18_0_s00 — 1:1 (the weather TARGET re-pack that starts
@@ -6967,6 +7233,24 @@ static void particle_environment_set(Snow *S, int arg0, uint32_t arg1) {
  * camdat track/env weatherTarget; -1 = none) — the K_R restart must
  * re-arm the same cross-fade a fresh boot arms, else restart != fresh. */
 static int g_bootWeatherTarget = -1;
+/* V45 audit W7: the resolved boot snow seed (--snow-seed, default
+ * SNOW_SEED_DEFAULT) — the K_R restart must re-seed the SnowInit warm-up
+ * with the same seed the fresh boot's final snow_reset_seed uses, else
+ * --snow-seed N restart != fresh. */
+static unsigned g_bootSnowSeed = SNOW_SEED_DEFAULT;
+/* V48 audit A23-F1: the resolved BOOT weather recipe — weatherBits (E0CB0)
+ * exactly as the boot left it (CLI --weather > the camdat env boot > the
+ * GLB room field_17 > the map0 default). The K_R restart must re-sync the
+ * transition state from THIS, not the live weatherBits: the W key's
+ * runtime event re-packs weatherBits (particle_environment_set(2, 127),
+ * the map6_s00.c:184 recipe; E0CB0 re-packed at particle.c:3811 and
+ * 3815-3820), so after a W press the live bits are the recipe-2 snow
+ * packing, not the boot recipe. The engine's room reload never sees a
+ * mutated recipe — every map load re-derives E0CB0 from the map header
+ * (GameBoot_WorldEnvInit, load_screen.c:36:
+ * particleEnviromentSet(field_17, field_16)); the stash is the PoC's
+ * restart==fresh-session equivalent. */
+static uint32_t g_bootWeatherBits = 0;
 static int sh_particle_weather_target_set(Snow *S, int arg0) {
     if (!S->transitionLock) {
         /* engine line 3946: `return false` — the whole body is skipped */
@@ -6992,6 +7276,10 @@ static int sh_particle_weather_target_set(Snow *S, int arg0) {
         case 2:
             S->rainEnable = 1;
             S->rainIntensity = 0;      /* 800E32D0 = 0 — ramps back up */
+            /* v43 (E-09-3): the tier of the reset intensity — the engine's
+             * first post-D0B18 draw uses sp64 = tier(0) = 3 (the next
+             * WeatherParticle_Update head snapshots the same value)      */
+            S->sp64 = snow_sp64_of(S->rainIntensity);
             break;
         default:
             break;
@@ -7216,12 +7504,17 @@ static void snow_reset_seed(Snow *S, unsigned seed) {
                         if (p->pos[1] == 0) p->state++; /* land -> rest */
                     } else {
                         rain_spawn_movement_apply(S, p, dt);
-                        /* engine: clamp Y at 0 and rest (SpawnMovementApply
-                         * case 1 has NO state++ — the warm-up rain rests in
-                         * state 1 only if clamped... the engine's shared tail
-                         * clamps vy but the state advance for the warm-up is
-                         * absent; particles stay Active until the steady
-                         * update lands them. Verbatim: no state++ here. */
+                        /* S20 audit F1: the engine's Active case in
+                         * WeatherParticle_SnowInit is SHARED by both banks
+                         * (particle.c:771-781): SpawnMovementApply runs,
+                         * then `if (part->position0.vy == 0)
+                         * part->stateStep++;` — the check lives in the
+                         * CALLER's loop, not inside SpawnMovementApply's
+                         * case 1, so it advances warm-up rain to rest
+                         * exactly like warm-up snow. The old comment
+                         * misread the decomp as banking the advance
+                         * inside the case-1 function body. */
+                        if (p->pos[1] == 0) p->state++; /* land -> rest */
                     }
                     break;
                 default:
@@ -7235,6 +7528,21 @@ static void snow_reset_seed(Snow *S, unsigned seed) {
     S->ticksDone = 0;
     S->lastTickT = 0.0;
     S->prevX = 0; S->prevZ = 0;        /* g_Particle_PrevPosition at load   */
+    S->prevYawQ12 = 0;                 /* PrevRotationY (BSS 0 at load)     */
+    /* v48 audit (A3-1): g_WeatherParticle_Vectors1 is BSS 0 at a fresh
+     * process boot (particle.c:45-46 ".bss data in maps we've matched .bss
+     * for") and its ONLY writer is the SystemUpdate tail
+     * (particle.c:638 `g_WeatherParticle_Vectors1 = g_WeatherParticle_Vectors0;`)
+     * — so a fresh session's FIRST rain tick computes the case-1 delta as
+     * (0 - viewPosition) (particle.c:3274-3275), teleporting the bank by the
+     * full view position. The seek/backward-jump re-sim (snow_sync_live ->
+     * snow_reset -> here) models "a fresh session from the fixed seed" but
+     * kept the PRE-JUMP prevViewX/Z, so its first re-sim tick applied the
+     * small inter-tick camera delta instead — the re-sim diverged from the
+     * fresh-boot replay it must reproduce. Zero it here so EVERY
+     * fresh-session re-seed (seek, K_R, K_B, K_W, boot) gets the BSS-zero
+     * first tick. */
+    S->prevViewX = 0; S->prevViewZ = 0; /* g_WeatherParticle_Vectors1 (BSS 0) */
     S->boxX  = 0; S->boxZ = 0;
     S->camMoved = 0;
 }
@@ -7260,30 +7568,66 @@ static void snow_box_origin(Snow *S, v3 camPos, v3 camFwd) {
     S->boxX = ox; S->boxZ = oz;
 }
 
+/* v43 (E-09-1): the engine's per-tick view yaw on the Q12-angle grid —
+ * vwGetViewAngle -> vwMatrixToAngleYXZ -> ratan2(mat->m[0][2], mat->m[2][2])
+ * (vw_calc.c:260). Math_Sin(yaw) ∝ fwd.x and Math_Cos(yaw) ∝ fwd.z — the
+ * same relation snow_box_origin consumes (particle.c:859-860) — so the
+ * yaw is atan2(fwd.x, fwd.z)·4096/2π with the ±2048 seam KEPT (the
+ * consumer's ABS_DIFF has no wrap normalization). The r2_ratan2
+ * quantization is the port's established ratan2 stand-in (declared below
+ * at its definition site).                                                    */
+static int32_t r2_ratan2(int32_t y, int32_t x);
+static int32_t snow_view_yaw_q12(v3 camFwd) {
+    int32_t y = (int32_t)floorf(camFwd.x * 4096.0f + 0.5f);
+    int32_t x = (int32_t)floorf(camFwd.z * 4096.0f + 0.5f);
+    return r2_ratan2(y, x);
+}
+
 /* ---- Particle_Update (steady state, BOTH passes) — 1:1 ----------------
  * v8: the full two-bank update — pass 0 = snow [0, addedCount[0]), pass 1
  * = rain [addedCount[0], +addedCount[1]) — plus the weather transition
  * driver (SystemUpdate order), the wind ramp, the rain intensity ramp and
  * the folded RainDraw state mutations.                                   */
-static void snow_tick(Snow *S, v3 camPos, v3 camFwd) {
+static void snow_tick(Snow *S, v3 camPos, v3 camFwd, int dtQ12) {
     /* v8: the weather transition (Particle_SystemUpdate, BEFORE the
      * particle update — the sine cross-fade between the banks)           */
     sh_particle_weather_tick(S);
 
+    /* v43 (E-09-3): the sp64 snapshot at the head of WeatherParticle_Update
+     * (particle.c:839-854) — BEFORE the movement passes and BEFORE the
+     * pass-1 intensity ramp (1393-1394) — so tick-N splash draws use
+     * tier(E32D0 after tick N-1's ramp): the renderer reads S->sp64 and
+     * no longer re-derives the tier from the post-ramp intensity.        */
+    S->sp64 = snow_sp64_of(S->rainIntensity);
+
     /* g_Particle_Position = viewPos + horizontal-forward * 3m             */
     snow_box_origin(S, camPos, camFwd);
+
+    /* this tick's viewRotation.vy (vwGetViewAngle at the head of
+     * SystemUpdate — particle.c:180)                                        */
+    int32_t yawQ12 = snow_view_yaw_q12(camFwd);
 
     if (S->prevX == 0 && S->prevZ == 0) {
         S->prevX = S->boxX; S->prevZ = S->boxZ;   /* first-tick adoption   */
     }
 
-    /* Particle_CameraMovedCheck: dist > 10000 Q12 (~2.44m);
-     * the rotY check is dead in the engine (g_Particle_RotationY is never
-     * written — BSS zero — so ABS_DIFF is always 0)                        */
+    /* Particle_CameraMovedCheck (particle.c:641-655): dist > 10000 Q12
+     * (~2.44m) OR rotY > Q12_ANGLE(45°) = 512 (fixed_point.h:450-451).
+     * g_WeatherParticle_PrevRotationY IS written every tick at the end of
+     * WeatherParticle_Update (particle.c:1424) — the old "dead check"
+     * comment was wrong. ABS_DIFF = ABS(a-b) with NO wrap normalization
+     * (arithmetic.h:147-148): a yaw change > 45°/tick (camera cuts, the
+     * fixed-cam override, lookAt jumps) fires, and so does any ±180°
+     * seam crossing (prev 2047, cur -2047 -> ABS_DIFF 4094 > 512) — a
+     * 2-unit turn — which full-circle lookAt tracks hit once per
+     * revolution while the translation clause stays false.              */
     {
         int32_t dx = S->prevX - S->boxX, dz = S->prevZ - S->boxZ;
         int64_t d2 = (int64_t)dx * dx + (int64_t)dz * dz;
-        S->camMoved = snow_isqrt((uint32_t)(d2 > 0xFFFFFFFFll ? 0xFFFFFFFFull : (uint64_t)d2)) > 10000;
+        int32_t dyaw = S->prevYawQ12 - yawQ12;
+        if (dyaw < 0) dyaw = -dyaw;               /* ABS_DIFF semantics    */
+        S->camMoved = (snow_isqrt((uint32_t)(d2 > 0xFFFFFFFFll ? 0xFFFFFFFFull : (uint64_t)d2)) > 10000) ||
+                      (dyaw > 512);
     }
 
     /* v12 VERBATIM (D4): the engine draws the per-tick rand BEFORE the
@@ -7348,7 +7692,7 @@ static void snow_tick(Snow *S, v3 camPos, v3 camFwd) {
             }
             break;
         case 1:
-            snow_movement_update(S, p, &randv, deltaX, deltaZ);
+            snow_movement_update(S, p, &randv, deltaX, deltaZ, dtQ12);
             if (p->type >= 240) p->hide = 1;      /* engine draw sees >=240 */
             break;
         default:
@@ -7388,7 +7732,7 @@ static void snow_tick(Snow *S, v3 camPos, v3 camFwd) {
             }
             break;
         case 1:
-            rain_movement_update(S, p, &randv, deltaX1, deltaZ1);
+            rain_movement_update(S, p, &randv, deltaX1, deltaZ1, dtQ12);
             break;
         default:
             p->state++;
@@ -7431,6 +7775,8 @@ static void snow_tick(Snow *S, v3 camPos, v3 camFwd) {
 
     /* g_Particle_PrevPosition = current position                         */
     S->prevX = S->boxX; S->prevZ = S->boxZ;
+    /* g_WeatherParticle_PrevRotationY = viewRotation.vy (particle.c:1424) */
+    S->prevYawQ12 = yawQ12;
     /* v8: g_ParticleVectors1 = g_ParticleVectors0 (end of SystemUpdate)  */
     S->prevViewX = curViewX;
     S->prevViewZ = curViewZ;
@@ -7468,11 +7814,28 @@ static void snow_sync_live(Snow *S, double t, v3 camPos, v3 camFwd,
         return;
     }
     while (S->ticksDone < target) {
-        snow_tick(S, camPos, camFwd);   /* live camera at the boundary     */
+        snow_tick(S, camPos, camFwd, SNOW_TS30);   /* live camera at the boundary */
         S->ticksDone++;
         S->lastTickT = (double)S->ticksDone / 30.0;
     }
     S->lastTickT = t;
+}
+
+/* v43 (E-09-4): the engine's V_BLANKS_MAX stall catch-up — ONE
+ * WeatherParticle_Update with g_DeltaTime = 273 instead of two 1x ticks.
+ * game_main.c:133-136 (H_BLANKS_PER_FRAME_MIN 1052, H_BLANKS_Q12_TO_SEC_
+ * SCALE 1063, V_BLANKS_MAX 4) and :284-292 (g_VBlanks = MIN(·, 4),
+ * vCount = MIN(GsGetVcount(), 1052), g_DeltaTime = Q12_MULT(vCount, 1063)
+ * = 1052·1063>>12 = 273 ≈ 2.007× the 136 tick): one MainLoop frame that
+ * spans >= 2 tick-times runs ONE particle update with that dt — one RNG
+ * stream step, one spawn gate, one stateStep advance, one weatherTick,
+ * one camera sample — while the session clock advances the full 2
+ * tick-times. The grid bookkeeping advances 2 ticks to stay in lockstep
+ * with the session clock for the next sync.                         */
+static void snow_sync_live_stall(Snow *S, double t, v3 camPos, v3 camFwd) {
+    snow_tick(S, camPos, camFwd, 273);
+    S->ticksDone += 2;
+    S->lastTickT  = t;
 }
 
 /* deterministic variant: camera strictly from evalTrack (editor paused /
@@ -7511,7 +7874,7 @@ static void snow_sync_exact(Snow *S, double t, const CamTrack *track,
                                       : (v3){0.0f, 0.0f, -1.0f};
             fwd = lookDir;
         }
-        snow_tick(S, pos, fwd);
+        snow_tick(S, pos, fwd, SNOW_TS30);
         S->ticksDone++;
     }
     S->lastTickT = t;
@@ -7915,19 +8278,77 @@ static void raster_tri(Frame *fb, const RVert *vA, const RVert *vB, const RVert 
                  * -> Lm_MaterialFsImageApply1(..., blendMode=1) ->
                  * Material_FsImageApply: field_E = (tPage[0]&3)<<7 |
                  * (1<<5) | tPage[1]&0xF = 45 with img0 {tPage{0,13}}) makes
-                 * the SCHOOL-water surfaces SEMI-TRANSPARENT ABR-1 ADDITIVE:
+                 * the water-floor prims SEMI-TRANSPARENT ABR-1 ADDITIVE:
                  *   dst5 = B5 + F5, F5 = modulate(texel, vcolor) — clamp 31.
                  * (V44: this ADD branch now serves the school-water ABR-1
                  * surfaces only — the DR floor quads moved to RP_SUB_TEX,
-                 * see the subtractive branch below. The v37 alpha<128
-                 * STP-class sub-branch died with fx_water_floor_rgba — the
-                 * nibble/CLUT interpretation was func_80059E34's UNUSED
-                 * arg0==2 variant.) */
+                 * see the subtractive branch below.)
+                 *
+                 * The blend is additive with the BACKGROUND (the fog color
+                 * under it), so the floor adds its animated texels over the
+                 * scene instead of replacing them (the DR street reference:
+                 * near-black water that only brightens where the flashlight
+                 * vcolor lights it — level 4 gray base + green/warm streaks
+                 * near the light, never a flat lit surface). The per-texel
+                 * STP 0x0000 hole is preserved (F=0 -> B+0, a no-op). The
+                 * fog veil (orr) still applies additively BELOW the floor
+                 * texels exactly like the engine's veil-quad-then-GT4 OT
+                 * order in the STP branch. No depth write (semi-trans
+                 * prims never occlude later flakes — engine-true).
+                 *
+                 * v43 E-10-2: the add is the GPU's TWO-STEP 5-bit form —
+                 * swanstation ShadePixel quantizes the modulated foreground
+                 * to 5-bit THROUGH THE DITHER LUT FIRST
+                 * (s_dither_lut[y&3][x&3][(texture_color.r * color_r) >> 4]
+                 * = clamp5((F8 + D) >> 3), gpu_sw_backend.cpp:69-70/136-139),
+                 * THEN does blargg's per-5-bit-channel saturating add (mode 1
+                 * BackgroundPlusForeground, :170-178) = min(31, B5 + F5).
+                 * The old one-step 8-bit sum folded expand(B5) = 8*B5 +
+                 * floor(B5/4) (and the veil) into the pre->>3 domain, leaking
+                 * the background's low bits through the single truncation:
+                 * +1-channel errors on 6.7% of the (F8, B5) product space,
+                 * all +1, never -1. Same two-step form as the engine's own
+                 * sprite/gouraud blitters (fx_blit_sprite_quad /
+                 * fx_blit_gouraud_tri / rain paths); expand(B5) >> 3 == B5
+                 * losslessly, so the readback is exact.
+                 * quantize8(+DITHER4)+>>3 is the SAME dither chain the
+                 * opaque path runs through fb_put.                             */
                 const uint8_t *bg = fb->rgb + pi * 3;
-                int r = (((tr >> 3) * vr) >> 4) + orr + (int)bg[0];
-                int g = (((tg >> 3) * vg) >> 4) + og + (int)bg[1];
-                int b = (((tb >> 3) * vb) >> 4) + ob + (int)bg[2];
-                fb_put(fb, x, y, r, g, b, quantize, dither);
+                if (quantize) {
+                    /* v48 (A-3): the V45 C2-1 per-prim dither form — the
+                     * engine draws the veil quad and the textured GT4 as
+                     * TWO prims, each through its own dither LUT pass
+                     * (gpu_sw_backend.cpp:136-139 textured, :148-150 flat
+                     * G4), THEN the ABR-1 saturating 5-bit add
+                     * (:170-178). The old form fused F8+V8 through ONE
+                     * quantize8 — the dither counted once instead of
+                     * twice and the 8-bit pre->>3 sum leaked low bits
+                     * (+1/31 on 43.75% of residue pairs) — the exact
+                     * class V45 fixed in the STP-clear sub-branch and
+                     * the opaque fall-through. Saturation is monotone, so
+                     * min(31, B5+V5+F5) == the engine's two-prim
+                     * min(31, min(31, B5+V5) + F5).                        */
+                    int f5r = quantize8(((tr >> 3) * vr) >> 4, dither, x, y) >> 3;
+                    int f5g = quantize8(((tg >> 3) * vg) >> 4, dither, x, y) >> 3;
+                    int f5b = quantize8(((tb >> 3) * vb) >> 4, dither, x, y) >> 3;
+                    int v5r = quantize8(orr, dither, x, y) >> 3;
+                    int v5g = quantize8(og, dither, x, y) >> 3;
+                    int v5b = quantize8(ob, dither, x, y) >> 3;
+                    int or5 = (bg[0] >> 3) + f5r + v5r; if (or5 > 31) or5 = 31;
+                    int og5 = (bg[1] >> 3) + f5g + v5g; if (og5 > 31) og5 = 31;
+                    int ob5 = (bg[2] >> 3) + f5b + v5b; if (ob5 > 31) ob5 = 31;
+                    uint8_t *dp = fb->rgb + pi * 3;
+                    dp[0] = (uint8_t)((or5 << 3) | (or5 >> 2));
+                    dp[1] = (uint8_t)((og5 << 3) | (og5 >> 2));
+                    dp[2] = (uint8_t)((ob5 << 3) | (ob5 >> 2));
+                } else {
+                    /* modern (non-15-bit-framebuffer) mode: unchanged 8-bit
+                     * one-step add — no GPU counterpart to be faithful to */
+                    int r = (((tr >> 3) * vr) >> 4) + orr + (int)bg[0];
+                    int g = (((tg >> 3) * vg) >> 4) + og + (int)bg[1];
+                    int b = (((tb >> 3) * vb) >> 4) + ob + (int)bg[2];
+                    fb_put(fb, x, y, r, g, b, quantize, dither);
+                }
                 continue;
             }
             if (pass == RP_SUB_TEX) {
@@ -8781,7 +9202,8 @@ typedef struct {
  * raster of the degenerate quad walks the major axis one pixel per step,
  * interpolating v (sprite rows 0..15) along it (u centers on the middle
  * texel column of the 3-wide sprite, matching the hardware's pixel-center
- * UV of a 1-px-wide quad).                                                      */
+ * UV of a 1-px-wide quad). The 1-ENGINE-px width (x0+1 edge) paints a
+ * scale-px-wide horizontal brush per step (v43 E-11-4).                        */
 static void rain_blit_streak(Frame *fb, const RainFlakeDraw *rd) {
     int scale = fb->w / 320;
     if (scale < 1) scale = 1;
@@ -8789,36 +9211,52 @@ static void rain_blit_streak(Frame *fb, const RainFlakeDraw *rd) {
     int adx = dx < 0 ? -dx : dx, ady = dy < 0 ? -dy : dy;
     int len = adx > ady ? adx : ady;
     if (len <= 0) len = 1;
-    for (int s = 0; s <= len; s++) {
+    for (int s = 0; s < len; s++) {
         int px = rd->x0 + (dx * s) / len;
         int py = rd->y0 + (dy * s) / len;
-        int v = (s * 16) / (len + 1);
+        /* v43 E-11-5: the quad's texel rows run v=112 (tail edge) .. v=128
+         * (head edge) — the len covered pixels sample at their CENTERS:
+         * v = 112 + 16*(s+0.5)/len -> sprite row (16*s+8)/len, i.e.
+         * (s*32+16)/(2*len). The s=len HEAD pixel (center on the v=128
+         * edge) lies outside the quad and is never drawn (top-left fill
+         * rule; engine particle.c:2846 streak / :3088 drip setUV4).      */
+        int v = (s * 32 + 16) / (2 * len);
         if (v < 0) v = 0;
         if (v > 15) v = 15;
-        if (px < 0 || px >= fb->w || py < 0 || py >= fb->h) continue;
+        if (py < 0 || py >= fb->h) continue;
         int idx = kRainStreak[v][1];   /* middle column of the 3-wide sprite */
         if (rd->clutRow < 104 || rd->clutRow > 111) continue;
         uint16_t entry = kRainClut[rd->clutRow - 104][idx];
         if (entry == 0x0000) continue;
         int t5r = entry & 31, t5g = (entry >> 5) & 31, t5b = (entry >> 10) & 31;
         int stp = (entry >> 15) & 1;
-        size_t pi = (size_t)py * fb->w + px;
-        if (rd->depth >= fb->z[pi]) continue;    /* occluded by opaque */
-        uint8_t *bp = fb->rgb + pi * 3;
         int fr = (t5r * rd->primR) >> 7; if (fr > 31) fr = 31;
         int fg = (t5g * rd->primG) >> 7; if (fg > 31) fg = 31;
         int fbb = (t5b * rd->primB) >> 7; if (fbb > 31) fbb = 31;
-        if (stp) {
-            int or5 = (bp[0] >> 3) + fr; if (or5 > 31) or5 = 31;
-            int og5 = (bp[1] >> 3) + fg; if (og5 > 31) og5 = 31;
-            int ob5 = (bp[2] >> 3) + fbb; if (ob5 > 31) ob5 = 31;
-            bp[0] = (uint8_t)((or5 << 3) | (or5 >> 2));
-            bp[1] = (uint8_t)((og5 << 3) | (og5 >> 2));
-            bp[2] = (uint8_t)((ob5 << 3) | (ob5 >> 2));
-        } else {
-            bp[0] = (uint8_t)((fr << 3) | (fr >> 2));
-            bp[1] = (uint8_t)((fg << 3) | (fg >> 2));
-            bp[2] = (uint8_t)((fbb << 3) | (fbb >> 2));
+        /* v43 E-11-4: the engine quad is 1 ENGINE px wide (the x0+1 edge —
+         * particle.c:2857-2861 streak / 3102-3106 drip) -> a scale-wide
+         * horizontal brush in PoC px (the fb-scaled x0..x0+1 column).
+         * The 3 kRainStreak sprite columns are identical ({v,v,v}) so the
+         * whole brush samples the same middle texel column — the texel
+         * choice is output-neutral (rain_tim_data.h).                    */
+        for (int o = 0; o < scale; o++) {
+            int qx = px + o;
+            if (qx < 0 || qx >= fb->w) continue;
+            size_t pi = (size_t)py * fb->w + qx;
+            if (rd->depth >= fb->z[pi]) continue;    /* occluded by opaque */
+            uint8_t *bp = fb->rgb + pi * 3;
+            if (stp) {
+                int or5 = (bp[0] >> 3) + fr; if (or5 > 31) or5 = 31;
+                int og5 = (bp[1] >> 3) + fg; if (og5 > 31) og5 = 31;
+                int ob5 = (bp[2] >> 3) + fbb; if (ob5 > 31) ob5 = 31;
+                bp[0] = (uint8_t)((or5 << 3) | (or5 >> 2));
+                bp[1] = (uint8_t)((og5 << 3) | (og5 >> 2));
+                bp[2] = (uint8_t)((ob5 << 3) | (ob5 >> 2));
+            } else {
+                bp[0] = (uint8_t)((fr << 3) | (fr >> 2));
+                bp[1] = (uint8_t)((fg << 3) | (fg >> 2));
+                bp[2] = (uint8_t)((fbb << 3) | (fbb >> 2));
+            }
         }
     }
 }
@@ -8843,10 +9281,25 @@ static void rain_blit_splash_tri(Frame *fb,
     if (minx > maxx || miny > maxy) return;
     long area = (long)(x1 - x0) * (y2 - y0) - (long)(x2 - x0) * (y1 - y0);
     if (area == 0) return;
+    /* v43 (E-11-1): the PS1 GPU has NO backface cull — swanstation's
+     * rasterizer walks BOTH windings (gpu_sw_backend.cpp right_facing
+     * only swaps the left/right x slots, nothing is culled), so the
+     * engine's splash POLY_FT4 (particle.c:2995 setPolyFT4 + setSemiTrans)
+     * always paints. The splash corners (engine order x0=(x-c,z-c),
+     * x1=(x-c,z+c), x2=(x+c,z-c), x3=(x+c,z+c), particle.c:2907-2927)
+     * project with NEGATIVE screen winding for every above-ground camera
+     * (ground-plane signed area -4c^2 per triangle; the ground->screen
+     * map is orientation-preserving), so a positive-only acceptance test
+     * rasterized ZERO pixels — the splashes never appeared. Fix: accept
+     * both windings — flip a negative-area triangle's edge functions.
+     * The UV/prim math is invariant: numerator and area flip together. */
+    int flip = area < 0;
+    if (flip) area = -area;
     for (int y = miny; y <= maxy; y++) {
         for (int x = minx; x <= maxx; x++) {
             long w0 = (long)(x1 - x) * (y2 - y) - (long)(x2 - x) * (y1 - y);
             long w1 = (long)(x2 - x) * (y0 - y) - (long)(x0 - x) * (y2 - y);
+            if (flip) { w0 = -w0; w1 = -w1; }
             long w2 = area - w0 - w1;
             if (w0 < 0 || w1 < 0 || w2 < 0) continue;
             int64_t numU = (int64_t)w0 * u0 + (int64_t)w1 * u1 + (int64_t)w2 * u2;
@@ -8887,13 +9340,18 @@ static void rain_blit_splash_tri(Frame *fb,
 
 static void rain_blit_splash(Frame *fb, const RainFlakeDraw *rd) {
     /* the engine FT4: x0..x3 corners with UV (16,112) (16,127) (31,112)
-     * (31,127) — sprite-space u,v 0..15 within kRainSplash. Two tris.    */
+     * (31,127) — sprite-space u,v 0..15 within kRainSplash. The GPU
+     * rasterizes an FT4 as (v0,v1,v2)+(v2,v1,v3) — shared edge v1-v2
+     * (swanstation gpu_sw_backend.cpp:36-38 DrawPolygon) — so the affine
+     * seam runs along x1-x2, NOT the old x0-x3 diagonal (v43 E-11-1:
+     * the old split also put the engine's corner UVs on the wrong
+     * tris). Corner UV map: x0=(0,0) x1=(0,15) x2=(15,0) x3=(15,15). */
     rain_blit_splash_tri(fb, rd->x0, rd->y0, 0, 0,
                          rd->x1, rd->y1, 0, 15,
-                         rd->x3, rd->y3, 15, 15,
+                         rd->x2, rd->y2, 15, 0,
                          rd->primR, rd->primG, rd->primB,
                          rd->clutRow, rd->depth);
-    rain_blit_splash_tri(fb, rd->x0, rd->y0, 0, 0,
+    rain_blit_splash_tri(fb, rd->x1, rd->y1, 0, 15,
                          rd->x3, rd->y3, 15, 15,
                          rd->x2, rd->y2, 15, 0,
                          rd->primR, rd->primG, rd->primB,
@@ -10046,7 +10504,7 @@ static void sh1x_waterfall_tick(Sh1x *sx, const CamPose *cam,
     }
 }
 
-static void sh1x_anims_tick(Sh1x *sx, double dt) {
+static void sh1x_anims_tick(Sh1x *sx, double dt, const v3 *camGltf) {
     /* FOGPOC_ANIMDBG (S20): the per-tick driver-state proof — one line per
      * anim whenever the state MOVED (rawVy/rwVy/cur/master differ from the
      * last print). The camera-independent animation evidence. */
@@ -10065,6 +10523,31 @@ static void sh1x_anims_tick(Sh1x *sx, double dt) {
         }
     }
     const int dtRaw = (int)(dt * 4096.0);
+    /* v48 (A16-4): the engine's ride block is an ELSE-IF chain
+     * (map6_s04_2.c:3493-3508): when the FERRIS rect matches
+     * (!Get(452) && PLAYER_NEAR_POS(vx,8,20) && PLAYER_NEAR_POS(vz,-28,22)
+     * && AABB) the LISSAJOUS update is SKIPPED that frame — and vice
+     * versa. The port ticked both rides independently, so inside the
+     * rects' overlap strip (engine vx in (-12,4) AND vz in (-50,-44), a
+     * ~16x6 m band) it advanced BOTH rides where the engine advances
+     * only the ferris. Pre-scan: did any ferris (driver 14) pass its
+     * full gate set this tick (event gate + rect)? */
+    int ferrisFired = 0;
+    for (int i = 0; i < sx->nAnims && !ferrisFired; i++) {
+        const Sh1xPropAnim *fa = &sx->anims[i];
+        if (fa->driver != 14 || !anim_gate_on(sx, fa)) continue;
+        /* mirror the main loop's dgNear contract: the rect freeze only
+         * applies when BOTH dgNear is set AND the camera is known —
+         * otherwise the ferris updates unconditionally and fires. */
+        if (!fa->dgNear || !camGltf) { ferrisFired = 1; break; }
+        int exq = (int)(camGltf->x * 4096.0f);
+        int ezq = (int)(-camGltf->z * 4096.0f);
+        int dx = exq - fa->dgBaseXQ12;
+        int dz = ezq - fa->dgBaseZQ12;
+        int nearX = (dx >= 0) ? (dx < fa->dgTolXQ12) : (-dx < fa->dgTolXQ12);
+        int nearZ = (dz >= 0) ? (dz < fa->dgTolZQ12) : (-dz < fa->dgTolZQ12);
+        if (nearX && nearZ) ferrisFired = 1;
+    }
     for (int i = 0; i < sx->nAnims; i++) {
         Sh1xPropAnim *a = &sx->anims[i];
         a->gated = !anim_gate_on(sx, a);
@@ -10082,6 +10565,10 @@ static void sh1x_anims_tick(Sh1x *sx, double dt) {
             continue;        /* engine: the update loop is gated */
         }
         if (a->sharedLeader >= 0) continue;  /* follower: leader's state */
+        /* v48 (A16-4): the engine's else-if — when the ferris branch
+         * ran this frame the lissajous update does not run at all
+         * (its angle D_800EBB36 freezes, exactly like the rect miss). */
+        if (a->driver == 15 && ferrisFired) continue;
         switch (a->driver) {
         case 0: {  /* spinRng / spinConst — map0_s00_2.c:1263-1264:
                     * vz += Q12_MULT_PRECISE(dt, Q12_ANGLE(rngBase) -
@@ -10202,8 +10689,17 @@ static void sh1x_anims_tick(Sh1x *sx, double dt) {
                     if (t == 1 || t == -1) a->rawVel = 0;
                 }
                 if (a->rawVel == 0 && a->kickPhase == 1) {
-                    a->rawVy = a->rawSettle;    /* rest: Q12_ANGLE(-157.4) */
+                    /* v48 (A16-3): the engine sets flag 106 on the frame
+                     * the halving ends (map1_s03.c:1977-1988) but applies
+                     * the settle pose vy = Q12_ANGLE(-157.4f) only on the
+                     * NEXT frame via the else-if flag branch (:1992-1996).
+                     * The old form snapped in the SAME step — one frame
+                     * early. Phase 2 now applies the settle one step
+                     * later, matching the engine's frame N / N+1 split. */
                     a->kickPhase = 2;
+                } else if (a->rawVel == 0 && a->kickPhase == 2) {
+                    a->rawVy = a->rawSettle;    /* rest: Q12_ANGLE(-157.4) */
+                    a->kickPhase = 3;
                 }
             }
             break;
@@ -10531,7 +11027,14 @@ n                    * STONE3_H — NOT ported: one GLB model per entry);
             switch (a->stoneStep) {
             case 0:
                 a->stoneStep = 1;                     /* sfx 1647 kick  */
-                break;
+                /* v48 (A16-1): the engine's case 0 has NO break
+                 * (map7_s01_2.c:1488-1493): Sfx_WithFlagsPlay +
+                 * SysWork_StateStepIncrement(1) fall STRAIGHT into
+                 * case 1's slide accumulation — the kick tick ALSO
+                 * advances the slide. The old break burned the whole
+                 * first tick on the marker alone (slide started one
+                 * 30Hz tick late). */
+                /* fall through */
             case 1: {
                 a->stoneData += dtRaw;
                 if (a->stoneData > 8192) a->stoneData = 8192; /* Q12(2.0) */
@@ -10606,9 +11109,16 @@ n                    * STONE3_H — NOT ported: one GLB model per entry);
                 a->fallArmed = 1;      /* D_800F482C = Q12_ANGLE(-167.6) */
                 a->binAng = -1906;    /* = -1906 raw                    */
             }
+            /* v48 (A16-2): the engine order is POSE-THEN-DECREMENT
+             * (map7_s03_3.c:8200-8202): Math_SetSVectorFast(rot,
+             * D_800F482C,...) poses with the CURRENT accumulator,
+             * WorldObjects_Add, and only THEN D_800F482C -=
+             * Q12_DIV(dt, Q12(3.6)). The old decrement-first form drew
+             * the engine's NEXT frame every tick (a constant one-frame
+             * ~3.33 deg lead) and never drew the initial -1906 pose. */
+            a->cur[0] = (float)a->binAng * (360.0f / 4096.0f);
             a->binAng -= (int)(((int64_t)dtRaw << 12) / 14745);
             if (a->binAng < -32768) a->binAng += 65536; /* SVECTOR vy s16 */
-            a->cur[0] = (float)a->binAng * (360.0f / 4096.0f);
             break;
         }
         case 20: { /* scrollBelt — map7_s03_3.c:8296-8355 VERBATIM (the
@@ -10652,13 +11162,13 @@ n                    * STONE3_H — NOT ported: one GLB model per entry);
  * (monotonic, never wraps — the camtrack PHASE wraps at the cycle
  * boundary and seeks/restarts jump it) stored per-Scene, not a
  * function-static. */
-static void sh1x_anims_sync(Sh1x *sx, double sessionT) {
+static void sh1x_anims_sync(Sh1x *sx, double sessionT, const v3 *camGltf) {
     if (!sx || sx->nAnims <= 0) return;
     double dt = sessionT - sx->animsLastSessionT;
     if (dt < 0) dt = 0;                 /* restart: fresh state, 0 dt re-prime */
     if (dt > 0.1) dt = 0.1;             /* clamp like the env tick */
     sx->animsLastSessionT = sessionT;
-    sh1x_anims_tick(sx, dt);
+    sh1x_anims_tick(sx, dt, camGltf);   /* v44 C-6: cam pos for the driveGate */
 }
 
 /* v38: restart — restore the engine-fresh driver state. */
@@ -10712,11 +11222,19 @@ static void fx_water_glint_blit(Frame *fb, int px0, int py0,
              * cover it too. The old 19.53125 was the ripple-rule
              * inversion (641*8-128 = 5000).                         */
             if (fb->z && fb->z[pi] < 20.0625f) continue;
-            /* affine sprite UVs: x -> u 64..127, y -> v 31..0 (flipped)   */
+            /* affine sprite UVs — the ENGINE window axes (V43 E-14-1):
+             * the FT4 corners are u0=64 u1=64 u2=127 u3=127 (u runs
+             * top->bottom, the 96-px quad height) and v0=31 v1=0 v2=31
+             * v3=0 (v runs left->right, FLIPPED, the 48-px width) —
+             * lens_flare.c:661-676. The old form sampled the window
+             * TRANSPOSED (u from the horizontal fraction, v from the
+             * vertical): the 63-texel u axis squeezed into 48 px and
+             * the 32-texel v axis stretched over 96 — the wide streaked
+             * blob was rotated 90 degrees.                              */
             double fu = (double)(xx - x0) / (double)(x1 - x0);
             double fv = (double)(yy - y0) / (double)(y1 - y0);
-            int tu = 64 + (int)(fu * 63.0);
-            int tv = 31 - (int)(fv * 31.0);
+            int tu = 64 + (int)(fv * 63.0);   /* u: top->bottom  64..127 */
+            int tv = 31 - (int)(fu * 31.0);   /* v: left->right  31..0   */
             if (tu < 64 || tu > 127 || tv < 0 || tv > 31) continue;
             /* v40 audit (A-F1): g_drWaveIdx is the UNPACKED byte-per-texel
              * sheet (dr_wave_data.h: [64][128], one palette index per
@@ -10749,47 +11267,18 @@ static void fx_water_glint_blit(Frame *fb, int px0, int py0,
  * userLight offset / the free-world or ahead light; writes g_fxLightPos
  * (Q12, glTF axes). See the full provenance comment in fx_lens_exec. */
 static void fx_light_anchor(const Sh1x *sx, const CamPose *cam) {
-    {
-        /* engine-local (x,y,z) -> camera-local (x,-y,-z) [the PoC's
-         * standing axis map]; then camera quaternion * local           */
-        float ox = -0.08f, oy = 0.28f, oz = -0.12f;
-        if (g_userLightHasOffset) {
-            ox = g_userLightOffset[0];
-            oy = g_userLightOffset[1];
-            oz = g_userLightOffset[2];
-        } else if (sx->hasUserLight) {
-            ox = sx->userLightOffset[0];
-            oy = -sx->userLightOffset[1];
-            oz = -sx->userLightOffset[2];
-        }
-        float wx, wy, wz;
-        if (g_userLightMode == 1) {
-            /* --userlight x,y,z: FREE-WORLD light (engine-native NULL-
-             * bone path, Gfx_FlashlightPositionUpdate coord1==NULL)    */
-            wx = g_userLightWorld[0]; wy = g_userLightWorld[1];
-            wz = g_userLightWorld[2];
-        } else {
-            float extraAhead = (g_userLightMode == 2) ? g_userLightAheadM : 0.0f;
-            /* the engine applies the offset in the BONE (camera) frame
-             * with NO light-rotation pitch (M5); extraAhead extends the
-             * forward offset (the trailing-camera geometry)             */
-            float lx0 = ox, ly0 = oy, lz0 = oz;
-            /* camera basis (three.js rows of R) */
-            v3 X, Y, Z;
-            quat_axes(cam->q, &X, &Y, &Z);
-            wx = X.x * lx0 + Y.x * ly0 + Z.x * lz0 + cam->pos.x - X.x * 0.0f;
-            wy = X.y * lx0 + Y.y * ly0 + Z.y * lz0 + cam->pos.y;
-            wz = X.z * lx0 + Y.z * ly0 + Z.z * lz0 + cam->pos.z;
-            if (extraAhead > 0.0f) {
-                /* -Z is camera-forward in glTF: move along -Z axis     */
-                wx -= Z.x * extraAhead; wy -= Z.y * extraAhead;
-                wz -= Z.z * extraAhead;
-            }
-        }
-        g_fxLightPos[0] = (int)(wx * 4096.0f);
-        g_fxLightPos[1] = (int)(wy * 4096.0f);
-        g_fxLightPos[2] = (int)(wz * 4096.0f);
-    }
+    /* v49: the shared ONE-light anchor (sh_user_light_world_pos) — the
+     * pre-v49 body resolved the same chain inline with a camera-
+     * coincident mode-0 default (Gate-2 dead); the EXTRAs offset is
+     * resolved ONCE at boot into g_userLightOffset (the rot twin at
+     * :19446 was already the pattern), so the sx param is no longer
+     * needed here (kept for the call sites' signatures).              */
+    (void)sx;
+    float wp[3];
+    sh_user_light_world_pos(cam->pos, cam->q, wp);
+    g_fxLightPos[0] = (int)(wp[0] * 4096.0f);
+    g_fxLightPos[1] = (int)(wp[1] * 4096.0f);
+    g_fxLightPos[2] = (int)(wp[2] * 4096.0f);
 }
 
 /* v43 — shLensFlareExec's COMPUTE half, moved OUT of fx_pass to run
@@ -10849,7 +11338,20 @@ static void fx_lens_exec(Frame *fb, const Renderer *R, const CamPose *cam) {
              * bounds use the 320x224 screen halves)                   */
             float invd = 224.0f / d;
             scrLPos[0] = (int)(vx * invd);          /* screen-centered px */
-            scrLPos[1] = (int)(vy * invd);
+            /* V48 (W-audit B root cause): the ENGINE screen Y axis is
+             * y-DOWN and light_overlap.c:270-272 projects the ENGINE
+             * view-space vy straight onto it; the PoC's view matrix is
+             * glTF (y-UP), so the engine screen y = -(glTF view vy) * H/d.
+             * The old +vy fed the y-UP component into the y-DOWN formula
+             * and mirrored the ENTIRE lens/water FX family vertically
+             * about the screen center: the cone-of-light + glint painted
+             * at the TOP of the frame (visually "floating above the
+             * water") while the water floor band sits low — the user's
+             * "the lens effect is above the water and is incredibly
+             * broken". The engine view frame is the T=diag(1,-1,-1)
+             * reflection of the PoC glTF view frame (the standing axis
+             * map engine=(x,-y,-z)*glTF, fog_poc.c:6169-6173).         */
+            scrLPos[1] = (int)(-vy * invd);
             scrLPos[2] = (int)(d * 256.0f);          /* Q8-ish depth       */
             /* scr_l_ang_xy/z: angle between the eye->light ray and the
              * light direction (lighting.c:203-238). V41 C-1: the ENGINE
@@ -10891,8 +11393,15 @@ static void fx_lens_exec(Frame *fb, const Renderer *R, const CamPose *cam) {
             float pn = sqrtf(pxn * pxn + pyn * pyn + pzn * pzn) + 1e-9f;
             pxn /= pn; pyn /= pn; pzn /= pn;
             /* scr_l_ang_xy = atan2(norm.y, norm.x) - 90deg (Q12) —
-             * Q12_ANGLE_NORM_U-wrapped like the engine (lighting.c:241) */
-            scrAngXY = (fx_q12_angle(atan2f(pyn, pxn) * (180.0f / (float)M_PI))
+             * Q12_ANGLE_NORM_U-wrapped like the engine (lighting.c:241).
+             * V48 (W-audit B): the plane normal above is computed in the
+             * glTF view frame; the ENGINE view frame is T=diag(1,-1,-1)
+             * of it, so the ENGINE normal is (pxn, -pyn, -pzn) — the
+             * atan2 must take the NEGATED y or the streak axis mirrors
+             * about the vertical. (ang_z is frame-invariant: its cos is a
+             * plain dot (T-canceled), its sin a double-T-canceled triple
+             * product — see the V48 worklog note.)                        */
+            scrAngXY = (fx_q12_angle(atan2f(-pyn, pxn) * (180.0f / (float)M_PI))
                         - fx_q12_angle(90.0f)) & 4095;
             /* scr_l_ang_z = atan2(sin, cos) with sin = (lvec . (norm x
              * pos)), cos = (pos . lvec) — engine verbatim, then the
@@ -11036,6 +11545,13 @@ static int fx_water_zone_collect(Frame *fb, const Renderer *R,
         return 0;
     mat4 view = mat4_view_from_quat(cam->pos, cam->q);
     const ShLight *L = &env->light;
+    /* V43 E-14-2: the G3 apex + ring-corner projections below are
+     * ENGINE px (the GTE 320x224 screen, H=224) — scale them to fb px
+     * with the SAME factors the sibling FX use (the glint blit:
+     * fb->w/320, fb->h/224; FX_TO_PX/FX_TO_PY in fx_pass). At the
+     * default 320x224 res the factors are 1 — bit-identical.       */
+    const float fxpX = (float)fb->w / 320.0f;
+    const float fxpY = (float)fb->h / 224.0f;
         float ex = (float)g_fxLightPos[0] * (1.0f / 4096.0f);  /* the LIGHT */
         float ez = -(float)g_fxLightPos[2] * (1.0f / 4096.0f); /* not camera */
         for (int z = 0; z < sx->nWaterZones; z++) {
@@ -11092,7 +11608,14 @@ static int fx_water_zone_collect(Frame *fb, const Renderer *R,
                      * (v40: NTSC GTE H=224)                             */
                     float invd = 224.0f / d;
                     glintPx = (int)(vx * invd);
-                    glintPy = (int)(vy * invd);
+                    /* V48 (W-audit B): engine y-DOWN screen — negate the
+                     * glTF view vy. The mirrored light point is correct in
+                     * world space (gy = posY*2 - ly, the engine mirror
+                     * lens_flare.c:624); only the screen projection was
+                     * flipped, painting the glint mirrored above the
+                     * water band instead of ON it (:635-676 projects the
+                     * ENGINE view y onto the y-DOWN screen).            */
+                    glintPy = (int)(-vy * invd);
                     /* brightness: sin(clamp(angle-40°,<=90°)) — the
                      * angle is scr_l_ang_z; r=sin>>6 g=(sin*7)>>9 b=(sin*5)>>9 */
                     int ang0 = g_flaresys.scrLAngZ - fx_q12_angle(40.0f);
@@ -11161,8 +11684,12 @@ static int fx_water_zone_collect(Frame *fb, const Renderer *R,
                         float cdd = -cpz;
                         if (cdd > 0.05f) {
                             float civ = 224.0f / cdd;  /* v40: NTSC 224 */
-                            cScx = (int)(cpx * civ) + (int)(fb->w / 2);
-                            cScy = (int)(cpy * civ) + (int)(fb->h / 2);
+                            int aex = (int)(cpx * civ);  /* engine px, ctr */
+                            /* V48 (W-audit B): engine y-DOWN screen — the
+                             * G3 apex must negate the glTF view cpy      */
+                            int aey = (int)(-cpy * civ);
+                            cScx = (int)(aex * fxpX) + (int)(fb->w / 2);
+                            cScy = (int)(aey * fxpY) + (int)(fb->h / 2);
                             cVis = 1;
                         }
                     }
@@ -11209,8 +11736,16 @@ static int fx_water_zone_collect(Frame *fb, const Renderer *R,
                             float dd = -pz;
                             if (dd <= 0.05f) { vis = 0; break; }
                             float iv = 224.0f / dd;    /* v40: NTSC 224 (RotTransPers4) */
-                            sxp[k] = (int)(px * iv) + (int)(fb->w / 2);
-                            syp[k] = (int)(py * iv) + (int)(fb->h / 2);
+                            int rex = (int)(px * iv);  /* engine px, ctr */
+                            /* V48 (W-audit B): engine y-DOWN screen — the
+                             * ring corners must negate the glTF view py;
+                             * the ring geometry itself is already AT the
+                             * water plane in world space (posY), so this
+                             * is what puts the visible annulus ON the
+                             * water band instead of at the frame top   */
+                            int rey = (int)(-py * iv);
+                            sxp[k] = (int)(rex * fxpX) + (int)(fb->w / 2);
+                            syp[k] = (int)(rey * fxpY) + (int)(fb->h / 2);
                         }
                         if (vis) {
                             /* the engine's per-segment polys
@@ -11335,6 +11870,13 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
      * rate easing and shLensFlareDraw's sprites (the FRONT OT slots —
      * drawn LAST over everything). */
     const int scale = fb->w / 320 > 0 ? fb->w / 320 : 1;
+    /* V43 E-14-3: the vertical factor is fb->h/224 — the flare-sprite
+     * screen Ys are ENGINE 224-row px (shLensFlareEffect_Draw's
+     * scr_l_pos->vy ± r; the glint's scaleY), NOT 320-column px. The
+     * old FX_TO_PY scaled Y by fb->w/320: ×1.244 too tall at 640x360,
+     * ×0.933 at 640x480; exact only when fb->w/320 == fb->h/224
+     * (320x224, 640x448, 960x672...). X keeps `scale' (fb->w/320).   */
+    const float scaleYQ = (float)fb->h / 224.0f;
     /* ---- shLensFlareDraw (lens_flare.c:176-223) ---------------------- */
     if (!g_flaresys.syncDrawExecF) return;
     g_flaresys.syncDrawExecF = 0;
@@ -11370,11 +11912,27 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
          * 0 vs 275: a phantom occlusion flip). scale == 1 at 320x224:
          * bit-identical. */
         int px = g_flaresys.scrLPos[0] * scale + (int)(fb->w / 2);
-        int py = g_flaresys.scrLPos[1] * scale + (int)(fb->h / 2);
+        int py = g_flaresys.scrLPos[1] * scaleYQ + (int)(fb->h / 2);
         int visible = 0;
         if (px >= 0 && px < (int)fb->w && py >= 0 && py < (int)fb->h) {
-            float lightDepth = (float)g_flaresys.scrLPos[2] / 256.0f;
-            visible = fb->z[(size_t)py * fb->w + px] >= lightDepth &&
+            /* V43 E-14-4: the engine OT-sorts the 1x1 white TILE at
+             * bucket B = (scr_l_pos->vz + 2) >> 3 (lens_flare.c:117) and
+             * it is covered by ANY opaque mesh in a NEARER bucket AND by
+             * same-bucket meshes (AddPrim'd before it, drawn after it —
+             * draw.c order objects -> chunks -> 2dEffects). Engine-true
+             * visible <=> the nearest opaque occluder at that pixel is
+             * at depth >= the bucket's FAR EDGE 8*(B+1) Q8 — the same
+             * principle merged #35 (V41 C-3) applied to the fixed
+             * 641/639 water gates (20.0625 = 642*8/256 below). The old
+             * raw-light-depth gate accepted occluders in [vz, 8*(B+1)) —
+             * a window of up to 10 Q8 (3.9 cm; vz in [8B-2, 8B+6) =>
+             * window (2,10]) in which the engine decays the flare but
+             * the PoC brightened it. (Residual: per-pixel fb->z cannot
+             * model the per-quad MAX-corner OT rule — finder Uncertain
+             * #1; this closes only the looser direction.)              */
+            float gateDepth =
+                (float)((((g_flaresys.scrLPos[2] + 2) >> 3) + 1) * 8) / 256.0f;
+            visible = fb->z[(size_t)py * fb->w + px] >= gateDepth &&
                       g_flaresys.scrLAngZ >= fx_q12_angle(75.0f);
         }
         g_flaresys.centerVisible = visible;
@@ -11428,7 +11986,7 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
 
     /* sprite blits in PoC px (engine px * scale, screen-centered)      */
     #define FX_TO_PX(v) ((int)((v) * scale) + (int)(fb->w / 2))
-    #define FX_TO_PY(v) ((int)((v) * scale) + (int)(fb->h / 2))
+    #define FX_TO_PY(v) ((int)((v) * scaleYQ) + (int)(fb->h / 2))
 
     /* core quad 1 (lens_flare.c:326-336): grey ((rate+3)>>2)*40, half-
      * size ((rate+3)>>2)*30, offset hensin*5; UV 0..63 clut+6          */
@@ -11852,17 +12410,35 @@ static unsigned short sh_wspr_texel(int clutRow, int u, int v) {
     return g_waterTexClut[clutRow & 1][g_waterTexIdx[v][u]];
 }
 
-/* v39: the WATER-sheet FT4 blit — affine UV over the 128x128 sheet, a
- * flat prim color (the setRGB0 modulation), TPAGE-45 ABR-1 ADDITIVE
- * (B5+F5 clamp 31). Corner order = the POLY_FT4's (u0,v0)(u1,v1)
- * (u2,v2)(u3,v3): u spans corner0->corner1, v spans corner0->corner2.
- * depthM = the prim's OWN projected depth — the engine's established
- * water-family painter gate (v37 W1-5; the game's own OT bucket bias
- * (z+0x100)>>3, water.c:439, is documented at the call sites). */
-static void fx_blit_wsheet_ft4(Frame *fb, const int sx[4], const int sy[4],
-                               int clutRow, int u0, int v0, int u1, int v1,
-                               int primR, int primG, int primB,
-                               float depthM) {
+/* v43 (E-15-1): the WATER-sheet QUAD rasterizer — the GPU's own quad
+ * split. swanstation rasterizes a POLY_FT4/GT4 as the two triangles
+ * (v0,v1,v2)+(v2,v1,v3), the shared edge v1-v2 (gpu_sw_backend.cpp:37-40
+ * DrawPolygon — (v0,v1,v2) then (v2,v1,v3)), so ALL FOUR projected
+ * corners shape coverage: the engine's water prims set x0..x3 from four
+ * INDEPENDENT GTE projections (the droplets' rtpt + rtps with x3 stored
+ * at water.c:421, corners projected :395-402; the strips' setXY0-3Fast of
+ * field_13C[k][0..1] / [k+1][0..1], water.c:679-682), and a stream row
+ * viewed along its flow is a perspective TRAPEZOID, not a parallelogram.
+ * The v39/v41 solve P = P0 + a*(P1-P0) + b*(P2-P0) with a,b in
+ * [-0.01,1.01] FABRICATED corner 3 at P1+P2-P0 — the far edge ran ~2 GTE
+ * px past the true quad (a spurious additive band outside the stream +
+ * the shared row double-blended where the GPU's walk draws it once; the
+ * 1.96 GTE px corner-3 error on the SUFFFE map1_s02 stream, V43 E-15-1).
+ * Coverage = the 5e9489d fx_blit_sprite_quad form: the two tsel
+ * triangles, the three edge functions AT the sample center, the
+ * inclusive same-sign test, first hit wins the shared edge (no
+ * double-paint on v1-v2). UVs and Gouraud are PER-TRIANGLE affine — the
+ * PS1 interpolates u/v and the color linearly within each triangle
+ * (swanstation sets up each triangle's own u/v/color DDAs), with the
+ * quad's corner UVs cu={u0,u1,u0,u1}, cv={v0,v0,v1,v1} = water.c's
+ * setUV corner map (u spans corner0->1, v spans corner0->2, :423-433 /
+ * 674-685) and the corner colors riding each triangle's own 3 vertices
+ * (setRGB0-3, :688-691). For a true screen parallelogram corner 3 sits
+ * exactly at P1+P2-P0 and the split reduces to the old solve's map.  */
+static void fx_blit_wsheet_q4(Frame *fb, const int sx[4], const int sy[4],
+                              int clutRow, int u0, int v0, int u1, int v1,
+                              const int cr[4], const int cg[4],
+                              const int cb[4], float depthM) {
     int mnx = sx[0], mxx = sx[0], mny = sy[0], mxy = sy[0];
     for (int i = 1; i < 4; i++) {
         if (sx[i] < mnx) mnx = sx[i];
@@ -11875,106 +12451,85 @@ static void fx_blit_wsheet_ft4(Frame *fb, const int sx[4], const int sy[4],
     if (mny < 0) mny = 0;
     if (mxx >= (int)fb->w) mxx = (int)fb->w - 1;
     if (mxy >= (int)fb->h) mxy = (int)fb->h - 1;
-    /* the affine UV solve for ROTATED quads (the stream quads' flow
-     * axis can be any heading): the parametric (a, b) in the
-     * parallelogram P = P0 + a*(P1-P0) + b*(P2-P0) — the PS1's own
-     * screen-space linear interpolation (affine, no perspective div). */
-    double ax1 = (double)sx[1] - sx[0], ay1 = (double)sy[1] - sy[0];
-    double ax2 = (double)sx[2] - sx[0], ay2 = (double)sy[2] - sy[0];
-    double det = ax1 * ay2 - ax2 * ay1;
-    if (fabs(det) < 1e-9) return;            /* degenerate quad          */
-    double ia =  ay2 / det, ib = -ax2 / det; /* inv [[ax1 ax2][ay1 ay2]] */
-    double ic = -ay1 / det, id2 =  ax1 / det;
+    /* the corner UVs (water.c's setUV4 corner map): u spans corner0->1,
+     * v spans corner0->2; corners 1/3 and 2/3 complete the grid.       */
+    const int cu[4] = { u0, u1, u0, u1 };
+    const int cv[4] = { v0, v0, v1, v1 };
+    /* the two GPU triangles: tsel 0 = (v0,v1,v2), tsel 1 = (v2,v1,v3).
+     * Per triangle: the parametric solve (a, b) in P = A + a*(B-A) +
+     * b*(C-A) — the SAME inverse-edge solve the parallelogram form used
+     * (for tsel 0, A=v0/B=v1/C=v2 is literally the old corner basis),
+     * so each channel interpolates as chan(A) + (chan(B)-chan(A))*a +
+     * (chan(C)-chan(A))*b.                                              */
+    int triOK[2];
+    int tAi[2], tCi[2];
+    double tAx[2], tAy[2];
+    double tIa[2], tIb[2], tIc[2], tId[2];
+    for (int t = 0; t < 2; t++) {
+        const int ai = (t == 0) ? 0 : 2;
+        const int ci = (t == 0) ? 2 : 3;   /* B is corner 1 in both     */
+        tAi[t] = ai; tCi[t] = ci;
+        tAx[t] = (double)sx[ai]; tAy[t] = (double)sy[ai];
+        double e1x = (double)sx[1] - sx[ai], e1y = (double)sy[1] - sy[ai];
+        double e2x = (double)sx[ci] - sx[ai], e2y = (double)sy[ci] - sy[ai];
+        double det = e1x * e2y - e2x * e1y;
+        triOK[t] = (fabs(det) >= 1e-9);    /* a degenerate triangle
+                                              rasterizes to nothing     */
+        if (!triOK[t]) continue;
+        tIa[t] =  e2y / det; tIb[t] = -e2x / det;
+        tIc[t] = -e1y / det; tId[t] =  e1x / det;
+    }
+    if (!triOK[0] && !triOK[1]) return;    /* fully degenerate quad     */
     for (int py = mny; py <= mxy; py++) {
         for (int px = mnx; px <= mxx; px++) {
-            double rx = px + 0.5 - sx[0], ry = py + 0.5 - sy[0];
-            double a = ia * rx + ib * ry;    /* along the u axis (0->1)  */
-            double b = ic * rx + id2 * ry;   /* along the v axis (0->1)  */
-            if (a < -0.01 || a > 1.01 || b < -0.01 || b > 1.01) continue;
-            int u = u0 + (int)((u1 - u0) * a);
-            int v = v0 + (int)((v1 - v0) * b);
+            double ax = px + 0.5, ay = py + 0.5;
+            /* point-in-quad over the two triangles — the fx_blit_sprite_
+             * quad convention (v41-ENGFX 5e9489d): the three edge
+             * functions at the sample point, all three same sign (or
+             * zero) = inside; the first containing triangle wins the
+             * shared v1-v2 edge, so it paints exactly once.            */
+            int t = -1;
+            for (int ts = 0; ts < 2; ts++) {
+                if (!triOK[ts]) continue;
+                const double axv = tAx[ts], ayv = tAy[ts];
+                const double bx = (double)sx[1], by = (double)sy[1];
+                const double cx = (double)sx[tCi[ts]], cy = (double)sy[tCi[ts]];
+                double e0 = (cx - bx) * (ay - by) - (cy - by) * (ax - bx);
+                double e1 = (axv - cx) * (ay - cy) - (ayv - cy) * (ax - cx);
+                double e2 = (bx - axv) * (ay - ayv) - (by - ayv) * (ax - axv);
+                int neg = (e0 < 0) || (e1 < 0) || (e2 < 0);
+                int pos = (e0 > 0) || (e1 > 0) || (e2 > 0);
+                if (!(neg && pos)) { t = ts; break; }
+            }
+            if (t < 0) continue;
+            /* the per-triangle affine UV + Gouraud (corner B = index 1) */
+            double rx = ax - tAx[t], ry = ay - tAy[t];
+            double a = tIa[t] * rx + tIb[t] * ry;   /* along A->B (u)   */
+            double b = tIc[t] * rx + tId[t] * ry;   /* along A->C (v)   */
+            const int ai = tAi[t], ci = tCi[t];
+            int u = (int)((double)cu[ai] +
+                    (double)(cu[1] - cu[ai]) * a +
+                    (double)(cu[ci] - cu[ai]) * b);
+            int v = (int)((double)cv[ai] +
+                    (double)(cv[1] - cv[ai]) * a +
+                    (double)(cv[ci] - cv[ai]) * b);
             if (u < 0 || u > 127 || v < 0 || v > 127) continue;
             size_t pi = (size_t)py * fb->w + px;
             if (depthM > 0.0f && fb->z && fb->z[pi] < depthM)
                 continue;
             unsigned short tc = sh_wspr_texel(clutRow, u, v);
             if ((tc & 0x7FFF) == 0) continue;   /* the PS1 0x0000 hole    */
-            int fr = ((int)(tc & 31u) * primR) >> 7;
-            int fg = (int)(((tc >> 5) & 31u) * primG) >> 7;
-            int fbv = (int)(((tc >> 10) & 31u) * primB) >> 7;
-            if (fr > 31) fr = 31;
-            if (fg > 31) fg = 31;
-            if (fbv > 31) fbv = 31;
-            uint8_t *p = fb->rgb + pi * 3;
-            int orr = (p[0] >> 3) + fr; if (orr > 31) orr = 31;
-            int ogg = (p[1] >> 3) + fg; if (ogg > 31) ogg = 31;
-            int obb = (p[2] >> 3) + fbv; if (obb > 31) obb = 31;
-            p[0] = (uint8_t)((orr << 3) | (orr >> 2));
-            p[1] = (uint8_t)((ogg << 3) | (ogg >> 2));
-            p[2] = (uint8_t)((obb << 3) | (obb >> 2));
-        }
-    }
-}
-
-/* v39: the WATER-sheet GT4 blit — per-corner GOURAUD colors (the strip
- * quads' setRGB0..3, water.c:688-691), additive, the same affine
- * discipline as the FT4 (the PS1 GTE raster is affine — no per-fragment
- * perspective division). The corner colors interpolate bilinearly over
- * the parallelogram spanned by corner0->1 (u) and corner0->2 (v). */
-static void fx_blit_wsheet_gt4(Frame *fb, const int sx[4], const int sy[4],
-                               int clutRow, int u0, int v0, int u1, int v1,
-                               const int cr[4], const int cg[4],
-                               const int cb[4], float depthM) {
-    int mnx = sx[0], mxx = sx[0], mny = sy[0], mxy = sy[0];
-    for (int i = 1; i < 4; i++) {
-        if (sx[i] < mnx) mnx = sx[i];
-        if (sx[i] > mxx) mxx = sx[i];
-        if (sy[i] < mny) mny = sy[i];
-        if (sy[i] > mxy) mxy = sy[i];
-    }
-    if (mxx < 0 || mnx >= (int)fb->w || mxy < 0 || mny >= (int)fb->h) return;
-    if (mnx < 0) mnx = 0;
-    if (mny < 0) mny = 0;
-    if (mxx >= (int)fb->w) mxx = (int)fb->w - 1;
-    if (mxy >= (int)fb->h) mxy = (int)fb->h - 1;
-    /* the affine solve for ROTATED quads — same as the FT4 (the PS1's
-     * screen-space linear interpolation; the Gouraud corners ride the
-     * same (a, b) parametric coords). */
-    double ax1 = (double)sx[1] - sx[0], ay1 = (double)sy[1] - sy[0];
-    double ax2 = (double)sx[2] - sx[0], ay2 = (double)sy[2] - sy[0];
-    double det = ax1 * ay2 - ax2 * ay1;
-    if (fabs(det) < 1e-9) return;            /* degenerate quad          */
-    double ia =  ay2 / det, ib = -ax2 / det;
-    double ic = -ay1 / det, id2 =  ax1 / det;
-    for (int py = mny; py <= mxy; py++) {
-        for (int px = mnx; px <= mxx; px++) {
-            double rx = px + 0.5 - sx[0], ry = py + 0.5 - sy[0];
-            double a = ia * rx + ib * ry;
-            double b = ic * rx + id2 * ry;
-            if (a < -0.01 || a > 1.01 || b < -0.01 || b > 1.01) continue;
-            int u = u0 + (int)((u1 - u0) * a);
-            int v = v0 + (int)((v1 - v0) * b);
-            if (u < 0 || u > 127 || v < 0 || v > 127) continue;
-            size_t pi = (size_t)py * fb->w + px;
-            if (depthM > 0.0f && fb->z && fb->z[pi] < depthM)
-                continue;
-            unsigned short tc = sh_wspr_texel(clutRow, u, v);
-            if ((tc & 0x7FFF) == 0) continue;   /* the PS1 0x0000 hole    */
-            /* the Gouraud corner modulation (0..255 corners)            */
-            double aac = a < 0 ? 0 : (a > 1 ? 1 : a);
-            double bbc = b < 0 ? 0 : (b > 1 ? 1 : b);
-            int pr = (int)((cr[0] * (1.0 - aac) * (1.0 - bbc) +
-                            cr[1] * aac * (1.0 - bbc) +
-                            cr[2] * (1.0 - aac) * bbc +
-                            cr[3] * aac * bbc) + 0.5);
-            int pg = (int)((cg[0] * (1.0 - aac) * (1.0 - bbc) +
-                            cg[1] * aac * (1.0 - bbc) +
-                            cg[2] * (1.0 - aac) * bbc +
-                            cg[3] * aac * bbc) + 0.5);
-            int pb = (int)((cb[0] * (1.0 - aac) * (1.0 - bbc) +
-                            cb[1] * aac * (1.0 - bbc) +
-                            cb[2] * (1.0 - aac) * bbc +
-                            cb[3] * aac * bbc) + 0.5);
+            /* the Gouraud corner modulation (0..255 corners) — the SAME
+             * (a, b) parametric interpolation as the UVs, per triangle  */
+            int pr = (int)((double)cr[ai] +
+                    (double)(cr[1] - cr[ai]) * a +
+                    (double)(cr[ci] - cr[ai]) * b + 0.5);
+            int pg = (int)((double)cg[ai] +
+                    (double)(cg[1] - cg[ai]) * a +
+                    (double)(cg[ci] - cg[ai]) * b + 0.5);
+            int pb = (int)((double)cb[ai] +
+                    (double)(cb[1] - cb[ai]) * a +
+                    (double)(cb[ci] - cb[ai]) * b + 0.5);
             int fr = ((int)(tc & 31u) * pr) >> 7;
             int fg = (int)(((tc >> 5) & 31u) * pg) >> 7;
             int fbv = (int)(((tc >> 10) & 31u) * pb) >> 7;
@@ -11990,6 +12545,42 @@ static void fx_blit_wsheet_gt4(Frame *fb, const int sx[4], const int sy[4],
             p[2] = (uint8_t)((obb << 3) | (obb >> 2));
         }
     }
+}
+
+/* v39: the WATER-sheet FT4 blit — affine UV over the 128x128 sheet, a
+ * flat prim color (the setRGB0 modulation), TPAGE-45 ABR-1 ADDITIVE
+ * (B5+F5 clamp 31). Corner order = the POLY_FT4's (u0,v0)(u1,v1)
+ * (u2,v2)(u3,v3): u spans corner0->corner1, v spans corner0->corner2.
+ * depthM = the prim's OWN projected depth — the engine's established
+ * water-family painter gate (v37 W1-5; the game's own OT bucket bias
+ * (z+0x100)>>3, water.c:439, is documented at the call sites).
+ * v43 (E-15-1): the flat color rides the q4 quad-triangle rasterizer
+ * (a constant corner set interpolates to itself on both triangles). */
+static void fx_blit_wsheet_ft4(Frame *fb, const int sx[4], const int sy[4],
+                               int clutRow, int u0, int v0, int u1, int v1,
+                               int primR, int primG, int primB,
+                               float depthM) {
+    const int cr[4] = { primR, primR, primR, primR };
+    const int cg[4] = { primG, primG, primG, primG };
+    const int cb[4] = { primB, primB, primB, primB };
+    fx_blit_wsheet_q4(fb, sx, sy, clutRow, u0, v0, u1, v1,
+                      cr, cg, cb, depthM);
+}
+
+/* v39: the WATER-sheet GT4 blit — per-corner GOURAUD colors (the strip
+ * quads' setRGB0..3, water.c:688-691), additive, the same affine
+ * discipline as the FT4 (the PS1 GTE raster is affine — no per-fragment
+ * perspective division). v43 (E-15-1): the corner colors interpolate
+ * PER TRIANGLE over the GPU's own (v0,v1,v2)+(v2,v1,v3) split (each
+ * triangle's color DDA is set up from its own 3 corners on hardware) —
+ * the old bilinear-over-parallelogram form also leaned on the fabricated
+ * corner-3 position. */
+static void fx_blit_wsheet_gt4(Frame *fb, const int sx[4], const int sy[4],
+                               int clutRow, int u0, int v0, int u1, int v1,
+                               const int cr[4], const int cg[4],
+                               const int cb[4], float depthM) {
+    fx_blit_wsheet_q4(fb, sx, sy, clutRow, u0, v0, u1, v1,
+                      cr, cg, cb, depthM);
 }
 
 /* v39: project one school-water world point with the MESH pipeline
@@ -12070,6 +12661,23 @@ static void sh1x_school_water_draw(Frame *fb, const Renderer *R,
 
     /* ---------------- the stream surface (water.c:446-711) ---------- */
     if (a->wfSurfaceOn) {
+        /* v48 audit (A4/A5-1): sp14 is FUNCTION-scope in the engine —
+         * water.c:466 declares `s32 sp14;` among sharedFunc_800CCE60_1_s02's
+         * locals and water.c:485 zeroes it ONCE, BEFORE the segment loop
+         * (the `for (i = 0; i < field_78; i++)` walk). It is written only
+         * by the row-advance clamp branch (water.c:638
+         * `sp14 = field_28[i] - var_s4;`) and read by the last-quad vSpan
+         * (water.c:671 `var_t3_2 = (sp14 << 6) / field_44[i];`) — so a
+         * segment whose walk ends EXACTLY on len (the `var_s4 == len`
+         * break at water.c:649, never entering the clamp) consumes the
+         * PREVIOUS segment's sp14 in the engine. The PoC declared it
+         * per-segment (reset to 0 every sgi), so those segments read 0
+         * instead — live on map1_s03-class data (segment 0 clamps every
+         * frame; segment 1 len 20152/tile 2048 hits scroll≡1720
+         * periodically → engine last-quad vSpan=(819<<6)/2048=25 vs 0).
+         * Hoisted to the walk's outer scope so it persists across
+         * segments exactly like water.c. */
+        int sp14 = 0;
         for (int sgi = 0; sgi < a->wfSegCount; sgi++) {
             const Sh1xWaterSeg *sg = &a->wfSeg[sgi];
             int temp_s0 = sg->width >> 1;               /* water.c:494  */
@@ -12104,7 +12712,9 @@ static void sh1x_school_water_draw(Frame *fb, const Renderer *R,
             if (sgi == a->wfSegCount - 1)
                 f26E = sg->len - a->wfSeg[a->wfSegCount].len;
             if (f26E < 0) f26E = -1;
-            int sp14 = 0;
+            /* (sp14 declared at the WALK scope — see the v48 A4/A5-1 note
+             * above; the engine's is function-scope, zeroed once before the
+             * segment loop, and the clamp below is its ONLY writer.)      */
             float rowsX[16][2], rowsYm[16][2], rowsZ[16][2];
             int rowsB[16][2];
             int j = 0, var_s4 = 0;
@@ -12573,11 +13183,21 @@ static void sh1x_water_fx_draw(Frame *fb, const Renderer *R,
                       ? 0 : 8;   /* Q12(-92.0)= -376832, Q12(0.5)=2048,
                                    Q12(8.1)=33177 (truncating TO_FIXED) */
             mat4 view = mat4_view_from_quat(cam->pos, cam->q);
+            /* V43 E-14-2: the mesh/sprite projections below are ENGINE px
+             * (the GTE 320x224 screen) — scale to fb px with the SAME
+             * factors the sibling FX use (the glint blit: fb->w/320,
+             * fb->h/224). The ENGINE-PX cull bounds further down
+             * (±200/±160, pxi3/pyi3) keep the UNSCALED values — the
+             * engine tests screen-centered 320x224 px. At the default
+             * res the factors are 1 — bit-identical.                  */
+            const float fxpX = (float)fb->w / 320.0f;
+            const float fxpY = (float)fb->h / 224.0f;
             for (int mi = 0; mi < 4; mi++) {
                 for (int mj = 0; mj < 4; mj++) {
                     int sxq[4], syq[4], vis = 1;
                     float dsum = 0.0f;
                     float d0 = 0.0f;   /* v41 (A-4): corner [i][j]'s depth */
+                    int m0xe = 0, m0ye = 0;  /* E-14-2: corner-0 engine px */
                     /* grid corners (engine coords -> glTF)             */
                     float wx[4] = { -93.5f + mj * 0.75f, -93.5f + (mj + 1) * 0.75f,
                                     -93.5f + mj * 0.75f, -93.5f + (mj + 1) * 0.75f };
@@ -12594,8 +13214,15 @@ static void sh1x_water_fx_draw(Frame *fb, const Renderer *R,
                         if (k == 0) d0 = d;   /* sp78[i][j], the cull corner */
                         dsum += d;
                         float iv = 224.0f / d;      /* v40: NTSC 224 (gte_rtpt) */
-                        sxq[k] = (int)(px * iv) + (int)(fb->w / 2);
-                        syq[k] = (int)(py * iv) + (int)(fb->h / 2);
+                        int mqx = (int)(px * iv);   /* engine px, screen-ctr */
+                        /* V48 (W-audit B): engine y-DOWN screen — negate
+                         * the glTF view py (the ripple mesh + sprites are
+                         * the same FX family; latent: no ripple room in
+                         * the current GLB corpus, fixed for parity)   */
+                        int mqy = (int)(-py * iv);
+                        if (k == 0) { m0xe = mqx; m0ye = mqy; }
+                        sxq[k] = (int)(mqx * fxpX) + (int)(fb->w / 2);
+                        syq[k] = (int)(mqy * fxpY) + (int)(fb->h / 2);
                     }
                     if (!vis) continue;
                     /* v40 (audit B2) + v41 (A-4): the engine's PER-QUAD
@@ -12611,8 +13238,11 @@ static void sh1x_water_fx_draw(Frame *fb, const Renderer *R,
                      * sp78[i+1][j]+sp78[i][j+1]+sp78[i+1][j+1])>>2 = the
                      * blit's dsum*0.25 depth below).                       */
                     {
-                        int m0x = sxq[0] - (int)(fb->w / 2);
-                        int m0y = syq[0] - (int)(fb->h / 2);
+                        /* E-14-2: the ±200/±160 bounds are ENGINE px —
+                         * read corner 0's UNSCALED projection (m0xe/m0ye
+                         * captured in the loop above), not the fb-px sxq  */
+                        int m0x = m0xe;
+                        int m0y = m0ye;
                         int mzQ8 = (int)(d0 * 256.0f);
                         if (mzQ8 <= 0 || (mzQ8 >> 3) >= 2048) continue;
                         if (m0x > 200 || m0x < -200 ||
@@ -12666,11 +13296,15 @@ static void sh1x_water_fx_draw(Frame *fb, const Renderer *R,
                     if (d <= 0.05f) { vis = 0; break; }
                     dsum += d;
                     float iv = 224.0f / d;          /* v40: NTSC 224 (gte_rtps) */
-                    sxq[k] = (int)(px * iv) + (int)(fb->w / 2);
-                    syq[k] = (int)(py * iv) + (int)(fb->h / 2);
+                    int spx = (int)(px * iv);       /* engine px, screen-ctr */
+                    /* V48 (W-audit B): engine y-DOWN screen — negate the
+                     * glTF view py (same FX-family flip as the mesh site) */
+                    int spy = (int)(-py * iv);
+                    sxq[k] = (int)(spx * fxpX) + (int)(fb->w / 2);
+                    syq[k] = (int)(spy * fxpY) + (int)(fb->h / 2);
                     if (k == 3) {
-                        pxi3 = (int)(px * iv);
-                        pyi3 = (int)(py * iv);
+                        pxi3 = spx;   /* engine px — the ±200/±160 cull */
+                        pyi3 = spy;
                     }
                 }
                 if (!vis) continue;
@@ -12879,7 +13513,19 @@ static int sh_tvpaint_collect(const Sh1x *sx, const mat4 *viewProj,
             int u1 = a->tvU[si] + sty->u0 + a->tvR2[si] + sty->du - 1;
             int v0 = a->tvV[si] + sty->v0 + a->tvR3[si];
             int v1 = v0 + sty->dv - 1;
-            u0 &= 0xFF; u1 &= 0xFF; v0 &= 0xFF; v1 &= 0xFF;
+            /* v48 (A-2): NO early &0xFF wrap here. The engine keeps the RAW
+             * sums in the u16 fields (map4_s03.c:1258-1259 sp30[][].field_8/
+             * field_A; the corner stores at :1330-1344 are the UNWRAPPED
+             * s32 sums temp_s6/spB0/temp_s4/var_t0), interpolates the
+             * midpoints on those raw u16s ((a+b)>>1, :1349/:1355/...), and
+             * only TRUNCATES to u8 at setUV4 (:1396-1400). Wrapping before
+             * the >>1 midpoints (the old form) gives ((A&0xFF)+(B&0xFF))>>1
+             * where the engine gives ((A+B)>>1)&0xFF — different whenever a
+             * window crosses 255 (e.g. v corners 202/256: engine mid 229,
+             * old form 101 — the big screen's mid row/col UVs, live in the
+             * func_800D8620 case-4/case-5 sub-states whose v ramps cross
+             * 0/256). The &0xFF now happens at each consumption point
+             * below (the setUV4-equivalent sites). */
             /* the corners (func_800D761C's cross-wiring): c0 = A,
              * c1 = (B.x, A.y, B.z), c2 = (A.x, B.y, A.z), c3 = B.
              * World = anchor(engine Q12 m) + corner(Q8)/256, glTF map
@@ -12993,17 +13639,29 @@ static int sh_tvpaint_collect(const Sh1x *sx, const mat4 *viewProj,
                             o->sx = (float)(*gxq) * R->enginePixScale;
                             o->sy = (float)(*gyq) * R->enginePixScaleY;
                             o->z  = *gzq;
-                            o->u  = (float)(*guq) / 256.0f;
-                            o->v  = (float)(*gvq) / 256.0f;
+                            o->u  = (float)(*guq & 0xFF) / 256.0f;
+                            o->v  = (float)(*gvq & 0xFF) / 256.0f;
                             o->vcol[0] = o->vcol[1] = o->vcol[2] = var_s2;
                             o->ocol[0] = o->ocol[1] = o->ocol[2] = 0;
                         }
                         q->tex = tex;
                         q->bright = var_s2;
-                        /* the sub-quad OTZ: MAX corner SZ (Q8) >> 3 */
+                        /* the sub-quad OTZ: MAX corner SZ (Q8), each corner
+                         * scaled <<2 like the engine's
+                         * `sp10[i].vz = RotTransPers(...) * 4`
+                         * (map4_s03.c:1292) BEFORE the MAX, then `>> 3`
+                         * (:1297-1300) — so the TV paint's bucket is
+                         * (Q8<<2)>>3 = Q8>>1, 4x the mesh scale (the mesh
+                         * walk is (OTZ>>1)>>2 = Q8>>3, bodyprog_80056D8C.c
+                         * :855): the engine deliberately sorts the TV
+                         * paint 4x NEARER than all mesh geometry so it
+                         * covers its own wall and culls past ~16 m.
+                         * V44 (D-3): truncates, no +0.5. The v48 form
+                         * dropped the <<2 — bucket Q8>>3 culls at ~64 m
+                         * and ties against the wall's own mesh bucket. */
                         float zm = fmaxf(fmaxf(q->v[0].z, q->v[1].z),
                                          fmaxf(q->v[2].z, q->v[3].z));
-                        int bucket = (int)floorf(zm * 256.0f + 0.5f) >> 3;
+                        int bucket = ((int)floorf(zm * 256.0f) * 4) >> 3;
                         if (!(bucket > 0 && bucket < 2047)) continue;
                         PostEnt pe;
                         memset(&pe, 0, sizeof(pe));
@@ -13019,14 +13677,18 @@ static int sh_tvpaint_collect(const Sh1x *sx, const mat4 *viewProj,
                 TvQuad *q = &tvq[(*nTvq)++];
                 for (int c = 0; c < 4; c++) {
                     q->v[c] = rv[c];
-                    q->v[c].u = (float)(c == 1 || c == 3 ? u1 : u0) / 256.0f;
-                    q->v[c].v = (float)(c >= 2 ? v1 : v0) / 256.0f;
+                    /* setUV4's u8 truncation (func_800D88C8:1396-1400) */
+                    q->v[c].u = (float)((c == 1 || c == 3 ? u1 : u0) & 0xFF) / 256.0f;
+                    q->v[c].v = (float)((c >= 2 ? v1 : v0) & 0xFF) / 256.0f;
                 }
                 q->tex = tex;
                 q->bright = var_s2;
                 float zm = fmaxf(fmaxf(rv[0].z, rv[1].z),
                                  fmaxf(rv[2].z, rv[3].z));
-                int bucket = (int)floorf(zm * 256.0f + 0.5f) >> 3;
+                /* V44 (D-3): SZ truncates; the *4<<2 scale is the engine's
+                 * `RotTransPers(...) * 4` (map4_s03.c:1292) — see the
+                 * big-screen comment above (v48: the <<2 was dropped). */
+                int bucket = ((int)floorf(zm * 256.0f) * 4) >> 3;
                 if (!(bucket > 0 && bucket < 2047)) {
                     (*nTvq)--;               /* the engine drops this quad */
                     continue;
@@ -13225,6 +13887,28 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
     int nFlake = 0;
     const Snow *S = R->snow;
     int snowScale = fb->w / 320; if (snowScale < 1) snowScale = 1;
+
+    /* ---- v43 (E-16-2): the TV paint quads (func_800D88C8) — collected
+     * FIRST, before the weather flakes and the mesh quads. The engine's
+     * add order is the map update's TV prims — game_sys_states.c:156-158
+     * runs g_MapOverlayHdr.func_44 (map4_s03/header.c:54 = func_800DA3E0
+     * -> func_800D7718 at map4_s03.c:1782 -> func_800D88C8's AddPrims)
+     * BEFORE the weather particle update (:171) and WorldGfx_Draw's mesh
+     * quads (:189). On an OT bucket tie the LIFO walk draws first-added
+     * LAST (on top), so the engine puts the TV paint OVER colliding
+     * flakes. The v36 form collected the flakes first (seq order flakes
+     * -> TV -> mesh), inverting the tie layering: a flake whose depth
+     * landed in the same 1/8-Q8 bucket as a screen's max corner showed
+     * as a bright blip ON the TV image — the engine hides it behind the
+     * opaque quad. Seq order is now TV -> flakes -> mesh.             */
+    TvQuad tvq[24];
+    int nTvq = 0;
+    if (R->dbgItem < 0) {
+        sh_tvpaint_collect(&sc->sh1x, &viewProj, &view, fb, R,
+                           post, &nPost, &seq, tvq, &nTvq, 24,
+                           nQuadMax + SNOW_COUNT_MAX + 1);
+    }
+
     if (S && S->enabled && R->dbgItem < 0) {
         for (int i = 0; i < S->addedCount && i < SNOW_COUNT_MAX; i++) {
             const SnowPart *p = &S->p[i];
@@ -13332,10 +14016,16 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
                 gte_snap_screen(&tsx, &tsy, R->enginePixScale, R->enginePixScaleY),
                 gte_snap_screen(&hsx, &hsy, R->enginePixScale, R->enginePixScaleY);
             /* GTE SZ = Q8 view depth; OTZ (stszotz) = SZ>>2 -> 64/m; the
-             * engine's rain depth comes from the FIRST projection (tail)  */
-            int otz = (int)floorf(tDepth * 64.0f + 0.5f);
+             * engine's STREAK/DRIP depth comes from the FIRST projection
+             * (the tail); the SPLASH overrides bucket/clut/depth with its
+             * own corner-0 projection below (particle.c:2907-2932).
+             * V44 (D-2): the chain truncates — no +0.5 (snow note above);
+             * particle.c:2785 gte_stszotz then :2809 depth >>= 1.
+             * v43 (E-11-3/E-16-3): the cull is PER-BRANCH on each branch's
+             * OWN depth (engine :2813 streak / :2993 splash / :3084 drip) —
+             * NOT a shared gate                        */
+            int otz = (int)floorf(tDepth * 64.0f);
             int zHalf = otz >> 1;
-            if (!(zHalf > 32 && zHalf < 2047)) continue;
             /* clut: far 0x1A30 (row 104) / mid rows 104+(depth>>5) */
             int clutRow = (zHalf > 63 && zHalf < 256)
                               ? 104 + (zHalf >> 5) : 104;
@@ -13344,6 +14034,8 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
             pe.bucket = zHalf; pe.seq = seq++; pe.item = -1; pe.tri0 = -1; pe.ntri = 0;
             if (p->state == 1) {
                 /* ---- falling streak (Particle_RainDraw state 1) ---- */
+                /* engine :2813 — cull on the TAIL depth (first rtps)    */
+                if (!(zHalf > 32 && zHalf < 2047)) continue;
                 int r, g, b;
                 if (S->drawCase == 1 || S->drawCase == 4) {
                     /* color = E325C.r - (func_80055A50(OTZ) >> 5), u8 wrap */
@@ -13367,14 +14059,17 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
             } else if (p->type == 2 || p->type == 242) {
                 /* ---- landing splash (type 2/242, state 2..16) ---- */
                 if (p->state >= 17) continue;
-                /* sp64: the splash growth rate from the rain intensity */
-                int sp64 = (S->rainIntensity < 27000) ? 3 :
-                           (S->rainIntensity < 135000) ? 4 : 5;
+                /* sp64: the splash growth rate — the tier snapshotted at
+                 * the HEAD of snow_tick (engine particle.c:839-854,
+                 * PRE-ramp: tier of E32D0 after the previous tick's ramp,
+                 * 1393-1394 — not the current post-ramp intensity)       */
+                int sp64 = S->sp64;
                 int c = p->state << sp64;         /* the Q12 corner radius */
                 /* the 4 ground corners: (x-c,y,z-c) (x-c,y,z+c)
                  * (x+c,y,z-c) (x+c,y,z+c) — projected                    */
                 int cx[4], cy[4];
                 int ok = 1;
+                float cDepth = 0.0f;   /* corner-0 view depth (1st rtps)  */
                 static const int sgn[4][2] = { {-1,-1}, {-1,1}, {1,-1}, {1,1} };
                 for (int k = 0; k < 4; k++) {
                     float wx = (float)(S->boxX + p->pos[0] + sgn[k][0] * c) * (1.0f / 4096.0f);
@@ -13384,6 +14079,15 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
                     float ccy = viewProj.m[1]*wx + viewProj.m[5]*wy + viewProj.m[9]*wz  + viewProj.m[13];
                     float ccw = viewProj.m[3]*wx + viewProj.m[7]*wy + viewProj.m[11]*wz + viewProj.m[15];
                     if (ccw <= 1e-6f) { ok = 0; break; }
+                    if (k == 0) {
+                        /* v43 (E-11-3/E-16-3) engine :2911-2919 — corner 0
+                         * is the splash's FIRST rtps; its stszotz is the
+                         * splash's depth (NOT the streak tail). Computed
+                         * from the Q8-SNAPPED corner (the engine's rtps
+                         * input is Q12_TO_Q8(position0.vx - colorComp))    */
+                        float cvz = view.m[2]*wx + view.m[6]*wy + view.m[10]*wz + view.m[14];
+                        cDepth = -cvz;
+                    }
                     float psx2 = ((ccx / ccw) + 1.0f) * 0.5f * (float)fb->w;
                     float psy2 = (1.0f - ((ccy / ccw) + 1.0f) * 0.5f) * (float)fb->h;
                     if (R->opts.ps1)
@@ -13392,6 +14096,17 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
                     cy[k] = (int)psy2;
                 }
                 if (!ok) continue;
+                /* v43 (E-11-3/E-16-3): engine :2932/:2993/:2999-3005/:3042 —
+                 * the splash's OT bucket, CLUT row and occlusion depth come
+                 * from CORNER 0 (its own first rtps), never the streak tail;
+                 * the quantization TRUNCATES (V44 D-2 — no +0.5 in the SZ
+                 * chain) */
+                otz = (int)floorf(cDepth * 64.0f);
+                zHalf = otz >> 1;
+                if (!(zHalf > 32 && zHalf < 2047)) continue;
+                clutRow = (zHalf > 63 && zHalf < 256)
+                              ? 104 + (zHalf >> 5) : 104;
+                pe.bucket = zHalf;   /* engine :3042 — addPrim at corner-0 depth */
                 /* color = 0x80 - (c >> (sp64-3)); drawCase 2/6 + flashlight
                  * -> r = color*2; then the state fade r -= r*state>>4    */
                 int cc = c >> (sp64 - 3);
@@ -13411,11 +14126,13 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
                 pe.rfd.x3 = cx[3]; pe.rfd.y3 = cy[3];
                 pe.rfd.clutRow = clutRow;
                 pe.rfd.primR = r; pe.rfd.primG = g; pe.rfd.primB = b;
-                pe.rfd.depth = tDepth;
+                pe.rfd.depth = cDepth;
                 post[nPost++] = pe; nFlake++;
             } else {
                 /* ---- type 3: the roof/puddle DRIP streak ---- */
                 if (p->state >= 49) continue;
+                /* engine :3084 — cull on the TAIL depth (first rtps)    */
+                if (!(zHalf > 32 && zHalf < 2047)) continue;
                 int cc = (p->state < 31) ? (int)p->state : 0x20;
                 pe.kind = 4;
                 pe.rfd.x0 = (int)tsx; pe.rfd.y0 = (int)tsy;  /* tail */
@@ -13427,20 +14144,6 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
             }
         }
         if (R->snowDump) fprintf(R->snowDump, "frame end nFlake=%d\n", nFlake);
-    }
-
-    /* ---- v36: the TV paint quads (func_800D88C8) — collected AFTER the
-     * weather flakes, BEFORE the mesh quads: the engine's add order is
-     * particles (game_sys_states.c:172) -> the map update's TV prims
-     * (func_800DA3E0 -> func_800D7718) -> WorldGfx_Draw's mesh quads
-     * (:189), so on an OT bucket tie the TV quads sit BETWEEN the flakes
-     * and the room geometry (LIFO: last-added draws first/below).     */
-    TvQuad tvq[24];
-    int nTvq = 0;
-    if (R->dbgItem < 0) {
-        sh_tvpaint_collect(&sc->sh1x, &viewProj, &view, fb, R,
-                           post, &nPost, &seq, tvq, &nTvq, 24,
-                           nQuadMax + SNOW_COUNT_MAX + 1);
     }
 
     /* ---- v14/v15: collect the QUADS (ALL materials) as per-quad OT entries --
@@ -14184,8 +14887,16 @@ static int tim_load(TimImage *t, const char *path) {
             size_t bit = (size_t)y * pw * 2 + (size_t)(x / (bpp == 4 ? 4 : 2)) * 2;
             uint16_t hw;
             memcpy(&hw, d + p + 12 + bit, 2);
-            int shift = (x % (bpp == 4 ? 4 : 2)) * 4;
-            t->indices[(size_t)y * t->w + x] = (hw >> shift) & 0xF;
+            /* V43 E-17-2: PS1 8bpp = 2 texels per halfword, 8 bits each
+             * (low byte = even x) — ipd2gltf.py's decoder and
+             * extract_snow_tim.py document the same packing. The old
+             * nibble form read BOTH texels as nibbles of the LOW byte:
+             * every 8bpp index truncated to 4 bits and the high byte was
+             * never sampled. 4bpp is unchanged (4 texels/halfword, 4
+             * bits each).                                                    */
+            int shift = (bpp == 4) ? (x & 3) * 4 : (x & 1) * 8;
+            t->indices[(size_t)y * t->w + x] =
+                (uint8_t)((hw >> shift) & (bpp == 4 ? 0xF : 0xFF));
         }
     }
     (void)plen; (void)px; (void)py;
@@ -14199,10 +14910,57 @@ static void blit_tim(Frame *fb, const TimImage *t, int palette) {
     if (!t->w) return;
     if (palette < 0 || palette >= (t->clutCount ? t->clutCount : 1))
         palette = 0;
+    /* V43 E-17-3: STRICT CENTER-CROP (Aspect Fill) — the project's
+     * presentation contract (Wallpaper bench/and_blit_extracted.h:20-27,
+     * 49-107, enforced by bench/blit_crop_test.c property 2: "a CIRCLE
+     * in the source framebuffer must remain a circle"). ONE uniform
+     * factor s = max(fb->w/t->w, fb->h/t->h); the TIM meets or exceeds
+     * the fb in BOTH dimensions and the excess is cropped symmetrically.
+     * ZERO non-uniform scaling — the uniform 16.16 DDA step (SOURCE
+     * texels per DESTINATION pixel = 1/s) comes from the LIMITING axis,
+     * verbatim-logic from and_blit (the v10.1 desktop proof catches any
+     * inversion). The old per-axis sx/sy scales were an aspect-fill
+     * STRETCH of the whole TIM (a 320x224 page on a 16:9 fb stretched
+     * ~24% horizontally; a 128x256 page at 320x224 2.5x/0.875x). The
+     * default 320x224 fb with a 320x224 page stays 1:1 (bit-identical:
+     * inc16 = 65536, cx16 = cy16 = 0, sx == x, sy == y).               */
+    long long inc16, availX16, availY16;
+    if ((long long)fb->w * t->h >= (long long)fb->h * t->w) {
+        /* width-limited (s = fb->w/t->w): the width fills exactly
+         * (window_w = fb->w * t->w/fb->w = t->w), source ROWS are
+         * cropped — and_blit's `ww*fh >= wh*fw` branch with
+         * src=TIM (t->w x t->h), dest=fb (fb->w x fb->h).           */
+        inc16 = ((long long)t->w << 16) / fb->w;   /* 1/s = t->w/fb->w */
+        availX16 = 0;                              /* width fills exactly */
+        availY16 = ((long long)t->h << 16)
+                 - ((long long)fb->h * t->w << 16) / fb->w;   /* cropped rows */
+    } else {
+        /* height-limited (s = fb->h/t->h): the height fills exactly,
+         * source COLUMNS are cropped.                                 */
+        inc16 = ((long long)t->h << 16) / fb->h;   /* 1/s = t->h/fb->h */
+        availY16 = 0;                              /* height fills exactly */
+        availX16 = ((long long)t->w << 16)
+                 - ((long long)fb->w * t->h << 16) / fb->h;   /* cropped cols */
+    }
+    if (inc16 < 1) inc16 = 1;
+    if (availX16 < 0) availX16 = 0;   /* truncation guards (sane dims) */
+    if (availY16 < 0) availY16 = 0;
+    /* symmetric crop-window origin (and_blit's g_and_crop_x/y = 0 default:
+     * the offset is inert on the axis that fills exactly)               */
+    long long cx16 = (availX16 > 0) ? (availX16 >> 1) : 0;
+    long long cy16 = (availY16 > 0) ? (availY16 >> 1) : 0;
+    /* full-bleed presentation: every fb pixel is written (cover in both
+     * orientations) — the DDA keeps 16.16 sub-texel precision on the
+     * window origin; the tail clamp mirrors and_blit (at most 1 texel). */
+    long long ypos = cy16;
     for (int y = 0; y < fb->h; y++) {
+        int sy = (int)(ypos >> 16);
+        if (sy >= t->h) sy = t->h - 1;   /* DDA tail clamp (at most 1 texel) */
+        long long xpos = cx16;
         for (int x = 0; x < fb->w; x++) {
-            int sx = (int)((float)x / fb->w * t->w);
-            int sy = (int)((float)y / fb->h * t->h);
+            int sx = (int)(xpos >> 16);
+            if (sx >= t->w) sx = t->w - 1;
+            xpos += inc16;
             uint16_t e = t->clutCount ? t->clut[palette][t->indices[(size_t)sy * t->w + sx]] : 0x8000;
             int r5 = e & 31, g5 = (e >> 5) & 31, b5 = (e >> 10) & 31;
             int stp = (e >> 15) & 1;
@@ -14212,6 +14970,7 @@ static void blit_tim(Frame *fb, const TimImage *t, int palette) {
             if (isBlack && !stp) { rr = gg = bb = chk; }   /* hole: checker */
             fb_put(fb, x, y, rr, gg, bb, 0, 0);
         }
+        ypos += inc16;
     }
 }
 
@@ -14383,7 +15142,10 @@ static CamPose playback_step(Playback *P, const CamTrack *tr, double dt,
 #define R2_NEAR_ZERO       8192   /* Q12(2.0m): zero-rate enemy dist           */
 #define R2_YAW_DEAD        45     /* Q12_ANGLE(4.0f): idle dead zone           */
 #define R2_PITCH_IDLE     91      /* Q12_ANGLE(8.0f): idle pitch offset        */
-#define R2_VANG_CLAMP     797     /* Q12_ANGLE(70.0f): vertical clamp          */
+#define R2_VANG_CLAMP     796     /* Q12_ANGLE(70.0f): vertical clamp —
+                                     * (s32)(70/360*4096) = (s32)796.44 = 796
+                                     * (v43 E18-6: was 797, llround — the
+                                     * engine truncates; 1 q3_12 = 0.088deg) */
 #define R2_PITCH_CLAMP    910     /* Q12_ANGLE(80.0f): final pitch clamp       */
 #define R2_PAN_RATE       22      /* g_VBlanks(2) * V_BLANKS_MULT(11)/tick     */
 #define R2_TGT_R          410     /* Q12(0.1f): chase arrival radius           */
@@ -14426,27 +15188,36 @@ static int32_t r2_ratan2(int32_t y, int32_t x) {
 }
 
 /* vcCamMatNoise 0x80085A7C: (cos(spd1*t) + cos(spd2*t))/2 * weight.
- * FP_RADIAN(rad) = rad * 20480 / (2*PI) (fixed_point.h:487 — the
- * [0,20480] radian circle); t = vcSelfViewTimer in Q12 SECONDS.        */
+ * v43 (E18-3): FP_RADIAN semantics corrected — fixed_point.h:510-512 is
+ *   (s32)((wrap(rad) * (FP_PI/PI)) * ((rad<0 || rad>=PI) ? 1.0f : 2.0f))
+ * with FP_PI = 0x5000/2 = 10240: angles in [0,pi) are DOUBLED and
+ * negatives wrap to 2*PI-|rad| (x1) — NOT the linear rad*20480/(2*PI) the
+ * old comment claimed (self-demonstrating: FP_RADIAN(PI/2)==FP_RADIAN(PI)
+ * == 10240). t = vcSelfViewTimer in Q12 SECONDS.                        */
 static int32_t r2_cam_mat_noise(int32_t noise_w, int32_t ang_spd1,
                                 int32_t ang_spd2, int32_t tQ12) {
-    int32_t n = sh_math_sin(R2_MUL(ang_spd1, tQ12)) +
+    /* v43 (E18-2): the engine is Math_Cos + Math_Cos (vc_main.c:2938) —
+     * the first term was sin, a 90-deg phase shift (sin x = cos(x-1024)
+     * on the 4096 circle) of every channel's first oscillator.         */
+    int32_t n = sh_math_cos(R2_MUL(ang_spd1, tQ12)) +
                 sh_math_cos(R2_MUL(ang_spd2, tQ12));
     n >>= 1;
     return R2_MUL(noise_w, n);
 }
-/* the engine's exact noise speeds (vcSetDataToVwSystem, FP_RADIAN args) */
-#define R2_NS1_VX  2844   /* FP_RADIAN(PI/18*5)  = 50deg/s  */
-#define R2_NS2_VX  4551   /* FP_RADIAN(PI/9*4)   = 80deg/s  */
-#define R2_NS1_VY  2276   /* FP_RADIAN(PI/9*2)   = 40deg/s  */
-#define R2_NS2_VY  -9102  /* FP_RADIAN(PI/9*-8)  = -160deg/s */
-#define R2_NS_M00  3982   /* FP_RADIAN(PI/18*7)  = 70deg/s  */
-#define R2_NS_M01  10240  /* FP_RADIAN(PI)       = 180deg/s */
-#define R2_NS_M02  -9102  /* FP_RADIAN(PI/9*-8)  = -160deg/s */
-#define R2_NS_M10  2844   /* FP_RADIAN(PI/18*5)  = 50deg/s  */
-#define R2_NS_M11  2276   /* FP_RADIAN(PI/9*2)   = 40deg/s  */
-#define R2_NS_M12  7387   /* FP_RADIAN(PI/36*13) = 130deg/s */
-#define R2_NS_M1X  -9639  /* FP_RADIAN(PI/18*-17)= -170deg/s */
+/* the engine's exact noise speeds (vcSetDataToVwSystem vc_main.c:2910-2920,
+ * FP_RADIAN args — every value re-derived in float32 through the real
+ * fixed_point.h:510 macro: [0,PI) doubled, negatives wrapped, (s32) trunc) */
+#define R2_NS1_VX  5688   /* FP_RADIAN((PI/18)*5)   50deg, doubled  */
+#define R2_NS2_VX  9102   /* FP_RADIAN((PI/9)*4)    80deg, doubled  */
+#define R2_NS1_VY  4551   /* FP_RADIAN((PI/9)*2)    40deg, doubled  */
+#define R2_NS2_VY  11377  /* FP_RADIAN((PI/9)*-8) -160deg, wrapped  */
+#define R2_NS_M00  7964   /* FP_RADIAN((PI/18)*7)   70deg, doubled  */
+#define R2_NS_M01  10240  /* FP_RADIAN(PI)          180deg          */
+#define R2_NS_M02  6826   /* FP_RADIAN(PI/3)         60deg, doubled */
+#define R2_NS_M10  5688   /* FP_RADIAN((PI/18)*5)   50deg, doubled  */
+#define R2_NS_M11  4551   /* FP_RADIAN((PI/9)*2)    40deg, doubled  */
+#define R2_NS_M12  7395   /* FP_RADIAN((PI/36)*13)  65deg, doubled  */
+#define R2_NS_M1X  10808  /* FP_RADIAN((PI/18)*-17)-170deg, wrapped */
 
 /* the R2 (self) view state — engine VC_WORK subset + input model */
 typedef struct {
@@ -14466,6 +15237,9 @@ typedef struct {
     int32_t viewYaw, viewPitch;      /* current view angles (q3_12)        */
     int32_t viewSpdY, viewSpdX;      /* vwRetNewAngSpdToTargetAng speeds   */
     int32_t selfViewTimer;           /* vcSelfViewTimer, Q12 seconds       */
+    int32_t mvSpd;                   /* chara_mv_spd (Q12 m/s) — anchor    */
+    int32_t prevHead[3];             /* last tick's head pos (Q12), for    */
+    int hasPrevHead;                 /*   the per-tick displacement speed  */
     int32_t effRate;                 /* last effect rate (HUD/debug)       */
     int32_t farDist;                 /* active far-watch distance (HUD)    */
     int restricted;                  /* in the THR self-view restricted zone */
@@ -14494,7 +15268,12 @@ static int32_t r2_idle_yaw_correct(int32_t delta) {
     return corrected;
 }
 
-/* vwRetNewVelocityToTargetVal 0x8004914C (verbatim fixed point) */
+/* vwRetNewVelocityToTargetVal 0x8004914C (verbatim fixed point).
+ * v43 (E18-1): the deceleration cap is MIN(spd_lim, new_spd) on the
+ * positive branch / MAX(-spd_lim, new_spd) on the negative — the engine
+ * keeps new_spd only when spd_lim >= new_spd (vw_calc.c:151-168); the
+ * old inverted comparison made it a floor (MAX) and could exceed
+ * max_spd since spd_lim = dec*|diff| is unbounded.                       */
 static int32_t r2_vel_to_target(int32_t now_spd, int32_t pos, int32_t tgt,
                                 int32_t accel, int32_t max_spd,
                                 int32_t dec_lim_spd) {
@@ -14509,10 +15288,10 @@ static int32_t r2_vel_to_target(int32_t now_spd, int32_t pos, int32_t tgt,
     int32_t abs_diff = pos_diff < 0 ? -pos_diff : pos_diff;
     int32_t spd_lim = R2_MUL(dec_lim_spd, abs_diff);
     if (pos_diff >= 0) {
-        int32_t r = spd_lim; if (r < new_spd) r = new_spd; /* min(spd_lim,new) */
+        int32_t r = spd_lim; if (r >= new_spd) r = new_spd; /* min(spd_lim,new) */
         new_spd = r;
     } else {
-        int32_t r = -spd_lim; if (r > new_spd) r = new_spd;
+        int32_t r = -spd_lim; if (r < new_spd) r = new_spd; /* max(-spd_lim,new) */
         new_spd = r;
     }
     return new_spd;
@@ -14533,13 +15312,41 @@ static int r2_in_restricted_zone(const v3 *eye) {
      * transform is identity on xz (v10ipd2gltf preserves the world axes),
      * so the zone test applies directly on the eye xz.                  */
     int32_t x = R2_Q12((double)eye->x), z = R2_Q12((double)eye->z);
-    return x >= R2_Q12(201.8) && x <= R2_Q12(230.0) &&
+    /* v43 (E18-7): the engine's Q12 = TO_FIXED TRUNCATES — (s32)(x*4096),
+     * fixed_point.h:30-31; Q12(201.8f) = (s32)(201.80000305*4096 =
+     * 826572.8125) = 826572. The old R2_Q12(201.8) llround gave 826573 —
+     * the zone edge 1 q3_12 (0.24 mm) narrower than the engine. The other
+     * three edges (230/-92/-68) are exact under both.
+     * (GATE resolution: main's V44 D-1 z-negation KEPT — the PR predated
+     * it; only the x-min truncation is taken from the PR.)             */
+    return x >= (int32_t)(201.8 * 4096.0) && x <= R2_Q12(230.0) &&
            z >= R2_Q12(-92.0) && z <= R2_Q12(-68.0);
 }
 
 /* one engine tick of the self-view system. body = the track pose this
  * tick (the "Harry" anchor: pos = head, forward = body facing).         */
 static void r2view_tick(R2View *V, const CamPose *body) {
+    /* v43 (E18-5): the anchor's chara_mv_spd (engine vcSetSubjChara passes
+     * the PLAYER's moveSpeed, vc_util.c:144-147; the PoC anchor is the
+     * track pose): the per-tick Q12 displacement magnitude * 30 (one
+     * tick = 1/30 s), tracked EVERY tick so the speed is current when
+     * the view engages.                                                */
+    {
+        int32_t hx = R2_Q12((double)body->pos.x),
+                hy = R2_Q12((double)body->pos.y),
+                hz = R2_Q12((double)body->pos.z);
+        if (V->hasPrevHead) {
+            int64_t dx = hx - V->prevHead[0];
+            int64_t dy = hy - V->prevHead[1];
+            int64_t dz = hz - V->prevHead[2];
+            int32_t dist = (int32_t)llround(sqrt((double)dx * dx +
+                                                 (double)dy * dy +
+                                                 (double)dz * dz));
+            V->mvSpd = R2_MUL(dist, R2_Q12(30.0));
+        }
+        V->prevHead[0] = hx; V->prevHead[1] = hy; V->prevHead[2] = hz;
+        V->hasPrevHead = 1;
+    }
     /* --- button edge + mode selection (vcPreSetDataInVC_WORK +
      * vcRetCurCamMvType): SELF_VIEW when (extraViewCtrl && !held) ||
      * (!extraViewCtrl && held), gated by extraViewMode + the zone       */
@@ -14614,12 +15421,42 @@ static void r2view_tick(R2View *V, const CamPose *body) {
         V->selfViewTimer += R2_DT_Q12;
 
         /* --- ideal camera position (vcMakeIdealCamPosByHeadPos,
-         * extraViewMode ON branch; engine y-down +0.07 -> y-up -0.07)   */
+         * extraViewMode ON branch; engine y-down +0.07 -> y-up -0.07).
+         * v48 (A22-F3): the ENTRY tick takes the WARP_WATCH branch —
+         * vcSetFlagsByCamMvType sets VC_WARP_WATCH_F on the press edge
+         * (vc_main.c:769-786, extraViewMode-gated) alongside the every-
+         * tick VC_WARP_CAM_F|VC_WARP_CAM_TGT_F (:761), and the ideal
+         * builder's FIRST branch is
+         *   if (w_p->flags & VC_WARP_WATCH_F) {
+         *       ideal_pos->vx = w_p->chara_pos.vx;   root xz
+         *       ideal_pos->vy = w_p->chara_top_y;    top height
+         *       ideal_pos->vz = w_p->chara_pos.vz;
+         *       return;  }                 (vc_main.c:1929-1935)
+         * the character ROOT xz at the TOP height (top = root + 1.7m:
+         * hero_top_y = position.vy + Q12(-1.7f), vc_util.c:132) — NO
+         * 0.18m head offset, NO 140deg, NO 0.07 y. WARP_CAM/CAM_TGT then
+         * glue camPos/camTgt to it for this tick (vcRenewalCamData,
+         * vc_main.c:2565-2572), so the entry-tick watch pipeline
+         * (vcMixSelfViewEffectToWatchTgtPos reads cam_pos, vc_main.c:
+         * 1509-1511) and the WARP_WATCH angle snap below all run from
+         * this first-person-at-the-top position; the flag clears at the
+         * end of the tick (vc_main.c:360) and the camera moves to
+         * head+0.18m@140deg from tick 2. In this PoC's camera-stands-in-
+         * for-player model the anchor IS the head/top and the root xz
+         * equals the anchor xz (the farWatch mapping below models
+         * chara_pos.xz == head.xz), so the warp position is the anchor
+         * itself.                                                        */
         int32_t camAng = eyeYaw + R2_HEAD_ANG;
         int32_t ideal[3];
-        ideal[0] = head[0] + R2_MUL(sh_math_sin(camAng), R2_HEAD_DIST);
-        ideal[2] = head[2] + R2_MUL(sh_math_cos(camAng), R2_HEAD_DIST);
-        ideal[1] = head[1] - R2_HEAD_Y;
+        if (edge) {
+            ideal[0] = head[0];
+            ideal[1] = head[1];
+            ideal[2] = head[2];
+        } else {
+            ideal[0] = head[0] + R2_MUL(sh_math_sin(camAng), R2_HEAD_DIST);
+            ideal[2] = head[2] + R2_MUL(sh_math_cos(camAng), R2_HEAD_DIST);
+            ideal[1] = head[1] - R2_HEAD_Y;
+        }
 
         /* SELF_VIEW sets WARP_CAM/CAM_TGT every tick: hard glue         */
         V->camPos[0] = V->camTgt[0] = ideal[0];
@@ -14713,6 +15550,22 @@ static void r2view_tick(R2View *V, const CamPose *body) {
          * the effect-rate-blended watch params)                         */
         int32_t waX = R2_WA_X_D + R2_MUL(R2_WA_X_SV - R2_WA_X_D, V->effRate);
         int32_t waY = R2_WA_Y_D + R2_MUL(R2_WA_Y_SV - R2_WA_Y_D, V->effRate);
+        /* v43 (E18-5): the engine's chara_mv_spd yaw-accel add
+         * (vcGetUseWatchAndCamMvParam, vc_main.c:2550-53), applied AFTER
+         * the blend exactly like the engine:
+         *   add = clamp(Q12_MULT_PRECISE(mv_spd, Q12_ANGLE(360)),
+         *               Q12_ANGLE(0), Q12_ANGLE(720))
+         * Q12_ANGLE(360)=4096 -> the multiply is the identity on the Q12
+         * speed; the clamp bounds it to [0, 8192]. The yaw deceleration
+         * (ang_accel_y*3.0, R2_WDEC_Y) derives from the POST-add value
+         * (vcAdjCamOfsAngByOfsAngSpd reads vcWatchMvPrmSt).               */
+        {
+            int32_t addAngAccelY = R2_MUL(V->mvSpd, fx_q12_angle(360.0f));
+            if (addAngAccelY < 0) addAngAccelY = 0;                       /* Q12_ANGLE(0)   */
+            if (addAngAccelY > fx_q12_angle(720.0f))
+                addAngAccelY = fx_q12_angle(720.0f);
+            waY += addAngAccelY;
+        }
         int32_t wsX = R2_WS_X_D + R2_MUL(R2_WS_X_SV - R2_WS_X_D, V->effRate);
         int32_t wsY = R2_WS_Y_D + R2_MUL(R2_WS_Y_SV - R2_WS_Y_D, V->effRate);
         V->viewSpdY = r2_ang_spd_to_target(V->viewSpdY, V->viewYaw, tgtYaw,
@@ -14769,11 +15622,15 @@ static CamPose r2view_pose(const R2View *V, const CamPose *body) {
      * the rotational content is preserved, the pure-shear part is
      * sub-GTE-pixel at 320x224 (documented approximation)              */
     if (V->active) {
+        /* v43 (E18-3): the m-row argument PAIRS corrected to the engine's
+         * vcSetDataToVwSystem call sites (vc_main.c:2915-2920):
+         * m00=(70deg,180deg) m01=(60deg,-160deg) m02=(60deg,80deg)
+         * m10=(50deg,50deg)  m11=(180deg,40deg)  m12=(65deg,-170deg)  */
         int32_t m00 = r2_cam_mat_noise(12, R2_NS_M00, R2_NS_M01, t);
-        int32_t m01 = r2_cam_mat_noise(12, R2_NS_M02, R2_NS_M10, t);
+        int32_t m01 = r2_cam_mat_noise(12, R2_NS_M02, R2_NS2_VY, t);
         int32_t m02 = r2_cam_mat_noise(12, R2_NS_M02, R2_NS2_VX, t);
-        int32_t m10 = r2_cam_mat_noise(12, R2_NS_M10, R2_NS_M11, t);
-        int32_t m11 = r2_cam_mat_noise(12, R2_NS_M11, R2_NS2_VY, t);
+        int32_t m10 = r2_cam_mat_noise(12, R2_NS_M10, R2_NS_M10, t);
+        int32_t m11 = r2_cam_mat_noise(12, R2_NS_M01, R2_NS1_VY, t);
         int32_t m12 = r2_cam_mat_noise(12, R2_NS_M12, R2_NS_M1X, t);
         right[0] += (double)m00 / 4096.0;
         right[1] += (double)m01 / 4096.0;
@@ -14855,7 +15712,10 @@ typedef enum {
     K_TAB, K_UP, K_DOWN, K_ENTER, K_LBRK, K_RBRK, K_COMMA, K_PERIOD,
     K_H, K_D0, K_D1, K_D2, K_D3, K_D4, K_D5, K_D6, K_D7, K_D8, K_D9,
     /* v23: the R2 (self) view — the view button + the feature toggle */
-    K_VIEW, K_R2TOGGLE
+    K_VIEW, K_R2TOGGLE,
+    /* v49 (task 3): the runtime USER LIGHT — camera-like movement + aim */
+    K_LFWD, K_LBACK, K_LLEFT, K_LRIGHT, K_LUP, K_LDOWN,
+    K_LPITUP, K_LPITDN, K_LYAWL, K_LYAWR
 } LiveKey;
 
 /* v20 — THE ENGINE 30 Hz TICK LOCKSTEP (the night+flashlight FLICKER fix).
@@ -14944,7 +15804,22 @@ static CamPose live_advance(LiveApp *A, double dt) {
     CamPose cp = live_current_pose(A);          /* the held tick state */
     int fired = 0;
     while (!A->play.paused && A->tickPending >= tickDt - 1e-9) {
-        A->tickPending -= tickDt;
+        /* v43 (E-09-4): a >= 2-tick catch-up in one output frame is the
+         * engine's V_BLANKS_MAX stall frame (game_main.c:133-136, 284-292):
+         * ONE update with g_DeltaTime = Q12_MULT(1052, 1063) = 273 — the
+         * snow drift draw, spawn gate, stateStep, weatherTick and the
+         * water pair advance ONCE, while the camera/sample and playback
+         * advance the full 2 tick-times (the clamp bound above). The old
+         * code fired two 1x ticks here: 2x the RNG stream position, 2x
+         * the rest ages (stateStep), 2x the D_800AFDAC water phase and
+         * 2x the ripple-RNG draws — diverging from the engine's stall
+         * model AND the port's own deterministic --shot path.
+         * GATE RESOLUTION vs V42 D-2 (the PR's naive form predated it):
+         * the duration-boundary clamp is wrapped AROUND stepT — a
+         * clamped (partial) step is no longer a full stall frame
+         * (stall = 0), and the epsilon hold still fires NOTHING. */
+        int stall = (A->tickPending >= 2.0 * tickDt - 1e-9);
+        double stepT = stall ? 2.0 * tickDt : tickDt;
         /* V42 D-2 (PR #67, gate RE-DERIVED — the branch's own form hung
          * the window: clamping the FRAME dt to a boundary epsilon left
          * dt > 0 with no tick able to fire, and live_done's exact >=
@@ -14958,13 +15833,14 @@ static CamPose live_advance(LiveApp *A, double dt) {
          * state holds at the last whole tick = exactly what --shot
          * renders) and the epsilon-tolerant live_done below ends the
          * run. All three window loops (win32/sdl/x11) run through HERE. */
-        double tdt = tickDt;
-        if (A->duration > 0 && A->play.sessionT + tdt > A->duration) {
-            tdt = A->duration - A->play.sessionT;
-            if (tdt <= 1e-12) break;   /* the boundary epsilon: hold   */
+        if (A->duration > 0 && A->play.sessionT + stepT > A->duration) {
+            stepT = A->duration - A->play.sessionT;
+            if (stepT <= 1e-12) break;   /* the boundary epsilon: hold   */
+            stall = 0;   /* a clamped partial step is not a stall frame  */
         }
         fired = 1;
-        cp = playback_step(&A->play, A->track, tdt,
+        A->tickPending -= stepT;
+        cp = playback_step(&A->play, A->track, stepT,
                            A->sc->bounds.diag, &A->ovr);
         /* v23: the engine SELF_VIEW tick (vcExecCamera discipline — one
          * camera update per game tick, on the same tick as the env/light
@@ -14976,7 +15852,14 @@ static CamPose live_advance(LiveApp *A, double dt) {
         if (A->r2.active || A->r2.returning)
             cp = r2view_pose(&A->r2, &cp);
         if (A->snow.enabled) {
-            if (A->ovr.useFixed)
+            if (stall) {
+                /* ONE dt=273 particle update (the engine's stall frame) */
+                if (A->ovr.useFixed)
+                    snow_sync_live_stall(&A->snow, A->play.t, A->ovr.eye,
+                                         v3_norm(v3_sub(A->ovr.target, A->ovr.eye)));
+                else
+                    snow_sync_live_stall(&A->snow, A->play.t, cp.pos, cp.forward);
+            } else if (A->ovr.useFixed)
                 snow_sync_live(&A->snow, A->play.t, A->ovr.eye,
                                v3_norm(v3_sub(A->ovr.target, A->ovr.eye)),
                                A->track, &A->ovr);
@@ -14994,7 +15877,7 @@ static CamPose live_advance(LiveApp *A, double dt) {
          * engine's own discipline (one Map_WorldObjectsUpdate + the
          * LensFlare/water pass per game tick) is now mirrored per FIRED
          * tick, in the same order as the shot path's fast-forward. */
-        sh1x_anims_sync((Sh1x *)&A->R.sc->sh1x, A->play.sessionT);
+        sh1x_anims_sync((Sh1x *)&A->R.sc->sh1x, A->play.sessionT, &cp.pos);
         fx_water_scroll_sync(&A->R.sc->sh1x, &A->env, &cp); /* v34: scroll */
         sh1x_water_ripple_tick((Sh1x *)&A->R.sc->sh1x, &A->env, &cp); /* v37 */
         sh1x_waterfall_tick((Sh1x *)&A->R.sc->sh1x, &cp,
@@ -15021,7 +15904,7 @@ static CamPose live_advance(LiveApp *A, double dt) {
      * live water/RNG streams by one step vs the shot path.) */
     if (!A->animsPrimed) {
         A->animsPrimed = 1;
-        sh1x_anims_sync((Sh1x *)&A->R.sc->sh1x, A->play.sessionT);
+        sh1x_anims_sync((Sh1x *)&A->R.sc->sh1x, A->play.sessionT, &cp.pos);
     }
     return cp;
 }
@@ -15036,7 +15919,7 @@ static void live_render(LiveApp *A) {
         snow_sync_live(&A->snow, A->play.t, cp.pos, cp.forward,
                        A->track, A->ovr.useFixed ? &A->ovr : NULL);
     sh_env_sync_live(&A->env, A->play.t, cp.pos, cp.q, 0);
-    sh1x_anims_sync((Sh1x *)&A->R.sc->sh1x, A->play.sessionT); /* v38: session clock —
+    sh1x_anims_sync((Sh1x *)&A->R.sc->sh1x, A->play.sessionT, &cp.pos); /* v38: session clock —
      * dt=0 at the held sessionT: a no-op state hold (same discipline as the
      * live_advance boot prime) */
     /* v40 audit (C-F3): the WATER pair is NOT called here. live_render's
@@ -15550,6 +16433,41 @@ static void live_draw_overlay(LiveApp *A) {
 /* returns 1 when the app should quit. v23: `down` carries the key state
  * (1 = key-down event, 0 = key-up). Everything except the R2-view held
  * keys acts on the DOWN edge only — identical behavior to v22.          */
+/* v49 (task 3 — the USER PROGRAMMABLE LIGHT): the runtime camera-like
+ * movement. The light moves in ALL the ways the camera can — I/K fwd/
+ * back, J/O left/right, U/C up/down — in the CAMERA frame (the anchor's
+ * own frame); T/G aim the pitch, A/E the yaw (the ANGLE DISTINCTION).
+ * The first nudge converts the current anchor into a free-world light
+ * (engine mode 1) AT the anchor's own position — the light then holds a
+ * world pose while the camera keeps moving, exactly like the authored
+ * follow:'world' surface (a later nudge keeps nudging the world pose).
+ * F toggles the flashlight (Game_FlashlightToggle); day modes stay
+ * inert (the verbatim Spot gates).                                       */
+static void user_light_nudge(LiveApp *A, int axis, float dir) {
+    CamPose cp = playback_current_pose(&A->play, A->track, &A->ovr);
+    v3 X, Y, Z;
+    quat_axes(cp.q, &X, &Y, &Z);
+    float wp[3];
+    sh_user_light_world_pos(cp.pos, cp.q, wp);
+    const float st = 0.25f * dir;   /* 0.25 m per press (OS key-repeat = held) */
+    if (axis == 0) { wp[0] += X.x * st; wp[1] += X.y * st; wp[2] += X.z * st; }
+    else if (axis == 1) { wp[0] += Y.x * st; wp[1] += Y.y * st; wp[2] += Y.z * st; }
+    else { wp[0] -= Z.x * st; wp[1] -= Z.y * st; wp[2] -= Z.z * st; }  /* fwd = -Z */
+    g_userLightMode = 1;             /* engine mode 1: the free-world light  */
+    g_userLightLine = 0;             /* a nudge overrides the LINE travel    */
+    g_userLightWorld[0] = wp[0];
+    g_userLightWorld[1] = wp[1];
+    g_userLightWorld[2] = wp[2];
+    printf("[userlight] world pos now %.2f, %.2f, %.2f (mode 1)\n",
+           wp[0], wp[1], wp[2]);
+}
+static void user_light_aim(int axis, float d) {
+    g_userLightHasRot = 1;           /* the first press AUTHORS the aim      */
+    g_userLightRot[axis] += d;       /* pitch deg (0) / yaw deg (1)          */
+    printf("[userlight] rot now pitch %.1f, yaw %.1f\n",
+           g_userLightRot[0], g_userLightRot[1]);
+}
+
 static int live_action(LiveApp *A, LiveKey k, int down) {
     /* --- the R2 (self) view held keys: tracked on BOTH edges —
      * the engine reads buttonFlags.held every tick (vcPreSetDataInVC_WORK) */
@@ -15578,6 +16496,20 @@ static int live_action(LiveApp *A, LiveKey k, int down) {
         return 0;                        /* all other keys: DOWN edge only */
     }
     switch (k) {
+    /* v49 (task 3): the runtime USER LIGHT keys — the movement in the
+     * camera frame (I/K fwd/back, J/O left/right, U/C up/down) + the
+     * aim angle distinction (T/G pitch, A/E yaw). Down-edge only (the
+     * generic !down early-out above already enforces it).             */
+    case K_LFWD:   user_light_nudge(A, 2, +1.0f); break;
+    case K_LBACK:  user_light_nudge(A, 2, -1.0f); break;
+    case K_LLEFT:  user_light_nudge(A, 0, -1.0f); break;
+    case K_LRIGHT: user_light_nudge(A, 0, +1.0f); break;
+    case K_LUP:    user_light_nudge(A, 1, +1.0f); break;
+    case K_LDOWN:  user_light_nudge(A, 1, -1.0f); break;
+    case K_LPITUP: user_light_aim(0, +5.0f); break;
+    case K_LPITDN: user_light_aim(0, -5.0f); break;
+    case K_LYAWL:  user_light_aim(1, +5.0f); break;
+    case K_LYAWR:  user_light_aim(1, -5.0f); break;
     case K_QUIT: return 1;
     case K_ESC:
         /* v9: when the mode browser is open, ESC closes it (the classic
@@ -15589,6 +16521,7 @@ static int live_action(LiveApp *A, LiveKey k, int down) {
         A->play.t = 0;
         A->play.sessionT = 0;         /* v10: restart the session clock too */
         A->tickPending = 0;           /* v20: restart the tick grid too      */
+        g_userLightLineT = 0.0;       /* v49: the LINE light restarts too    */
         /* v41-ENGFX bug 3a (ported from PoC 5b14c00): the room-reload
          * weather sync — the engine's WeatherParticle_SystemUpdate case 0
          * / NO_VALUE arm (particle.c:396-418, run at every map load):
@@ -15599,6 +16532,7 @@ static int live_action(LiveApp *A, LiveKey k, int down) {
          * restarted session than any fresh boot. */
         A->snow.weatherTick = 0;
         A->snow.transitionLock = 1;
+        A->snow.weatherBits = g_bootWeatherBits;  /* v48 (A23-F1): the STASHED BOOT recipe — the W key's runtime event re-packs E0CB0 (particle_environment_set(2,127), particle.c:3811/3815-3820), so the live bits are NOT the boot recipe; the engine's room reload re-derives E0CB0 from the map header (load_screen.c:36) — the re-sync must read the STASH, not the mutated bits */
         A->snow.weatherCurrent = A->snow.weatherBits;
         A->snow.weatherTarget = A->snow.weatherBits;
         A->snow.weatherSettings = (uint16_t)(A->snow.weatherBits >> 12);
@@ -15613,17 +16547,26 @@ static int live_action(LiveApp *A, LiveKey k, int down) {
             else
                 A->snow.snowDensitySel = 0;
         }
-        snow_reset(&A->snow);            /* re-seed snow (seek semantics) */
-        /* V42 D-1: re-arm the boot/camdat weatherTarget cross-fade — the
-         * fresh boot's sharedFunc_800D0B18 (CLI --weather-target > the
-         * camdat track/env weatherTarget) was never re-applied here, so
-         * the restarted session locked at the room recipe (restart !=
-         * fresh). The boot order is recipe load THEN the event arm —
-         * mirrored here (the re-sync above, then this). transitionLock
-         * was just set to 1, so the arm is accepted exactly like the
-         * boot call. */
+        /* V42 D-1 (V45 audit W7: MOVED ABOVE the re-seed): re-arm the
+         * boot/camdat weatherTarget cross-fade — the fresh boot's
+         * sharedFunc_800D0B18 (CLI --weather-target > the camdat
+         * track/env weatherTarget) was never re-applied here, so the
+         * restarted session locked at the room recipe (restart !=
+         * fresh). transitionLock was just set to 1, so the arm is
+         * accepted exactly like the boot call. W7's order fix: the
+         * boot's sequence is recipe load, THEN the event arm, THEN the
+         * WeatherParticle_SnowInit re-seed — K_R had the re-seed FIRST,
+         * so its warm-up ran on the ROOM recipe's settings byte while
+         * a fresh boot's warm-up runs on the post-arm byte. */
         if (g_bootWeatherTarget >= 0)
             sh_particle_weather_target_set(&A->snow, g_bootWeatherTarget);
+        /* V45 audit W7: re-seed with the BOOT seed, not the default — the
+         * fresh boot's final warm-up runs snow_reset_seed(&A.snow,
+         * snowSeed), so --snow-seed N must drive the restart warm-up too.
+         * (v48 audit A3-1: the rain world-anchor zeroing lives inside
+         * snow_reset_seed — the seek re-sim needed the same
+         * fresh-session first tick.) */
+        snow_reset_seed(&A->snow, g_bootSnowSeed);
         /* v41-ENGFX bug 3b (ported): the fresh-session flashlight fade —
          * the restart carried the env's converged flashlightIntensity
          * (4096) while a fresh session ramps 0->4096; mirror the boot. */
@@ -15633,6 +16576,7 @@ static int live_action(LiveApp *A, LiveKey k, int down) {
             Quat q0 = quat_id();
             v3 p0 = { 0.0f, 0.0f, 0.0f };
             sh_env_tick(&A->env, 0, p0, q0);   /* the boot dt=0 prime */
+            A->env.ticksDone = 0;   /* v43 (E-07-1): the engine's dt=0 frames are not 30Hz grid slots */
         }
         sh1x_anims_reset((Sh1x *)&A->R.sc->sh1x); /* v38: drivers fresh    */
         sh1x_anims_bind_invalidate();      /* v38-audit-A1: re-seed drvr 9 */
@@ -15646,6 +16590,30 @@ static int live_action(LiveApp *A, LiveKey k, int down) {
                                           * six-globals list also resets
                                           * the flare easing accumulator
                                           * (restart == fresh session) */
+        /* V45 audit (E-9): the R2 (self) view RUNTIME state — the restart
+         * == fresh-session contract extends to the R2 feature (the engine
+         * has no R key; the PoC's R models the v38/v41-E2/E3 contract, see
+         * the note above). The carried state broke it two ways: (1) the
+         * entry edge (WARP_WATCH, vc_main.c:769-787) never re-fired
+         * post-restart — active stayed 1 — so the view resumed mid-
+         * dynamics instead of the fresh entry snap, and (2) selfViewTimer
+         * — the noise timebase of r2view_pose's vcSetDataToVwSystem angle
+         * noise — kept counting across the restart, so every post-restart
+         * frame carried the pre-restart noise phase (t=1.97+3.00 vs a
+         * fresh 3.00 s at the boundary). Reset the RUNTIME state via the
+         * boot reset; the session's CONFIG (featureOn / viewCtrl /
+         * viewKey — the --r2view/--no-r2view + Y toggle, --r2ctrl, --r2-key
+         * CLI choices) survives R exactly like the env's user choices
+         * (pair/night/flashlight, the note at the flashlight arm above). */
+        {
+            int cfgFeatureOn = A->r2.featureOn;
+            int cfgViewCtrl = A->r2.viewCtrl;
+            char cfgViewKey = A->r2.viewKey;
+            r2view_reset(&A->r2);
+            A->r2.featureOn = cfgFeatureOn;
+            A->r2.viewCtrl = cfgViewCtrl;
+            A->r2.viewKey = cfgViewKey;
+        }
         /* v41 (audit A-3): the room-reload WorldObjectsInit — the engine
          * re-enters Map_WorldObjectsInit -> func_800CB0D8 on every map
          * load, so the restart re-runs the ripple spawn AFTER the fresh
@@ -15720,9 +16688,9 @@ static int live_action(LiveApp *A, LiveKey k, int down) {
                A->R.dither ? "ON" : "OFF");
         break;
     case K_W:
-        /* v12 WEATHER CYCLE — the engine's authentic runtime weather switch
-         * (sharedFunc_800D0B18), now with the FULL argument range 0..8
-         * exposed (v8 only cycled 2/6/0):
+        /* v12 WEATHER CYCLE — the engine's authentic runtime weather EVENT,
+         * now with the FULL argument range 0..8 exposed (v8 only cycled
+         * 2/6/0):
          *   0 = none                     5 = rain, wind 0
          *   1 = snow, wind 0             6 = rain, wind 1 (the game's own
          *   2 = snow, wind 1                 map0_s00/map6_s00 event arg)
@@ -15730,20 +16698,45 @@ static int live_action(LiveApp *A, LiveKey k, int down) {
          *   4 = snow, wind 3             8 = rain, wind 3
          * Wind >= 2 activates the engine's wind machinery (the ramped
          * g_Particle_SpeedX/Z + the windy rest drift + the Unk1 ramp).
-         * v12 VERBATIM (D6): D0B18 is GATED by g_SysWork.field_234A — the
-         * engine's transition lock (particle.c:3870): a switch is REFUSED
-         * while a 512-tick sine cross-fade is in flight; the lock re-arms
-         * at completion (line 551). The count thresholds keep the verbatim
-         * snow-spawn-type (800DD592) switching live during the ramps. */
+         * v43 (E-09-5): the engine's runtime switch is the FULL map6_s00
+         * recipe (map6_s00.c:184-186), NOT D0B18 alone:
+         *   Particle_EnvironmentSet(2, 127);            — re-pack the snow recipe
+         *   WeatherParticle_SystemUpdate(0, mapIdx, 0); — the case-0 re-sync arm
+         *   sharedFunc_800D0B18_0_s00(6);               — the target cross-fade
+         * The case-0 arm (particle.c:188-423; arg3 = 0, NOT NO_VALUE, so
+         * NO field_2349 header re-read): E32D4 = 30, DD592 = 1, DD598 = 0,
+         * PrevPosition = 0, field_234A = true (the lock RE-ARMS — an
+         * in-flight cross-fade is aborted engine-true), E0CB8 = E0CB0>>12,
+         * E0CB6 = E0CB4 = E0CB0, then WeatherParticle_SnowInit re-runs
+         * (the 150-iteration warm-up). Chained presses rebuild
+         * weatherTarget from the RE-SYNCED recipe bits (the D0B18 alchemy
+         * (old|temp)*8 & 0xE38 is old-dependent) and the cross-fade
+         * starts from the fresh warm-up, exactly like the engine's event.
+         * v12 VERBATIM (D6): D0B18 itself is GATED by g_SysWork.field_234A
+         * (particle.c:3870) — always true here (the case-0 arm re-armed it
+         * one call earlier, exactly like map6_s00.c:185-186). The count
+         * thresholds keep the verbatim snow-spawn-type (800DD592)
+         * switching live during the ramps. */
         A->snow.nextWeather = (A->snow.nextWeather + 1) % 9;
+        particle_environment_set(&A->snow, 2, 127);   /* map6_s00.c:184   */
+        A->snow.rainGravity = 30;      /* E32D4 (case-0 arm, particle.c:388) */
+        A->snow.snowTypeEnable = 1;    /* DD592 (case-0 arm, particle.c:393) */
+        A->snow.weatherTick = 0;       /* DD598 = 0 (particle.c:402)         */
+        A->snow.transitionLock = 1;    /* field_234A = true (particle.c:409) */
+        A->snow.weatherSettings = (uint16_t)(A->snow.weatherBits >> 12); /* E0CB8 */
+        A->snow.weatherCurrent = A->snow.weatherBits;   /* E0CB6 = E0CB0  */
+        A->snow.weatherTarget = A->snow.weatherBits;    /* E0CB4 = E0CB0  */
+        snow_reset(&A->snow);          /* PrevPosition=0 + SnowInit (406-418) */
         if (sh_particle_weather_target_set(&A->snow, A->snow.nextWeather)) {
             static const char *WNAMES[9] = {
                 "NONE", "SNOW (wind 0)", "SNOW (wind 1)", "SNOW (wind 2)",
                 "SNOW (wind 3)", "RAIN (wind 0)", "RAIN (wind 1)",
                 "RAIN (wind 2)", "RAIN (wind 3)"
             };
-            printf("[weather] sharedFunc_800D0B18(%d) -> %s (sine cross-fade, "
-                   "512 ticks; 800DD592 type switch live)\n",
+            printf("[weather] map6_s00 event recipe: EnvironmentSet(2,127) + "
+                   "case-0 re-init + SnowInit, then sharedFunc_800D0B18(%d) "
+                   "-> %s (sine cross-fade, 512 ticks; 800DD592 type switch "
+                   "live)\n",
                    A->snow.nextWeather, WNAMES[A->snow.nextWeather]);
         } else {
             printf("[weather] REFUSED — transition lock (g_SysWork.field_234A "
@@ -16027,6 +17020,17 @@ static LRESULT CALLBACK live_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
         case VK_OEM_PERIOD: k = K_PERIOD; break;
         case 'H':         k = K_H;     break;   /* HUD toggle */
         case 'Y':         k = K_R2TOGGLE; break; /* v23: extraViewMode */
+        /* v49 (task 3): the runtime USER LIGHT keys */
+        case 'I':         k = K_LFWD;   break;  /* light fwd   */
+        case 'K':         k = K_LBACK;  break;  /* light back  */
+        case 'J':         k = K_LLEFT;  break;  /* light left  */
+        case 'O':         k = K_LRIGHT; break;  /* light right */
+        case 'U':         k = K_LUP;    break;  /* light up    */
+        case 'C':         k = K_LDOWN;  break;  /* light down  */
+        case 'T':         k = K_LPITUP; break;  /* aim pitch up   */
+        case 'G':         k = K_LPITDN; break;  /* aim pitch down */
+        case 'A':         k = K_LYAWL;  break;  /* aim yaw left   */
+        case 'E':         k = K_LYAWR;  break;  /* aim yaw right  */
         case '0': case '1': case '2': case '3': case '4':
         case '5': case '6': case '7': case '8': case '9':
             k = (LiveKey)(K_D0 + ((int)wp - '0'));
@@ -16182,6 +17186,17 @@ static LiveKey sdl_key(const unsigned char *ev) {
     if (sym == '.') return K_PERIOD;
     if (sym == 'h' || sym == 'H') return K_H;
     if (sym == 'y' || sym == 'Y') return K_R2TOGGLE;  /* v23: extraViewMode */
+    /* v49 (task 3): the runtime USER LIGHT keys */
+    if (sym == 'i' || sym == 'I') return K_LFWD;
+    if (sym == 'k' || sym == 'K') return K_LBACK;
+    if (sym == 'j' || sym == 'J') return K_LLEFT;
+    if (sym == 'o' || sym == 'O') return K_LRIGHT;
+    if (sym == 'u' || sym == 'U') return K_LUP;
+    if (sym == 'c' || sym == 'C') return K_LDOWN;
+    if (sym == 't' || sym == 'T') return K_LPITUP;
+    if (sym == 'g' || sym == 'G') return K_LPITDN;
+    if (sym == 'a' || sym == 'A') return K_LYAWL;
+    if (sym == 'e' || sym == 'E') return K_LYAWR;
     /* v23: the configurable view-button key (default 'V') */
     if (sym == (unsigned)g_r2_viewkey ||
         sym == (unsigned)(g_r2_viewkey + ('a' - 'A'))) return K_VIEW;
@@ -16391,6 +17406,17 @@ static LiveKey x11_key(unsigned long keysym) {
     if (keysym == '.') return K_PERIOD;
     if (keysym == 'h' || keysym == 'H') return K_H;
     if (keysym == 'y' || keysym == 'Y') return K_R2TOGGLE; /* v23: extraViewMode */
+    /* v49 (task 3): the runtime USER LIGHT keys */
+    if (keysym == 'i' || keysym == 'I') return K_LFWD;
+    if (keysym == 'k' || keysym == 'K') return K_LBACK;
+    if (keysym == 'j' || keysym == 'J') return K_LLEFT;
+    if (keysym == 'o' || keysym == 'O') return K_LRIGHT;
+    if (keysym == 'u' || keysym == 'U') return K_LUP;
+    if (keysym == 'c' || keysym == 'C') return K_LDOWN;
+    if (keysym == 't' || keysym == 'T') return K_LPITUP;
+    if (keysym == 'g' || keysym == 'G') return K_LPITDN;
+    if (keysym == 'a' || keysym == 'A') return K_LYAWL;
+    if (keysym == 'e' || keysym == 'E') return K_LYAWR;
     /* v23: the configurable view-button key (default 'V') */
     if (keysym == (unsigned long)g_r2_viewkey ||
         keysym == (unsigned long)(g_r2_viewkey + ('a' - 'A'))) return K_VIEW;
@@ -18079,6 +19105,15 @@ int main(int argc, char **argv) {
                    "  ESC quit | SPACE pause | R restart | +/- speed x0.125..x8\n"
                    "  Left/Right scrub 1s | N night/nightmare cycle | F flashlight\n"
                    "  M fog | B snow | P PSX-wobble | D dither | W weather | L lightning | S screenshot\n"
+                   "v49 USER PROGRAMMABLE LIGHT (task 3 — Harry's flashlight):\n"
+                   "  The default anchor is the ENGINE TRAILING CAMERA geometry\n"
+                   "  (the light = the player ~2.5 m ahead of the camera, the\n"
+                   "  verbatim -15 deg beam pitch) — the reflection fires.\n"
+                   "  I/K move fwd/back, J/O left/right, U/C up/down (camera\n"
+                   "  frame — moves in all the ways the camera can; the first\n"
+                   "  nudge freezes it into a free-world light) | T/G aim the\n"
+                   "  pitch, A/E the yaw (the ANGLE DISTINCTION) | F toggles\n"
+                   "  the flashlight (day modes stay inert — the Spot gates)\n"
                    "v23 R2 (self) view — the engine SELF_VIEW system:\n"
                    "  V (configurable --r2-key) hold = the view button; Y = Extra View\n"
                    "  Mode toggle; arrows = the restricted pan while engaged (head\n"
@@ -18634,6 +19669,26 @@ int main(int argc, char **argv) {
                 if (cd.lightAhead > 0.0f && !cd.lightFollow)
                     g_userLightMode = 2;
                 g_userLightAheadM = cd.lightAhead;
+                /* v49 (task 3): the LINE light — the camtrack twin's
+                 * travel (mode "line": start->end at speedMS, loopMode).
+                 * The authored world-light surface (follow world +
+                 * mode line) — the runtime pos comes from the shared
+                 * anchor's g_userLightLine branch (lightWorldPos twin).
+                 * The PoC previously DROPPED the line fields entirely. */
+                if (cd.lightLine && !g_userLightCLI) {
+                    g_userLightMode = 1;      /* the free-world carrier    */
+                    g_userLightLine = 1;
+                    g_userLightLineT = 0.0;   /* the travel clock restarts */
+                    memcpy(g_userLightLineStart, cd.lightLineStart,
+                           sizeof(float) * 3);
+                    memcpy(g_userLightLineEnd, cd.lightLineEnd,
+                           sizeof(float) * 3);
+                    g_userLightLineSpeedMS = cd.lightLineSpeedMS;
+                    g_userLightLineLoop = cd.lightLineLoop;
+                    g_userLightWorld[0] = cd.lightLineStart[0];
+                    g_userLightWorld[1] = cd.lightLineStart[1];
+                    g_userLightWorld[2] = cd.lightLineStart[2];
+                }
                 if (cd.hasLightRot) {
                     g_userLightHasRot = 1;
                     g_userLightRot[0] = cd.lightRot[0];
@@ -18659,6 +19714,18 @@ int main(int argc, char **argv) {
             g_userLightRot[0] = sc.sh1x.userLightRot[0];
             g_userLightRot[1] = sc.sh1x.userLightRot[1];
             g_userLightRot[2] = sc.sh1x.userLightRot[2];
+        }
+        /* v49: the Sh1x userLightOffset EXTRAs — the same fallback for the
+         * anchor's local offset (fx_light_anchor read sx directly pre-
+         * v49 and the mesh light ignored it; the unified ONE-light anchor
+         * resolves it ONCE here, engine->glTF flip (x,-y,-z) as the old
+         * anchor did). The EXTRAs stay the UNBIASED verbatim attribs on
+         * the GLB side; this is the consumer-side resolution.          */
+        if (!g_userLightHasOffset && sc.sh1x.hasUserLight) {
+            g_userLightHasOffset = 1;
+            g_userLightOffset[0] = sc.sh1x.userLightOffset[0];
+            g_userLightOffset[1] = -sc.sh1x.userLightOffset[1];
+            g_userLightOffset[2] = -sc.sh1x.userLightOffset[2];
         }
         sh_env_set_pair(&A.env, bootPair0, bootPair1);
         /* v9: mode-selection state — cursor at the boot pair; HUD default on */
@@ -18730,8 +19797,9 @@ int main(int argc, char **argv) {
     snow_init(&A.snow, &sc, track);
     /* v8: --weather N — the map-load recipe (Particle_EnvironmentSet(N,
      * field_16=1) + the SystemUpdate case-0 sync + SnowInitialize): the
-     * INSTANT boot weather. (The W key uses the runtime event recipe —
-     * sharedFunc_800D0B18 alone — with the sine cross-fade.)             */
+     * INSTANT boot weather. (The W key runs the engine's full runtime
+     * event recipe — map6_s00.c:184-186: EnvironmentSet(2,127) + the
+     * case-0 re-sync + SnowInit + D0B18 — with the sine cross-fade.)   */
     if (bootWeather >= 0 && bootWeather != 2) {
         particle_environment_set(&A.snow, bootWeather, 1);
         A.snow.weatherSettings = (uint16_t)(A.snow.weatherBits >> 12);
@@ -18797,6 +19865,8 @@ int main(int argc, char **argv) {
      * The full 0..8 argument range is exposed (the shipped game only ever
      * calls D0B18(6) — its snow->rain street event). */
     g_bootWeatherTarget = bootWeatherTarget;   /* V42 D-1: for the K_R re-arm */
+    g_bootSnowSeed = snowSeed;                 /* V45 audit W7: same for the seed */
+    g_bootWeatherBits = A.snow.weatherBits;    /* V48 A23-F1: the boot recipe for K_R */
     if (bootWeatherTarget >= 0) {
         if (sh_particle_weather_target_set(&A.snow, bootWeatherTarget)) {
             printf("[weather] boot sharedFunc_800D0B18(%d) — sine cross-fade "
@@ -18818,6 +19888,16 @@ int main(int argc, char **argv) {
         Quat q0 = quat_id();
         v3 p0 = {0, 0, 0};
         sh_env_tick(&A.env, 0, p0, q0);
+        /* v43 (E-07-1): the engine's dt=0 frames are NOT 30Hz grid slots
+         * (game_sys_states.c:121 forces g_DeltaTime=0 on the non-Gameplay
+         * load/cutscene frames; every Gameplay frame pairs one dt=136
+         * WorldEnv_Update with one particle update, game_sys_states.c:167,
+         * 171). Keep the prime's dt=0 side effects but stop it consuming
+         * slot 1: the first dt=136 env tick fires at t=1/30 exactly like
+         * the snow grid and the shot paths. The t=0 light pose comes from
+         * sh_env_sync_live's ticksDone==0 boot-frame call with the REAL
+         * camera.                                                          */
+        A.env.ticksDone = 0;
     }
     printf("engine env: pair {%d,%d}%s%s\n"
            "  fogColor=(%d,%d,%d) fogDistance=%.1fm tintEff=(%d,%d,%d) wLI=%.2f\n"
@@ -18976,11 +20056,18 @@ int main(int argc, char **argv) {
                     snow_sync_live(&Ss, P.t, cp.pos, cp.forward, track, NULL);
             }
             sh_env_sync_live(&Es, P.t, cp.pos, cp.q, 0);
-            sh1x_anims_sync((Sh1x *)&R.sc->sh1x, tSim);  /* v38: the session clock (the phase wraps) */
+            /* v43 (E-19/20-1): the four per-tick calls run AFTER the
+             * tSim advance — POST-advance, exactly like live_advance
+             * (playback_step bumps sessionT FIRST; the frame drawn at
+             * the end of iteration k holds the state after the k-th
+             * update, game_main.c:193-199). The old PRE-increment pass
+             * left the shot anims one tick behind the camera on every
+             * --shot render.                                             */
+            tSim += tickDt;
+            sh1x_anims_sync((Sh1x *)&R.sc->sh1x, tSim, &cp.pos);  /* v38: the session clock (the phase wraps) */
             fx_water_scroll_sync(&R.sc->sh1x, &Es, &cp); /* v34: scroll per tick */
             sh1x_water_ripple_tick((Sh1x *)&R.sc->sh1x, &Es, &cp); /* v37: ripple walk per tick */
             sh1x_waterfall_tick((Sh1x *)&R.sc->sh1x, &cp, tSim); /* v39 */
-            tSim += tickDt;
             haveCp = 1;
         }
         if (!haveCp) {
@@ -18990,7 +20077,7 @@ int main(int argc, char **argv) {
         }
         if (Vr.active || Vr.returning) cp = r2view_pose(&Vr, &cp);
         sh_env_sync_live(&Es, P.t, cp.pos, cp.q, 0);
-        sh1x_anims_sync((Sh1x *)&R.sc->sh1x, tSim - tickDt); /* v38: hold at the last synced tick */
+        sh1x_anims_sync((Sh1x *)&R.sc->sh1x, tSim, &cp.pos); /* v43 (E-19/20-1): hold at the final session time (the in-loop call is post-advance, live parity) */
         Frame fb2; frame_alloc(&fb2, w, h);
         render_frame(&fb2, &R, &cp);
         /* THE RESTRICTION PROOF (all values from the verbatim pipeline) */
@@ -19151,11 +20238,15 @@ int main(int argc, char **argv) {
                     snow_sync_live(&Ss, P.t, cp.pos, cp.forward, track, NULL);
             }
             sh_env_sync_live(&Es, P.t, cp.pos, cp.q, 0);
-            sh1x_anims_sync((Sh1x *)&R.sc->sh1x, tSim);  /* v38: the session clock (the phase wraps) */
+            /* v43 (E-19/20-1): the four per-tick calls run AFTER the
+             * tSim advance — POST-advance (the old PRE-increment pass
+             * left the shot anims one tick behind the camera: k ticks of
+             * camera, k-1 of anims).                              */
+            tSim += tickDt;
+            sh1x_anims_sync((Sh1x *)&R.sc->sh1x, tSim, &cp.pos);  /* v38: the session clock (the phase wraps) */
             fx_water_scroll_sync(&R.sc->sh1x, &Es, &cp); /* v34: scroll per tick */
             sh1x_water_ripple_tick((Sh1x *)&R.sc->sh1x, &Es, &cp); /* v37: ripple walk per tick */
             sh1x_waterfall_tick((Sh1x *)&R.sc->sh1x, &cp, tSim); /* v39 */
-            tSim += tickDt;
             haveCp = 1;
         }
         if (!haveCp)
@@ -19168,7 +20259,7 @@ int main(int argc, char **argv) {
          * also covers the phase wrap/edge cases where the pose should be
          * re-read from the current phase rather than the stepped one      */
         sh_env_sync_live(&Es, P.t, cp.pos, cp.q, 0);
-        sh1x_anims_sync((Sh1x *)&R.sc->sh1x, tSim - tickDt); /* v38: hold at the last synced tick */
+        sh1x_anims_sync((Sh1x *)&R.sc->sh1x, tSim, &cp.pos); /* v43 (E-19/20-1): hold at the final session time (the in-loop call is post-advance, live parity) */
         render_frame(&fb, &R, &cp);
         char out[1024];
         snprintf(out, sizeof(out), "%s/%s", outdir, shots[i].file);
