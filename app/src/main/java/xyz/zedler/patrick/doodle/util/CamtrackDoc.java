@@ -37,7 +37,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * domains with per-type defaults, and the bounds-flag RECONSTRUCTION rules
  * (arcBounds/yawBounds/pitchBounds exist only as min/max pairs in JSON).
  * Invalid tracks (unknown type, or a curve/polyline with fewer than 2
- * usable anchors) are DROPPED exactly like both reference implementations,
+ * RAW points[] entries) are DROPPED exactly like both reference implementations,
  * so the document's track indices line up with the engine's own
  * {@code --track N} indexing.</p>
  *
@@ -253,7 +253,13 @@ public final class CamtrackDoc {
           return new String[]{LOOK_PATH, LOOK_LAZY, LOOK_CENTER, LOOK_POINT,
               LOOK_FIXED, LOOK_NORMAL};
         case TYPE_FIXED:
-          return new String[0];   // fixed tracks have no lookMode
+          /* v48 WAJ-16 (4): the v45 F-1 domain — the same list as
+           * line/polyline (camdat_parse_look_typed's fixed row:
+           * def = LOOK_PATH, allowCenter = 0, fog_poc.c:3240). The
+           * editor UI still hides the look picker for fixed tracks
+           * (its own !TYPE_FIXED guard in CamtrackEditorActivity). */
+          return new String[]{LOOK_PATH, LOOK_LAZY, LOOK_POINT, LOOK_FIXED,
+              LOOK_NORMAL};
         default:                  // line / curve / polyline
           return new String[]{LOOK_PATH, LOOK_LAZY, LOOK_POINT, LOOK_FIXED,
               LOOK_NORMAL};
@@ -322,6 +328,7 @@ public final class CamtrackDoc {
     public Boolean dither;
     public Boolean particles;
     public Boolean engine;
+    public Boolean animsDemo;
     public Integer dayEnv;
     public Integer nightEnv;
 
@@ -330,7 +337,8 @@ public final class CamtrackDoc {
       return pair0 == null && pair1 == null && weatherTarget == null
           && bootWeather == null && lensFlare == null && flashlightOn == null
           && psxWobble == null && dither == null && particles == null
-          && engine == null && dayEnv == null && nightEnv == null;
+          && engine == null && animsDemo == null && dayEnv == null
+          && nightEnv == null;
     }
   }
 
@@ -491,15 +499,21 @@ public final class CamtrackDoc {
   public static final class Light {
     public Boolean on;            // Game_TurnFlashlightOn boot toggle
     public String follow;         // "camera" (anchor) | "world" (free pose)
+    public String mode;           // v41 authoring mode: fixed | rotate | line
     public double[] pos;          // meters, world (follow world)
     public double[] rot;          // degrees (pitch, yaw, roll — the AIM)
+    public double[] start;        // line mode: the motion segment start (m)
+    public double[] end;          // line mode: the motion segment end (m)
+    public Double speedMS;        // rotate/line mode speed, m/s (> 0, raw)
+    public String loopMode;       // line mode: loop | pingPong | once
     public double[] offset;       // meters, camera-local (follow camera)
     public Double ahead;          // meters forward along the beam (>= 0)
 
     /** true when no field is authored (light: null in the doc) */
     public boolean isEmpty() {
-      return on == null && follow == null && pos == null && rot == null
-          && offset == null && ahead == null;
+      return on == null && follow == null && mode == null && pos == null
+          && rot == null && start == null && end == null && speedMS == null
+          && loopMode == null && offset == null && ahead == null;
     }
   }
 
@@ -518,6 +532,13 @@ public final class CamtrackDoc {
     if ("world".equals(follow) || "camera".equals(follow)) {
       light.follow = follow;
     }
+    /* v48 WAJ-16 (5): the v41 authoring mode (fixed | rotate | line) —
+     * editor-carried (the engine's jget parse ignores unknown keys); the
+     * JS twin keeps it, camtrack.html ~6534-6535 */
+    String mode = CamtrackJson.jstr(l, "mode", null);
+    if ("fixed".equals(mode) || "rotate".equals(mode) || "line".equals(mode)) {
+      light.mode = mode;
+    }
     List<Object> pos = CamtrackJson.asArr(CamtrackJson.jget(l, "pos"));
     if (pos != null && pos.size() >= 3 && CamtrackJson.isNum(pos.get(0))
         && CamtrackJson.isNum(pos.get(1)) && CamtrackJson.isNum(pos.get(2))) {
@@ -527,6 +548,32 @@ public final class CamtrackDoc {
     if (rot != null && rot.size() >= 3 && CamtrackJson.isNum(rot.get(0))
         && CamtrackJson.isNum(rot.get(1)) && CamtrackJson.isNum(rot.get(2))) {
       light.rot = new double[]{(Double) rot.get(0), (Double) rot.get(1), (Double) rot.get(2)};
+    }
+    /* v48 WAJ-16 (5): the line-mode motion fields — start/end (strict
+     * all-three-finite-number elements, the JS twin ~6545-6548), the
+     * motion speed (finite number > 0, kept RAW/unclamped, ~6549) and
+     * the loop mode (~6550). All editor-carried; all previously dropped. */
+    List<Object> start = CamtrackJson.asArr(CamtrackJson.jget(l, "start"));
+    if (start != null && start.size() >= 3 && isNumFinite(start.get(0))
+        && isNumFinite(start.get(1)) && isNumFinite(start.get(2))) {
+      light.start = new double[]{(Double) start.get(0), (Double) start.get(1),
+          (Double) start.get(2)};
+    }
+    List<Object> end = CamtrackJson.asArr(CamtrackJson.jget(l, "end"));
+    if (end != null && end.size() >= 3 && isNumFinite(end.get(0))
+        && isNumFinite(end.get(1)) && isNumFinite(end.get(2))) {
+      light.end = new double[]{(Double) end.get(0), (Double) end.get(1),
+          (Double) end.get(2)};
+    }
+    Object speed = CamtrackJson.jget(l, "speedMS");
+    if (speed instanceof Double && isFinite((Double) speed)
+        && (Double) speed > 0) {
+      light.speedMS = (Double) speed;
+    }
+    String lightLoop = CamtrackJson.jstr(l, "loopMode", null);
+    if (LOOP_LOOP.equals(lightLoop) || LOOP_PINGPONG.equals(lightLoop)
+        || LOOP_ONCE.equals(lightLoop)) {
+      light.loopMode = lightLoop;
     }
     List<Object> off = CamtrackJson.asArr(CamtrackJson.jget(l, "offset"));
     if (off != null && off.size() >= 3 && CamtrackJson.isNum(off.get(0))
@@ -548,11 +595,26 @@ public final class CamtrackDoc {
     if (l.follow != null) {
       out.put("follow", l.follow);
     }
+    if (l.mode != null) {
+      out.put("mode", l.mode);
+    }
     if (l.pos != null) {
       out.put("pos", vecList(l.pos));
     }
     if (l.rot != null) {
       out.put("rot", vecList(l.rot));
+    }
+    if (l.start != null) {
+      out.put("start", vecList(l.start));
+    }
+    if (l.end != null) {
+      out.put("end", vecList(l.end));
+    }
+    if (l.speedMS != null) {
+      out.put("speedMS", l.speedMS);
+    }
+    if (l.loopMode != null) {
+      out.put("loopMode", l.loopMode);
     }
     if (l.offset != null) {
       out.put("offset", vecList(l.offset));
@@ -579,7 +641,11 @@ public final class CamtrackDoc {
     }
     Env env = new Env();
     List<Object> pair = CamtrackJson.asArr(CamtrackJson.jget(e, "pair"));
-    if (pair != null && pair.size() >= 2
+    /* v48 WAJ-16 (1): EXACTLY 2 elements — the JS twin (~6499-6500
+     * `raw.pair.length === 2`) and the C (JV_NUM-gated on both elements)
+     * drop a 3+-element pair; the old >= 2 accepted (and clamped) a
+     * length-3 pair the engine ignores entirely */
+    if (pair != null && pair.size() == 2
         && CamtrackJson.isNum(pair.get(0)) && CamtrackJson.isNum(pair.get(1))) {
       env.pair0 = clampInt((Double) pair.get(0), 0, 20);
       env.pair1 = clampInt((Double) pair.get(1), 0, 20);
@@ -610,6 +676,11 @@ public final class CamtrackDoc {
     }
     if (CamtrackJson.isBool(CamtrackJson.jget(e, "engine"))) {
       env.engine = (Boolean) CamtrackJson.jget(e, "engine");
+    }
+    /* v48 WAJ-16 (6): the anims demo toggle — boolean-only, else absent
+     * (the JS twin ~6515 and the C, fog_poc.c:3816) */
+    if (CamtrackJson.isBool(CamtrackJson.jget(e, "animsDemo"))) {
+      env.animsDemo = (Boolean) CamtrackJson.jget(e, "animsDemo");
     }
     if (CamtrackJson.isNum(CamtrackJson.jget(e, "dayEnv"))) {
       env.dayEnv = clampInt((Double) CamtrackJson.jget(e, "dayEnv"), 0, 20);
@@ -683,20 +754,24 @@ public final class CamtrackDoc {
       }
       case TYPE_CURVE:
       case TYPE_POLYLINE: {
-        List<double[]> pts = new ArrayList<>();
+        /* v48 WAJ-16 (3): fog_poc.c:3266-3281 / the JS twin (~6644-6651) —
+         * the <2 / >64 tests apply to the RAW points[] count and ONE
+         * coerced slot is kept per RAW entry (a malformed entry -> the
+         * [0,1,0] default anchor). The old drop-then-validate dropped the
+         * WHOLE track when fewer than 2 entries survived coercion
+         * (shifting every engine --track N index) and >64 mixed lists took
+         * the first 64 VALID instead of the first 64 RAW. */
         List<Object> arr = CamtrackJson.asArr(CamtrackJson.jget(raw, "points"));
-        if (arr != null) {
-          for (Object p : arr) {
-            double[] v = vec3(p, null);
-            if (v != null) {
-              pts.add(v);
-            }
-          }
+        if (arr == null || arr.size() < 2) {
+          return null;    // a curve/polyline needs at least 2 anchors (RAW)
         }
-        if (pts.size() < 2) {
-          return null;    // a curve/polyline needs at least 2 anchors
+        int nPts = Math.min(arr.size(), 64);   // the first 64 RAW entries
+        List<double[]> pts = new ArrayList<>(nPts);
+        for (int i = 0; i < nPts; i++) {
+          double[] v = vec3(arr.get(i), null);
+          pts.add(v != null ? v : new double[]{0, 1, 0});
         }
-        tr.points = pts.size() > 64 ? new ArrayList<>(pts.subList(0, 64)) : pts;
+        tr.points = pts;
         tr.speedMS = Math.max(CamtrackJson.jnum(raw, "speedMS", 1), 0.001);
         tr.lookMode = pickLook(raw, type);
         tr.lookAt = vec3(CamtrackJson.jget(raw, "lookAt"),
@@ -780,7 +855,12 @@ public final class CamtrackDoc {
         tr.pitchBounds = boundsRule(raw, "pitchMinDeg", "pitchMaxDeg");
         tr.pitchMinDeg = CamtrackJson.jnum(raw, "pitchMinDeg", -10);
         tr.pitchMaxDeg = CamtrackJson.jnum(raw, "pitchMaxDeg", 10);
-        tr.lookMode = null;   // fixed tracks hold their own orientation
+        /* v48 WAJ-16 (4): the v45 F-1 round-trip fix — the C parses
+         * lookMode BEFORE the type switch (fog_poc.c:3298-3304) and the
+         * JS twin (~6761) parses the trio for fixed too;
+         * normalDirection / lazyRateDegS are already parsed for every
+         * type above. The fixed domain is the same list as line/polyline. */
+        tr.lookMode = pickLook(raw, TYPE_FIXED);
         break;
       }
     }
@@ -892,6 +972,9 @@ public final class CamtrackDoc {
     if (e.engine != null) {
       out.put("engine", e.engine);
     }
+    if (e.animsDemo != null) {
+      out.put("animsDemo", e.animsDemo);
+    }
     return out;
   }
 
@@ -977,6 +1060,24 @@ public final class CamtrackDoc {
         if (tr.pitchBounds && tr.pitchMaxDeg > tr.pitchMinDeg) {
           o.put("pitchMinDeg", r4(tr.pitchMinDeg));
           o.put("pitchMaxDeg", r4(tr.pitchMaxDeg));
+        }
+        /* v48 WAJ-16 (4): the v45 F-1 fixed round-trip write-back — the
+         * same lookMode / normalDirection / lazyRateDegS trio every other
+         * type emits (camtrack.html ~6450-6456). lookAt is deliberately
+         * NOT written (the C's fixed parse never reads it,
+         * fog_poc.c:3449-3470); a makeTrack fixed track (lookMode null)
+         * writes nothing, like the JS's undefined dropping out of
+         * JSON.stringify. */
+        if (tr.lookMode != null) {
+          o.put("lookMode", tr.lookMode);
+          if (LOOK_NORMAL.equals(tr.lookMode)) {
+            o.put("normalDirection",
+                SIDE_BACKWARD.equals(tr.normalDirection) ? SIDE_BACKWARD
+                    : SIDE_FORWARD);
+          }
+          if (LOOK_LAZY.equals(tr.lookMode)) {
+            o.put("lazyRateDegS", r4(tr.lazyRateDegS));
+          }
         }
         break;
     }
@@ -1321,19 +1422,33 @@ public final class CamtrackDoc {
     return Math.sqrt(dx * dx + dy * dy + dz * dz);
   }
 
-  /** vec3(v, def): [x,y,z] of finite numbers, else def (null passes on) */
+  /**
+   * vec3(v, def) — the ELEMENT-WISE jvec3 rule (the JS twin,
+   * camtrack.html ~6563-6568, mirrors the C, fog_poc.c:589-596): ANY
+   * array with >= 3 elements is accepted and read element-wise —
+   * number -> itself, true -> 1, anything else (string / false / null /
+   * array / object) -> 0, exactly the C's calloc'd JValue.num
+   * (fog_poc.c:358-361, 492-494). The old all-or-nothing rule defaulted
+   * the WHOLE vector when any element was not a finite Double (e.g.
+   * end: [5,"x",7] -> JS/C [5,0,7] vs the old Java default); def now
+   * applies only when the value is not a >=3-element array.
+   */
   static double[] vec3(Object v, double[] def) {
     List<Object> arr = CamtrackJson.asArr(v);
     if (arr == null || arr.size() < 3) {
       return def;
     }
-    Double x = toFinite(arr.get(0));
-    Double y = toFinite(arr.get(1));
-    Double z = toFinite(arr.get(2));
-    if (x == null || y == null || z == null) {
-      return def;
+    return new double[]{jvec3El(arr.get(0)), jvec3El(arr.get(1)),
+        jvec3El(arr.get(2))};
+  }
+
+  /** the element rule: number -> itself (±Infinity included, like the
+   *  C's strtod JV_NUM), true -> 1, everything else -> 0 */
+  private static double jvec3El(Object o) {
+    if (o instanceof Double) {
+      return (Double) o;
     }
-    return new double[]{x, y, z};
+    return Boolean.TRUE.equals(o) ? 1 : 0;
   }
 
   static double[] vec3Or(Object v, double[] def) {
@@ -1341,12 +1456,10 @@ public final class CamtrackDoc {
     return r != null ? r : def;
   }
 
-  private static Double toFinite(Object o) {
-    if (o instanceof Double) {
-      double d = (Double) o;
-      return isFinite(d) ? d : null;
-    }
-    return null;
+  /** a strict finite JSON number element (the JS `typeof x === 'number'
+   *  && isFinite(x)` gate — isNum alone also admits ±Infinity doubles) */
+  private static boolean isNumFinite(Object o) {
+    return o instanceof Double && isFinite((Double) o);
   }
 
   /** Double.isFinite is API 24+ — inline the minSdk-23-safe check */
