@@ -1626,26 +1626,33 @@ public class Sh1WallpaperService extends WallpaperService {
     }
     synchronized (sBag) {
       if (sBag.isEmpty()) {
-        // refill: the whole pool, shuffled, with the CURRENT entry moved
-        // to the END so an immediate repeat is impossible when possible
-        ArrayList<int[]> shuffled = new ArrayList<>(Arrays.asList(pool));
-        for (int i = shuffled.size() - 1; i > 0; i--) {
-          int j = sRandom.nextInt(i + 1);
-          int[] tmp = shuffled.get(i);
-          shuffled.set(i, shuffled.get(j));
-          shuffled.set(j, tmp);
-        }
-        for (int i = 0; i < shuffled.size(); i++) {
-          if (shuffled.get(i)[0] == curScene && shuffled.get(i)[1] == curTrack) {
-            int[] cur = shuffled.remove(i);
-            shuffled.add(cur);
-            break;
-          }
-        }
-        sBag.addAll(shuffled);
+        refillBagLocked(pool, curScene, curTrack);
       }
       return sBag.pollFirst();
     }
+  }
+
+  /**
+   * F2 refill: the whole pool, shuffled, with the CURRENT entry moved
+   * to the END so an immediate repeat is impossible when possible.
+   * Caller must hold sBag's monitor.
+   */
+  private static void refillBagLocked(int[][] pool, int curScene, int curTrack) {
+    ArrayList<int[]> shuffled = new ArrayList<>(Arrays.asList(pool));
+    for (int i = shuffled.size() - 1; i > 0; i--) {
+      int j = sRandom.nextInt(i + 1);
+      int[] tmp = shuffled.get(i);
+      shuffled.set(i, shuffled.get(j));
+      shuffled.set(j, tmp);
+    }
+    for (int i = 0; i < shuffled.size(); i++) {
+      if (shuffled.get(i)[0] == curScene && shuffled.get(i)[1] == curTrack) {
+        int[] cur = shuffled.remove(i);
+        shuffled.add(cur);
+        break;
+      }
+    }
+    sBag.addAll(shuffled);
   }
 
   /** F4: the next pick WITHOUT applying it (pre-warm peek) */
@@ -1665,7 +1672,12 @@ public class Sh1WallpaperService extends WallpaperService {
     }
     synchronized (sBag) {
       if (sBag.isEmpty()) {
-        return drawNext(pool, curScene, curTrack);   // fills + peeks below
+        // v48 WAJ-9: a peek must never CONSUME — the old drawNext() call
+        // here refilled the bag and POLLED its head, so prewarmNextScene
+        // warmed a scene the next randomizeScene would not pick (and the
+        // bag sequence was perturbed). Refill exactly like drawNext,
+        // then PEEK without polling.
+        refillBagLocked(pool, curScene, curTrack);
       }
       return sBag.peekFirst();
     }
