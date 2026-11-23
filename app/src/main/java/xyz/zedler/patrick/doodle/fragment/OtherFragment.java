@@ -704,7 +704,10 @@ public class OtherFragment extends BaseFragment
   private Bundle getInstanceState() {
     Bundle bundle = new Bundle();
     if (binding != null) {
-      bundle.putInt(EXTRA.SCROLL_POSITION + 1, binding.scrollOtherTheme.getScrollX());
+      // v48 WAJ-15: no "+ 1" — string+int concat produced the key
+      // "scroll_position1", which the restore (~683, EXTRA.SCROLL_POSITION)
+      // never read, so the restored scroll X was always 0
+      bundle.putInt(EXTRA.SCROLL_POSITION, binding.scrollOtherTheme.getScrollX());
     }
     return bundle;
   }
