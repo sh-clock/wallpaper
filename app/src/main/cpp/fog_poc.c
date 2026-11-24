@@ -11833,6 +11833,7 @@ static int fx_water_zone_collect(Frame *fb, const Renderer *R,
                             /* w5-audit (F16, reimplemented): floor +
                              * PushSXY saturation — see the glint site */
                             int rex = (int)floorf(px * iv);  /* engine px, ctr */
+                            if (rex < -1184) rex = -1184; else if (rex > 863) rex = 863;
                             /* V48 (W-audit B): engine y-DOWN screen — the
                              * ring corners must negate the glTF view py;
                              * the ring geometry itself is already AT the
