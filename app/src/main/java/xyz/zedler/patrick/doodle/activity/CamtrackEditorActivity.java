@@ -330,7 +330,10 @@ public class CamtrackEditorActivity extends AppCompatActivity
     // visible — the self-re-posting frameTick otherwise keeps running
     // updatePlaybarChrome (setText + slider setValue) and updatePoseMarker
     // (path view invalidate) every vsync behind whatever covers us
-    choreographer.removeFrameCallback(frameTick);
+    /* w5-audit (A8-1): frameTick is null when loadDocument() failed
+       (onCreate early-returned before the assignment) — removeFrameCallback
+       throws IllegalArgumentException on null (AOSP Choreographer) */
+    if (frameTick != null) choreographer.removeFrameCallback(frameTick);
     frameTickPosted = false;
     super.onPause();
   }
@@ -347,7 +350,9 @@ public class CamtrackEditorActivity extends AppCompatActivity
 
   @Override
   protected void onDestroy() {
-    choreographer.removeFrameCallback(frameTick);
+    /* w5-audit (A8-1): the null guard — a failed loadDocument() finishes
+       the activity before frameTick is assigned */
+    if (frameTick != null) choreographer.removeFrameCallback(frameTick);
     main.removeCallbacks(previewRefresh);
     if (sessionBooted) {
       // the engine goes back to the wallpaper's persisted selection with
