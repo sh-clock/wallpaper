@@ -5657,18 +5657,20 @@ typedef struct {
 } ShMeshLight;
 
 /* v8 VERBATIM — the engine's gte_ll (func_80057A3C's N.L), which the SH1
- * code encodes as 0x4A4A6412 = MVMVA{m=LLM(2), v=V0, tx=FC(2), sf=1, lm=1}.
- * tx=FC selects DuckStation's MulMatVecBuggy path — the GTE FC-translation
- * hardware bug — whose final row-0 IR1 is:
- *   IR1 = clamp((( signExtend44(M[0][1]*Vy) + M[0][2]*Vz ) >> 12), 0, 0x7FFF)
- * The M[0][0]*Vx term is DROPPED (it lands only in the transient, clobbered
- * IR write), and FC (SetBackColor(0,0,0) here) is dropped with it. This is
- * byte-accurate DuckStation behavior — the engine's directional light
- * genuinely ignores the light's X component on surfaces.                   */
+ * code encodes as 0x4A4A6412 = MVMVA{sf=1, m=LLM(1), v=V0, tx=NONE(3),
+ * lm=1}. swanstation gte.cpp:571-585 routes translation selector 3 to the
+ * default plain MulMatVec with a ZERO translation (only tx=2 takes
+ * MulMatVecBuggy), so the row-0 result is the FULL 3-term dot with no
+ * translation:
+ *   IR1 = clamp((l0*vx + l1*vy + l2*vz) >> 12, 0, 0x7FFF)
+ * (s16*s16 products fit 32 bits — the 44-bit sign-extend and the MAC int32
+ * truncation are provably no-ops here). (w7-audit C5-7: this twin still
+ * had the old FC-translation mis-decode that DROPPED the l0*vx term.)     */
 static int sh_gte_ll_buggy(int l0, int l1, int l2, int vx, int vy, int vz) {
-    (void)l0; (void)vx; /* dropped by the FC-translation hardware bug */
-    int64_t v = (int64_t)l1 * (int64_t)vy + (int64_t)l2 * (int64_t)vz;
-    /* s16*s16 products fit 32 bits — the 44-bit sign-extend is a no-op here */
+    /* gte_ll = 0x4A4A6412 = MVMVA{sf=1, m=LLM(1), v=V0, tx=NONE(3), lm=1}
+     * — plain MulMatVec with zero translation: FULL 3-term dot. */
+    int64_t v = (int64_t)l0 * (int64_t)vx + (int64_t)l1 * (int64_t)vy +
+                (int64_t)l2 * (int64_t)vz;
     int mac = (int)(v >> 12);
     if (mac < 0) mac = 0;            /* lm = 1 */
     if (mac > 0x7FFF) mac = 0x7FFF;
