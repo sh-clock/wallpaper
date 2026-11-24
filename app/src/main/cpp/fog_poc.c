@@ -2275,7 +2275,15 @@ static void sh1x_load(Sh1x *sx, const JValue *json) {
             }
         }
         a->isCabin = jintb(e, "cabin", 0);
-        a->instBase = 0;                    /* v36: sineBob instRange[0] */
+        /* v43 (rot0 fix): the per-instance init moved HERE, pre-parse —
+         * the v36 commit 6a9e8c1 put `rot0PerInstN = 0; instBase = 0;`
+         * in the POST-parse init block (next to tvChannel), which KILLED
+         * the instRange/rot0PerInst parse just below: the carousel's
+         * D_800EBAFC per-horse yaws (map6_s04_2.c:3636) and the UMA1_HID
+         * global indices 6..9 (the i>=6 phase branch) never fired — all
+         * horses rendered at the family base rot0. (w7-audit C5-3: this
+         * twin still had the post-parse form.) */
+        a->rot0PerInstN = 0; a->instBase = 0;   /* v36: sineBob instRange[0] */
         { const JValue *ir = jarr(e, "instRange");
             if (jcount(ir) >= 1)
                 a->instBase = (int)jat(ir, 0)->num;
@@ -2443,7 +2451,6 @@ static void sh1x_load(Sh1x *sx, const JValue *json) {
         if (a->driver == 5 && g_animsDemo)
             a->rawVy = jint(e, "postEventVyRaw", 91);
         a->lcgS1 = 0; a->lcgS2 = 0;      /* engine seeds D_800DB918 static 0 */
-        a->rot0PerInstN = 0; a->instBase = 0;
         a->tvChannel = 0;
         /* v31.4 (17-FIX1): --anims-demo = the engine state AFTER the story
          * events — with flag 332 set, the engine's chunk-entry hook does
