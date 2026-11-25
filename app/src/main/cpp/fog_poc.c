@@ -13811,22 +13811,37 @@ static int sh_tvpaint_collect(const Sh1x *sx, const mat4 *viewProj,
                         }
                         q->tex = tex;
                         q->bright = var_s2;
-                        /* the sub-quad OTZ: MAX corner SZ (Q8), each corner
-                         * scaled <<2 like the engine's
-                         * `sp10[i].vz = RotTransPers(...) * 4`
-                         * (map4_s03.c:1292) BEFORE the MAX, then `>> 3`
-                         * (:1297-1300) — so the TV paint's bucket is
-                         * (Q8<<2)>>3 = Q8>>1, 4x the mesh scale (the mesh
-                         * walk is (OTZ>>1)>>2 = Q8>>3, bodyprog_80056D8C.c
-                         * :855): the engine deliberately sorts the TV
-                         * paint 4x NEARER than all mesh geometry so it
-                         * covers its own wall and culls past ~16 m.
-                         * V44 (D-3): truncates, no +0.5. The v48 form
-                         * dropped the <<2 — bucket Q8>>3 culls at ~64 m
-                         * and ties against the wall's own mesh bucket. */
+                        /* the sub-quad OTZ: MAX corner SZ (Q8) >> 3 --
+                         * the SAME bucket space as the mesh walk
+                         * ((OTZ>>1)>>2 = Q8>>3, bodyprog_80056D8C.c:855).
+                         * V53 (the TV-rotation regression fix): the v48
+                         * A-1 form ((Q8*4)>>3 = Q8>>1) claimed the engine
+                         * sorts the paint "4x NEARER" -- but the OT walk
+                         * is FAR bucket -> NEAR bucket (the established
+                         * family head above), so 4x the bucket = 4x
+                         * FARTHER: the paint buried under every
+                         * nearer-bucketed quad sharing its pixels --
+                         * including geometry physically BEHIND it (the
+                         * 201_3_BA wall at ~14.7 m drew over the 9.2 m
+                         * paint; the user's report: the screens "rotated
+                         * on the floor" -- the paint visible only through
+                         * STP holes, lying in the geometry). Reverted to
+                         * the v40 form, byte-identical to the camtrack
+                         * twin (its `Math.floor(zm*256)>>3`). The
+                         * literal decomp *4 (map4_s03.c:1292) remains an
+                         * OPEN engine question: under the far-first walk
+                         * it is NOT depth-comparable with mesh buckets
+                         * and the real game's visible TVs imply the
+                         * paint's pixels never collide with in-range
+                         * mesh in the engine's own camera setups -- kept
+                         * out of the port until that is resolved with
+                         * emulator evidence, per the accuracy-first
+                         * rule (a wrong verbatim beats no port only in
+                         * form, never in output).
+                         * V44 (D-3): truncates, no +0.5. */
                         float zm = fmaxf(fmaxf(q->v[0].z, q->v[1].z),
                                          fmaxf(q->v[2].z, q->v[3].z));
-                        int bucket = ((int)floorf(zm * 256.0f) * 4) >> 3;
+                        int bucket = (int)floorf(zm * 256.0f) >> 3;
                         if (!(bucket > 0 && bucket < 2047)) continue;
                         PostEnt pe;
                         memset(&pe, 0, sizeof(pe));
@@ -13853,7 +13868,10 @@ static int sh_tvpaint_collect(const Sh1x *sx, const mat4 *viewProj,
                 /* V44 (D-3): SZ truncates; the *4<<2 scale is the engine's
                  * `RotTransPers(...) * 4` (map4_s03.c:1292) — see the
                  * big-screen comment above (v48: the <<2 was dropped). */
-                int bucket = ((int)floorf(zm * 256.0f) * 4) >> 3;
+                                /* V44 (D-3): SZ truncates. V53: the Q8>>3 mesh-space
+                 * bucket (the v48 *4 form reverted -- see the big-screen
+                 * comment above). */
+                int bucket = (int)floorf(zm * 256.0f) >> 3;
                 if (!(bucket > 0 && bucket < 2047)) {
                     (*nTvq)--;               /* the engine drops this quad */
                     continue;
