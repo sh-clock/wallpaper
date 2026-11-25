@@ -27,10 +27,15 @@ public class EditorBootSmokeTest {
    * fires and a zero-delay re-post chain spins the legacy scheduler at
    * 100% CPU forever (the 6h testDebugUnitTest hang, run 45364114419).
    *
-   * This was LATENT until the v48 batch: pre-#24 the loop broke early
-   * because MaterialSlider.setValue threw on the un-clamped playhead
-   * inside updatePlaybarChrome, killing the posted task; WAJ-1's clamp
-   * (correctly) removed that crash and un-masked the spin.
+   * This was LATENT until the v48 batch: pre-v48 the boot chain died on
+   * its own — the shadow clock starts at 0, so doFrame #1 ties "0 > 0"
+   * and the guard kills the first re-post, and nothing re-armed it (the
+   * editor had NO onResume re-post). WAJ-14 (e034eec) added onResume()
+   * -> postFrameTick() (CamtrackEditorActivity:324): the second post's
+   * bumped synthetic timestamp passes the guard and the chain spins.
+   * (The pre-#24 MaterialSlider throw never fired at boot — trackTime
+   * starts 0, the playhead 0 is in range; WAJ-1's clamp is unrelated to
+   * the un-masking.)
    *
    * Robolectric's own remedy (ShadowLegacyChoreographer's doc): give the
    * frame callback a nonzero delay so the same-drain re-post chain breaks.
