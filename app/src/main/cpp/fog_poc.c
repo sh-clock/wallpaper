@@ -3404,8 +3404,10 @@ static int camdat_load_track(const JValue *raw, CamTrack *t) {
     if (jget(raw, "weatherTarget") &&
         jget(raw, "weatherTarget")->type == JV_NUM) {
         int v = jint(raw, "weatherTarget", -1);
-        if (v < 0) v = 0;
-        if (v > 8) v = 8;                          /* clamp 0..8 */
+        /* V53: -1 = no transition (the absent semantics, kept for a
+         * present -1 too — the same rule as the env-level field)     */
+        if (v < -1) v = -1;
+        if (v > 8) v = 8;                          /* clamp -1..8 */
         t->weatherTarget = v;
     }
 
@@ -3656,8 +3658,14 @@ static int camdat_load(Camdat *cd, const char *path, const char *glbName) {
             }
             if (jget(env, "weatherTarget") && jget(env, "weatherTarget")->type == JV_NUM) {
                 int v = jint(env, "weatherTarget", -1);
-                if (v < 0) v = 0;
-                if (v > 8) v = 8;                          /* clamp 0..8 */
+                /* V53: -1 stays -1 — "nothing authored" (no runtime
+                 * D0B18 transition armed at boot; the camtrack editor's
+                 * v53 sh1xEnvDefaults now exports -1 for un-authored
+                 * weather, and the room's ORIGINAL recipe rides in
+                 * bootWeather). The old coerce-to-0 armed a spurious
+                 * transition-to-none on every env-bearing camdat. */
+                if (v < -1) v = -1;
+                if (v > 8) v = 8;                          /* clamp -1..8 */
                 cd->envWeatherTarget = v;
             }
             if (jget(env, "bootWeather") && jget(env, "bootWeather")->type == JV_NUM) {
