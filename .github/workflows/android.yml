@@ -91,24 +91,22 @@ jobs:
           echo "$ASSET"
           echo "code changed:"
           echo "$CODE"
-          NAME=$(grep '^versionName=' version.properties | cut -d= -f2)
-          MAJ=$(echo "$NAME" | cut -d. -f1)
-          MIN=$(echo "$NAME" | cut -d. -f2)
-          PAT=$(echo "$NAME" | cut -d. -f3)
-          PAT=${PAT:-0}
           # v53 (the PoC v33.51 lesson, twin fix): re-checkout fresh main
           # each round, skip versions whose tag already exists, push
           # main+tag ATOMICALLY, retry on race for up to 5 rounds.
+          # w9-audit (F-1): the version re-read is UNCONDITIONAL — the
+          # '-gt 1' guard made round 1 bump from the stale event checkout
+          # while committing onto fresh main (the PoC twin re-reads every
+          # round), so a queued asset-only run could compute a patch off
+          # a stale base and land versionName BELOW a released tag.
           for attempt in 1 2 3 4 5; do
             git fetch -q origin main --tags
             git checkout -q -B bumpwork origin/main
-            if [ "$attempt" -gt 1 ]; then
-              NAME=$(grep '^versionName=' version.properties | cut -d= -f2)
-              MAJ=$(echo "$NAME" | cut -d. -f1)
-              MIN=$(echo "$NAME" | cut -d. -f2)
-              PAT=$(echo "$NAME" | cut -d. -f3)
-              PAT=${PAT:-0}
-            fi
+            NAME=$(grep '^versionName=' version.properties | cut -d= -f2)
+            MAJ=$(echo "$NAME" | cut -d. -f1)
+            MIN=$(echo "$NAME" | cut -d. -f2)
+            PAT=$(echo "$NAME" | cut -d. -f3)
+            PAT=${PAT:-0}
             if [ -n "$CODE" ]; then
               # code/engine change -> ONE MINOR level (1.0.0 -> 1.1.0)
               NEWMIN=$((MIN + 1))
