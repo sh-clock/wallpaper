@@ -10636,6 +10636,39 @@ static void sh1x_anims_tick(Sh1x *sx, double dt, const v3 *camGltf) {
          * ran this frame the lissajous update does not run at all
          * (its angle D_800EBB36 freezes, exactly like the rect miss). */
         if (a->driver == 15 && ferrisFired) continue;
+        /* v44 (C-6): the driveGate proximity freeze. The engine runs the
+         * ferris/lissajous update ONLY inside its two PLAYER_NEAR_POS
+         * rects (map6_s04_2.c:3493-3508 — ferris |vx-8|<20 AND |vz+28|<22,
+         * lissajous |vx+16|<20 AND |vz+64|<20, STRICT < per game.h:67-69)
+         * AND its AABB screen test; the WorldObjects_Adds live INSIDE
+         * those funcs (:3817-3845) — a gated ride does not advance AT
+         * ALL (no master tick, no pendulum RNG draws). The port has no
+         * player — the CAMERA stands in (engine coords: x identity,
+         * z = -glTF z, ipd2gltf.py:6921-6923), tested in Q12 raw counts
+         * like the engine. FREEZE the tick only (the drawn state holds —
+         * on re-entry the phase differs from the engine's frozen frame
+         * only by the port's always-draw contract); the DRAW stays
+         * unconditional (the engine's gated-ADD — ride NOT drawn at all
+         * when outside — is the separate design question C-U1). The
+         * AABB-visible sub-gate is NOT ported (a camera-frustum test the
+         * port's fixed-camera framing cannot reproduce). DESIGN FLAG:
+         * cabin parity g_WorldObject7[(D_800EBB34+i)&1] (map6_s04_2.c:
+         * 3838) stays UNMODELED — the port draws BOTH cabin models at
+         * all 5 arms (the t=0 layout, permanent); modeling it would hide
+         * half the drawn cabins, a draw-side change that belongs with
+         * C-U1's always-draw contract (left to the primary agent). */
+        if (a->dgNear && camGltf) {
+            int exq = (int)(camGltf->x * 4096.0f);   /* engine Q12 vx */
+            int ezq = (int)(-camGltf->z * 4096.0f);  /* engine z=-glTF z */
+            int dx = exq - a->dgBaseXQ12;
+            int dz = ezq - a->dgBaseZQ12;
+            int nearX = (dx >= 0) ? (dx < a->dgTolXQ12)
+                                  : (-dx < a->dgTolXQ12);
+            int nearZ = (dz >= 0) ? (dz < a->dgTolZQ12)
+                                  : (-dz < a->dgTolZQ12);
+            if (!(nearX && nearZ))
+                continue;    /* outside the rect: the ride update FREEZES */
+        }
         switch (a->driver) {
         case 0: {  /* spinRng / spinConst — map0_s00_2.c:1263-1264:
                     * vz += Q12_MULT_PRECISE(dt, Q12_ANGLE(rngBase) -
