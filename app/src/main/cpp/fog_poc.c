@@ -5486,6 +5486,43 @@ static double g_userLightLineT = 0.0;   /* travel clock (30Hz tick dt) */
  * light): mode 1 = the free-world pose (or the LINE travel); modes 0/2
  * = the camera frame + the verbatim Harry offset + ahead — mode 0 the
  * engine 2.5 m TRAIL default, mode 2 the authored ahead.              */
+/* V53 (the water-light fix): the frame's authored LOOK-AT TARGET — the
+ * world point the current camera shot FRAMES. The engine's light rides
+ * Harry's torso (Game_FlashlightAttribsSet effects.c:210-218: lightBone-
+ * Coord = playerBoneCoords[HarryBone_Torso] + (-0.08,-0.28,0.12)) and
+ * every engine camera is authored to FRAME Harry — so the track's
+ * look-at IS the closest stand-in for "where Harry (and his flashlight)
+ * is" in each shot. Mode 0 (no authored user light) now anchors the
+ * light THERE: the water shimmer + the spot lighting become
+ * WORLD-anchored at the framed subject (stable across camera cuts —
+ * the engine's light never teleports with a camera cut) instead of
+ * gliding 2.5 m ahead of the flying camera (the owner's report: "the
+ * water effects seem to be following the player rather than the
+ * light"). Modes 1 (authored world) / 2 (authored ahead) are unchanged;
+ * the camera+ahead form remains the FALLBACK for poses with no
+ * look-at (free debug cams, boot primes). Set by every env-sync /
+ * fx-anchor site from the live CamPose's TrackEv.                       */
+static float g_poseLookAt[3] = { 0, 0, 0 };
+static int   g_poseLookAtValid = 0;
+/* V53 companion: the scene's water plane height (the first ENABLED
+ * water zone's illumination height, Q4->Q12->m — lens_flare.c:88
+ * posY = Q4_TO_Q12(zone->illumination)); -1e9 = no water zone. Set at
+ * scene load + per fx anchor (the static per-scene constant). The
+ * mode-0 fixed-cam fallback parks the light where the view ray meets
+ * the water plane (+1.0 m — the Harry-torso stand-in above the
+ * surface): the shimmer then sits ON THE FRAMED WATER SPOT, sweeping
+ * slowly with a panning fixed cam instead of gliding with the camera
+ * body (the owner's "following the player" report).                     */
+static float g_waterPlaneY = -1e9f;
+static void sh_pose_lookat_set(const TrackEv *ev) {
+    if (ev && ev->hasLookAt) {
+        g_poseLookAt[0] = ev->lookAt.x; g_poseLookAt[1] = ev->lookAt.y;
+        g_poseLookAt[2] = ev->lookAt.z;
+        g_poseLookAtValid = 1;
+    } else {
+        g_poseLookAtValid = 0;
+    }
+}
 static void sh_user_light_world_pos(v3 camPos, Quat camQ, float out[3]) {
     if (g_userLightMode == 1) {
         if (g_userLightLine) {
@@ -5531,7 +5568,37 @@ static void sh_user_light_world_pos(v3 camPos, Quat camQ, float out[3]) {
         ox = g_userLightOffset[0]; oy = g_userLightOffset[1];
         oz = g_userLightOffset[2];
     }
-    /* mode 0: the engine TRAIL default; mode 2: the authored ahead      */
+    /* V53: mode 0 anchors at the frame's LOOK-AT TARGET when one exists
+     * (the framed subject = the Harry-torso emulation — see the
+     * g_poseLookAt block above); the camera+ahead form is the fallback
+     * (no look-at: free debug cams / boot primes). Mode 2 (the authored
+     * ahead) keeps the camera-relative form — the explicit authoring. */
+    if (g_userLightMode == 0 && g_poseLookAtValid) {
+        out[0] = g_poseLookAt[0]; out[1] = g_poseLookAt[1];
+        out[2] = g_poseLookAt[2];
+        return;
+    }
+    /* V53: mode 0 with NO look-at (the FIXED yaw/pitch tracks — the
+     * editor's most common authored camera): park the light where the
+     * camera's view ray meets the water plane, 1.0 m above the surface
+     * (the Harry-torso stand-in). No water / ray away from the plane ->
+     * the legacy camera+ahead fallback below.                          */
+    if (g_userLightMode == 0 && g_waterPlaneY > -1e8f) {
+        v3 Xa, Ya, Za;
+        quat_axes(camQ, &Xa, &Ya, &Za);
+        /* forward = -Z (glTF); the ray from camPos along forward */
+        float fx2 = -Za.x, fy2 = -Za.y, fz2 = -Za.z;
+        if (fy2 < -1e-4f && camPos.y > g_waterPlaneY + 1.0f) {
+            float t = (camPos.y - (g_waterPlaneY + 1.0f)) / (-fy2);
+            if (t > 0.5f && t < 60.0f) {
+                out[0] = camPos.x + fx2 * t;
+                out[1] = g_waterPlaneY + 1.0f;
+                out[2] = camPos.z + fz2 * t;
+                return;
+            }
+        }
+    }
+    /* mode 0 fallback: the engine TRAIL default; mode 2: the authored ahead */
     float extraAhead = (g_userLightMode == 2) ? g_userLightAheadM
                                               : SH_LIGHT_TRAIL_M;
     /* the engine applies the offset in the BONE (camera) frame with NO
@@ -11392,6 +11459,13 @@ static void fx_light_anchor(const Sh1x *sx, const CamPose *cam) {
      * :19692 was already the pattern), so the sx param is no longer
      * needed here (kept for the call sites' signatures).              */
     (void)sx;
+    sh_pose_lookat_set(&cam->ev);   /* V53: the frame's look-at (fresh) */
+    /* V53: the water plane height (static per scene — the first enabled
+     * zone's illumination, lens_flare.c:88) for the fixed-cam fallback */
+    if (sx && sx->nWaterZones > 0 && sx->waterZones[0].enabled)
+        g_waterPlaneY = (float)sx->waterZones[0].illumination * (1.0f / 16.0f);
+    else
+        g_waterPlaneY = -1e9f;
     float wp[3];
     sh_user_light_world_pos(cam->pos, cam->q, wp);
     /* w5-audit (A1-3, reimplemented): the mode-split Q8-grid store —
@@ -16061,6 +16135,7 @@ static CamPose live_advance(LiveApp *A, double dt) {
                                A->track, NULL);
         }
         A->R.snow = A->snow.enabled ? &A->snow : NULL;
+        sh_pose_lookat_set(&cp.ev);   /* V53: the frame's look-at */
         sh_env_sync_live(&A->env, A->play.t, cp.pos, cp.q, 0);
         /* v38 FIX (the RUN_SU0203.bat 'no fan spin' root cause): the
          * realtime window / benchmark loops render_frame()d directly and
@@ -16085,6 +16160,7 @@ static CamPose live_advance(LiveApp *A, double dt) {
     if (!fired && (A->r2.active || A->r2.returning))
         cp = r2view_pose(&A->r2, &cp);
     A->R.snow = A->snow.enabled ? &A->snow : NULL;
+    sh_pose_lookat_set(&cp.ev);   /* V53: the frame's look-at */
     sh_env_sync_live(&A->env, A->play.t, cp.pos, cp.q, 0);
     /* v38: the boot-frame pose call (the shot path's post-loop sync): the
      * very first presented frame owes < 1/30 s to the tick grid, so no
@@ -16111,6 +16187,7 @@ static void live_render(LiveApp *A) {
     if (A->snow.enabled)
         snow_sync_live(&A->snow, A->play.t, cp.pos, cp.forward,
                        A->track, A->ovr.useFixed ? &A->ovr : NULL);
+    sh_pose_lookat_set(&cp.ev);   /* V53: the frame's look-at */
     sh_env_sync_live(&A->env, A->play.t, cp.pos, cp.q, 0);
     sh1x_anims_sync((Sh1x *)&A->R.sc->sh1x, A->play.sessionT, &cp.pos); /* v38: session clock —
      * dt=0 at the held sessionT: a no-op state hold (same discipline as the
@@ -16664,8 +16741,10 @@ static void user_light_nudge(LiveApp *A, int axis, float dir) {
      * latched at the pre-nudge pose until unpause — refresh the pose
      * once now (the boot-frame precedent calls sh_env_update_pose
      * outside the tick grid when ticksDone == 0). */
-    if (A->play.paused)
+    if (A->play.paused) {
+        sh_pose_lookat_set(&cp.ev);   /* V53: the frame's look-at */
         sh_env_update_pose(&A->env, cp.pos, cp.q);
+    }
 }
 static void user_light_aim(int axis, float d) {
     g_userLightHasRot = 1;           /* the first press AUTHORS the aim      */
@@ -20276,6 +20355,7 @@ int main(int argc, char **argv) {
                 else
                     snow_sync_live(&Ss, P.t, cp.pos, cp.forward, track, NULL);
             }
+            sh_pose_lookat_set(&cp.ev);   /* V53: the frame's look-at */
             sh_env_sync_live(&Es, P.t, cp.pos, cp.q, 0);
             /* v43 (E-19/20-1): the four per-tick calls run AFTER the
              * tSim advance — POST-advance, exactly like live_advance
@@ -20297,6 +20377,7 @@ int main(int argc, char **argv) {
             cpBody = cp;
         }
         if (Vr.active || Vr.returning) cp = r2view_pose(&Vr, &cp);
+        sh_pose_lookat_set(&cp.ev);   /* V53: the frame's look-at */
         sh_env_sync_live(&Es, P.t, cp.pos, cp.q, 0);
         sh1x_anims_sync((Sh1x *)&R.sc->sh1x, tSim, &cp.pos); /* v43 (E-19/20-1): hold at the final session time (the in-loop call is post-advance, live parity) */
         Frame fb2; frame_alloc(&fb2, w, h);
@@ -20460,6 +20541,7 @@ int main(int argc, char **argv) {
                 else
                     snow_sync_live(&Ss, P.t, cp.pos, cp.forward, track, NULL);
             }
+            sh_pose_lookat_set(&cp.ev);   /* V53: the frame's look-at */
             sh_env_sync_live(&Es, P.t, cp.pos, cp.q, 0);
             /* v43 (E-19/20-1): the four per-tick calls run AFTER the
              * tSim advance — POST-advance (the old PRE-increment pass
@@ -20481,6 +20563,7 @@ int main(int argc, char **argv) {
         /* the held tick pose (bit-identical to the last playback_step) —
          * also covers the phase wrap/edge cases where the pose should be
          * re-read from the current phase rather than the stepped one      */
+        sh_pose_lookat_set(&cp.ev);   /* V53: the frame's look-at */
         sh_env_sync_live(&Es, P.t, cp.pos, cp.q, 0);
         sh1x_anims_sync((Sh1x *)&R.sc->sh1x, tSim, &cp.pos); /* v43 (E-19/20-1): hold at the final session time (the in-loop call is post-advance, live parity) */
         render_frame(&fb, &R, &cp);
