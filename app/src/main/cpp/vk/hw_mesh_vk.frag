@@ -166,8 +166,8 @@ void main() {
 
   /* the per-vertex colors: affine recovery (w==1 in PS1 mode -> the plain
    * varying); the CPU rounds with (int)(x + 0.5) — replicated exactly  */
-  vec3 vcol = v_colw * v_w;
-  vec3 vocol = v_ocolw * v_w;
+  vec3 vcol = v_colw / v_w;   /* w10: DIVIDE — see the GLES header */
+  vec3 vocol = v_ocolw / v_w; /* w10: same */
   int vr = int(vcol.r + 0.5);
   int vg = int(vcol.g + 0.5);
   int vb = int(vcol.b + 0.5);
@@ -212,5 +212,5 @@ void main() {
                      float(clamp(b, 0, 255)) / 255.0, 1.0);
   }
   /* the flake-occlusion depth (affine z == raster_tri's barycentric z) */
-  fragZ = vec4(v_zw * v_w, 0.0, 0.0, 1.0);
+  fragZ = vec4(v_zw / v_w, 0.0, 0.0, 1.0);  /* w10: same */
 }
