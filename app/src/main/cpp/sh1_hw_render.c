@@ -916,6 +916,18 @@ static int hw_build_batch(Frame *fb, const Renderer *R, const CamPose *cam) {
     int nFlake = 0;
     const Snow *S = R->snow;
     int snowScale = fb->w / 320; if (snowScale < 1) snowScale = 1;
+    /* w10 (v43 E-16-2): the TV paint collects FIRST — the engine's add
+     * order is TV prims (game_sys_states.c:155) -> the weather particles
+     * (:168) -> WorldGfx_Draw's mesh (:186); on an OT bucket tie the
+     * LIFO walk draws last-collected on top, so flakes must sit OVER the
+     * screens — the stale v36 order here painted flakes UNDER the TV.  */
+    g_hwNTvq = 0;                    /* the batch-owned count (the replay
+                                      * bounds-checks against this)        */
+    if (R->dbgItem < 0) {
+        sh_tvpaint_collect(&sc->sh1x, &viewProj, &view, fb, R,
+                           post, &nPost, &seq, g_hwTvq, &g_hwNTvq, 24,
+                           nQuadMax + SNOW_COUNT_MAX + 1);
+    }
     if (S && S->enabled && R->dbgItem < 0) {
         for (int i = 0; i < S->addedCount && i < SNOW_COUNT_MAX; i++) {
             const SnowPart *p = &S->p[i];
@@ -1005,7 +1017,7 @@ static int hw_build_batch(Frame *fb, const Renderer *R, const CamPose *cam) {
             if (R->opts.ps1)
                 gte_snap_screen(&tsx, &tsy, R->enginePixScale, R->enginePixScaleY),
                 gte_snap_screen(&hsx, &hsy, R->enginePixScale, R->enginePixScaleY);
-            int otz = (int)floorf(tDepth * 64.0f + 0.5f);
+            int otz = (int)floorf(tDepth * 64.0f);   /* w10 (V44 D-2): gte_stszotz truncates — no +0.5 */
             int zHalf = otz >> 1;
             if (!(zHalf > 32 && zHalf < 2047)) continue;
             int clutRow = (zHalf > 63 && zHalf < 256)
@@ -1101,13 +1113,6 @@ static int hw_build_batch(Frame *fb, const Renderer *R, const CamPose *cam) {
      * the kind-5 blit (sh_tvpaint_draw_quad) is a CPU raster that runs
      * AFTER the GPU readback (hw_replay_sprites), so the batch owns the
      * copy (g_hwTvq) — the collect fills it directly.                  */
-    g_hwNTvq = 0;                    /* the batch-owned count (the replay
-                                      * bounds-checks against this)        */
-    if (R->dbgItem < 0) {
-        sh_tvpaint_collect(&sc->sh1x, &viewProj, &view, fb, R,
-                           post, &nPost, &seq, g_hwTvq, &g_hwNTvq, 24,
-                           nQuadMax + SNOW_COUNT_MAX + 1);
-    }
 
     /* ==================================================================
      * v24 — the WorldMap_Draw SUBCELL WINDOW (engine-verbatim).
