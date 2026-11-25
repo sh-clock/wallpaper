@@ -1299,7 +1299,16 @@ public class Sh1WallpaperService extends WallpaperService {
     if (!sEngineStarted || sEditorSession) {
       return;  // not running (or the editor preview owns the engine)
     }
-    int env = getEffectiveEnv(context, prefs);
+    /* w10: the runtime delta must resolve through the SAME override chain
+     * the boot path uses (restartEngine:1394-1405 — the F11 per-track /
+     * per-scene pins FIRST, then the effective chain) — the old runtime
+     * form resolved getEffectiveEnv/getUserWeather alone, so any pinned
+     * env/weather silently reverted within a minute (the default Auto
+     * Mode's TIME_TICK) or on every settings edit. With the pin honored,
+     * a pinned engine simply stops producing deltas. */
+    int ovrEnv = getTrackEnvOverride(prefs, sAppliedTrackId);
+    if (ovrEnv < 0) { ovrEnv = getSceneEnvOverride(prefs, sAppliedScene); }
+    int env = ovrEnv >= 0 ? ovrEnv : getEffectiveEnv(context, prefs);
     if (env != sAppliedEnv) {
       boolean gradual = prefs.getBoolean(PREF.SH1_AUTO, DEF.SH1_AUTO)
           && prefs.getBoolean(PREF.SH1_TRANSITION, DEF.SH1_TRANSITION);
@@ -1313,7 +1322,9 @@ public class Sh1WallpaperService extends WallpaperService {
           + " (" + SH1.getEnvModeName(env) + ")"
           + (gradual ? " [gradual ~3 s blend]" : ""));
     }
-    int weather = getUserWeather(prefs);
+    int ovrWeather = getTrackWeatherOverride(prefs, sAppliedTrackId);
+    if (ovrWeather < 0) { ovrWeather = getSceneWeatherOverride(prefs, sAppliedScene); }
+    int weather = ovrWeather >= 0 ? ovrWeather : getUserWeather(prefs);
     int target = weather != SH1.WEATHER_SCENE ? weather : getSceneWeather(context);
     if (target != sAppliedWeather) {
       Sh1Native.weather(target);
@@ -1343,7 +1354,16 @@ public class Sh1WallpaperService extends WallpaperService {
         || !prefs.getBoolean(PREF.SH1_AUTO, DEF.SH1_AUTO)) {
       return;
     }
-    int env = getEffectiveEnv(context, prefs);
+    /* w10: the runtime delta must resolve through the SAME override chain
+     * the boot path uses (restartEngine:1394-1405 — the F11 per-track /
+     * per-scene pins FIRST, then the effective chain) — the old runtime
+     * form resolved getEffectiveEnv/getUserWeather alone, so any pinned
+     * env/weather silently reverted within a minute (the default Auto
+     * Mode's TIME_TICK) or on every settings edit. With the pin honored,
+     * a pinned engine simply stops producing deltas. */
+    int ovrEnv = getTrackEnvOverride(prefs, sAppliedTrackId);
+    if (ovrEnv < 0) { ovrEnv = getSceneEnvOverride(prefs, sAppliedScene); }
+    int env = ovrEnv >= 0 ? ovrEnv : getEffectiveEnv(context, prefs);
     if (env != sAppliedEnv) {
       boolean gradual = prefs.getBoolean(PREF.SH1_TRANSITION, DEF.SH1_TRANSITION);
       if (gradual) {
