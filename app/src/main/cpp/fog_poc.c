@@ -13321,12 +13321,19 @@ static void sh1x_water_fx_draw(Frame *fb, const Renderer *R,
                         if (k == 0) d0 = d;   /* sp78[i][j], the cull corner */
                         dsum += d;
                         float iv = 224.0f / d;      /* v40: NTSC 224 (gte_rtpt) */
-                        int mqx = (int)(px * iv);   /* engine px, screen-ctr */
+                        /* w8-audit (D4-1): the engine stores the lattice
+                         * corner from gte_rtpt's SATURATED screen coord
+                         * (map5_s00.c:182-185: gte_stsxy3c -> sp10[i][j];
+                         * both the ±200/±160 cull and the quad read it) —
+                         * floor + PushSXY saturation, the F16 family form */
+                        int mqx = (int)floorf(px * iv);
+                        if (mqx < -1184) mqx = -1184; else if (mqx > 863) mqx = 863;
                         /* V48 (W-audit B): engine y-DOWN screen — negate
                          * the glTF view py (the ripple mesh + sprites are
                          * the same FX family; latent: no ripple room in
                          * the current GLB corpus, fixed for parity)   */
-                        int mqy = (int)(-py * iv);
+                        int mqy = (int)floorf(-py * iv);
+                        if (mqy < -1136) mqy = -1136; else if (mqy > 911) mqy = 911;
                         if (k == 0) { m0xe = mqx; m0ye = mqy; }
                         sxq[k] = (int)(mqx * fxpX) + (int)(fb->w / 2);
                         syq[k] = (int)(mqy * fxpY) + (int)(fb->h / 2);
@@ -13403,10 +13410,17 @@ static void sh1x_water_fx_draw(Frame *fb, const Renderer *R,
                     if (d <= 0.05f) { vis = 0; break; }
                     dsum += d;
                     float iv = 224.0f / d;          /* v40: NTSC 224 (gte_rtps) */
-                    int spx = (int)(px * iv);       /* engine px, screen-ctr */
+                    /* w8-audit (D4-1): the engine stores gte_rtps's
+                     * SATURATED coord (map5_s00.c:127-131:
+                     * gte_stsxy -> field_144; the ±200/±160 cull at
+                     * :141-143 reads it) — floor + PushSXY saturation,
+                     * the F16 family form                                   */
+                    int spx = (int)floorf(px * iv);
+                    if (spx < -1184) spx = -1184; else if (spx > 863) spx = 863;
                     /* V48 (W-audit B): engine y-DOWN screen — negate the
                      * glTF view py (same FX-family flip as the mesh site) */
-                    int spy = (int)(-py * iv);
+                    int spy = (int)floorf(-py * iv);
+                    if (spy < -1136) spy = -1136; else if (spy > 911) spy = 911;
                     sxq[k] = (int)(spx * fxpX) + (int)(fb->w / 2);
                     syq[k] = (int)(spy * fxpY) + (int)(fb->h / 2);
                     if (k == 3) {
