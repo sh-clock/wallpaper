@@ -415,7 +415,13 @@ public class Sh1WallpaperService extends WallpaperService {
           }
         }
         if (!refresh) {
-          newHashes.put(f, sha256Hex(out));     // keep tracking user data
+          // w10: record a sentinel that can NEVER equal a sha256 hex — a user
+          // file preserved on one refresh used to have its (USER) hash written
+          // here, and the NEXT refresh then classified it as "OUR unmodified
+          // copy" (onDisk.equals(recorded)) and clobbered it from the APK —
+          // the user's camdat.json/BYOA GLB survived exactly one version bump.
+          // "USER" makes the user-owned state sticky forever.
+          newHashes.put(f, "USER");
           continue;
         }
         try (InputStream in = context.getAssets().open("sh1/" + f);
