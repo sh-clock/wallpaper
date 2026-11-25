@@ -96,28 +96,54 @@ jobs:
           MIN=$(echo "$NAME" | cut -d. -f2)
           PAT=$(echo "$NAME" | cut -d. -f3)
           PAT=${PAT:-0}
-          if [ -n "$CODE" ]; then
-            # code/engine change -> ONE MINOR level (1.0.0 -> 1.1.0)
-            NEWMIN=$((MIN + 1))
-            NEWNAME="$MAJ.$NEWMIN.0"
-            KIND="minor"
-          else
-            # asset-only change -> ONE PATCH level (1.0.0 -> 1.0.1)
-            NEWPAT=$((PAT + 1))
-            NEWNAME="$MAJ.$MIN.$NEWPAT"
-            KIND="patch"
-          fi
-          NEWCODE=$(( $(grep '^versionCode=' version.properties | cut -d= -f2) + 1 ))
-          printf 'versionName=%s\nversionCode=%s\n' "$NEWNAME" "$NEWCODE" > version.properties
-          git config user.name  "sh1-release-bot"
-          git config user.email "sh1-release-bot@users.noreply.github.com"
-          git add version.properties
-          git commit -m "bump version to $NEWNAME ($KIND change) [skip ci]"
-          git tag "v$NEWNAME"
-          git push origin main "v$NEWNAME"
-          echo "did=1" >> "$GITHUB_OUTPUT"
-          echo "version=$NEWNAME" >> "$GITHUB_OUTPUT"
-          echo "new version: $NEWNAME ($KIND)"
+          # v53 (the PoC v33.51 lesson, twin fix): re-checkout fresh main
+          # each round, skip versions whose tag already exists, push
+          # main+tag ATOMICALLY, retry on race for up to 5 rounds.
+          for attempt in 1 2 3 4 5; do
+            git fetch -q origin main --tags
+            git checkout -q -B bumpwork origin/main
+            if [ "$attempt" -gt 1 ]; then
+              NAME=$(grep '^versionName=' version.properties | cut -d= -f2)
+              MAJ=$(echo "$NAME" | cut -d. -f1)
+              MIN=$(echo "$NAME" | cut -d. -f2)
+              PAT=$(echo "$NAME" | cut -d. -f3)
+              PAT=${PAT:-0}
+            fi
+            if [ -n "$CODE" ]; then
+              # code/engine change -> ONE MINOR level (1.0.0 -> 1.1.0)
+              NEWMIN=$((MIN + 1))
+              NEWNAME="$MAJ.$NEWMIN.0"
+              KIND="minor"
+            else
+              # asset-only change -> ONE PATCH level (1.0.0 -> 1.0.1)
+              NEWPAT=$((PAT + 1))
+              NEWNAME="$MAJ.$MIN.$NEWPAT"
+              KIND="patch"
+            fi
+            while git rev-parse -q --verify "refs/tags/v$NEWNAME" >/dev/null 2>&1; do
+              if [ -n "$CODE" ]; then
+                NEWMIN=$((NEWMIN + 1)); NEWNAME="$MAJ.$NEWMIN.0"
+              else
+                NEWPAT=$((NEWPAT + 1)); NEWNAME="$MAJ.$MIN.$NEWPAT"
+              fi
+            done
+            NEWCODE=$(( $(grep '^versionCode=' version.properties | cut -d= -f2) + 1 ))
+            printf 'versionName=%s\nversionCode=%s\n' "$NEWNAME" "$NEWCODE" > version.properties
+            git config user.name  "sh1-release-bot"
+            git config user.email "sh1-release-bot@users.noreply.github.com"
+            git add version.properties
+            git commit -m "bump version to $NEWNAME ($KIND change) [skip ci]"
+            git tag "v$NEWNAME"
+            if git push --atomic origin bumpwork:main "v$NEWNAME"; then
+              echo "did=1" >> "$GITHUB_OUTPUT"
+              echo "version=$NEWNAME" >> "$GITHUB_OUTPUT"
+              echo "new version: $NEWNAME ($KIND, attempt $attempt)"
+              exit 0
+            fi
+            echo "round $attempt: push lost a race — retrying on fresh main"
+            git tag -d "v$NEWNAME" >/dev/null 2>&1 || true
+          done
+          echo "FATAL: bump could not land in 5 rounds"; exit 1
 
   # ---- the ALL-ANIMATIONS GATE (S20-cont) ------------------------------------
   # The PoC S20 all-animations suite ported to the twin binary + the APK's
