@@ -16833,6 +16833,11 @@ static int live_action(LiveApp *A, LiveKey k, int down) {
         A->play.t = 0;
         A->play.sessionT = 0;         /* v10: restart the session clock too */
         A->tickPending = 0;           /* v20: restart the tick grid too      */
+        turn_init(&A->play.turn);    /* w10: the turn filter restarts too —
+                                      * the carried pre-restart orientation
+                                      * slews at <=160deg/s toward the t=0
+                                      * target instead of snapping (the
+                                      * fresh-session boot site does this) */
         g_userLightLineT = 0.0;       /* v49: the LINE light restarts too    */
         /* v41-ENGFX bug 3a (ported from PoC 5b14c00): the room-reload
          * weather sync — the engine's WeatherParticle_SystemUpdate case 0
