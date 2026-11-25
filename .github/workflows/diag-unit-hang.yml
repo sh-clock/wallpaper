@@ -1,0 +1,27 @@
+name: diag-unit-hang
+on:
+  push:
+    branches: [diag-unit-hang]
+  workflow_dispatch:
+
+jobs:
+  find-hang:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Run unit tests with per-test START logging (timeout-minutes kills the hang; the last STARTED test is the culprit)
+        run: |
+          chmod +x gradlew
+          ./gradlew testDebugUnitTest --no-daemon --stacktrace 2>&1 | tee test.log
+      - name: Upload the test log (always — the timeout kills this step, so also print the tail)
+        if: always()
+        run: |
+          echo "=== LAST 40 LINES ==="
+          tail -40 test.log || true
+          echo "=== LAST STARTED TESTS ==="
+          grep -E "PASSED|FAILED|STARTED" test.log | tail -30 || true
