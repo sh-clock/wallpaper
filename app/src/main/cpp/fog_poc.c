@@ -9092,7 +9092,7 @@ static void transform_item2(const Renderer *R, const DrawItem *it,
                 } else {
                     /* v8 VERBATIM — func_80057A3C (enum-2 directional N.L):
                      *   IR1 = gte_ll(lightVec = field_28, normal << 5)
-                     *        (the MVMMA FC-bug path — see sh_gte_ll_buggy)
+                     *        (MVMVA LLM cv=3 — full dot; see sh_gte_ll_buggy)
                      *   var_v1 = IR1 + g_WorldEnvWork.field_20 (RAW wLI)
                      *   var_v1 >>= 5
                      *   if (var_v1 > 0xFF) var_v1 = 0xFF
