@@ -12100,30 +12100,31 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
     int hensinX = fx_q12_mul(sh_math_sin(angZ), sh_math_cos(angXY));
     int hensinY = fx_q12_mul(sh_math_sin(angZ), sh_math_sin(angXY));
 
-    /* V42 C-2 (PR #51 re-land, gate re-derived): the engine's occluded-
-     * branch OT placement for core quads 1-2 (lens_flare.c:338-349/364-
-     * 375, VERBATIM):
-     *   center_visible            -> AddPrim(front_ot)   (over all)
-     *   occluded, ang_z > 90deg   -> AddPrim(depth_ot)   (the LIGHT'S
-     *                                OWN bucket org[vz>>3])
-     *   occluded, ang_z <= 90deg  -> AddPrim(depth_ot+7) (7 buckets
-     *                                FARTHER = 56 Q8 = +0.21875 m)
-     * The PoC depth gate is the bucket's FAR edge (the fx_blit_gouraud_
-     * tri depthM convention): same-bucket geometry AddPrim'd before the
-     * quad (all world geometry precedes the flare pass) draws after it
-     * and covers it — the C-3 far-edge rule. Quad 3 and the ghosts/
-     * streaks stay front_ot (the engine adds them unconditionally,
-     * lens_flare.c:394/442/459/474/489). scrLPos[2] is fresh this frame
-     * (the sprite section runs only with syncDrawExecF set under Gate 2
-     * vz > 112 Q8), so lb >= 14 always. */
+    /* V53 (the always-on flare-ball fix): core quads 1-2 draw ONLY in
+     * the visible branch. The engine's occluded branch (V42 C-2: the
+     * quads AddPrim'd at depth_ot = org[vz>>3], or +7 buckets for
+     * ang_z <= 90deg, lens_flare.c:338-349/364-375) exists to keep the
+     * dim glow BEHIND THE LIGHT'S OWN CARRIER: Game_FlashlightAttribsSet
+     * (effects.c:204-218) pins the light at playerBoneCoords[HarryBone_
+     * Torso] + (-0.08, -0.28, 0.12) -- INSIDE Harry's model -- so in-game
+     * the occluded quads land behind Harry's own front surfaces and are
+     * NEVER visible when the light faces away (the owner's rule: the
+     * flare happens only when a light FACES the camera). The port's
+     * light (the user light / the camdat light) has NO carrier body:
+     * the V42 form left the dim quads (grey 30, 45px + 0x10, 22px)
+     * floating unoccluded in open air -- the "ball in the camera's face
+     * at all times" report. The branch maps to a NO-OP: the engine's
+     * own in-game behavior for the emulated object (Harry's flashlight:
+     * the flare only when center_visible -- the >=75deg seed +
+     * readback chain) is preserved exactly. Quad 3 + the ghosts +
+     * streaks are rate-scaled (0 when not visible) -- unaffected. */
     float flareGate = -1.0f;               /* visible: paint in front  */
     if (!visF) {
-        int lb = g_flaresys.scrLPos[2] >> 3;   /* the light's OT bucket */
-        if (angZ > fx_q12_angle(90.0f))
-            flareGate = (float)((lb + 1) * 8) * (1.0f / 256.0f);
-        else
-            flareGate = (float)((lb + 8) * 8) * (1.0f / 256.0f);
-    }
+        /* V53: the occluded branch does not draw (see above); quad 3 +
+         * the ghosts/streaks below stay rate-scaled (front_ot through
+         * the decay window, lens_flare.c:394/442/459/474/489) -- the
+         * engine's fade-out is preserved.                            */
+    } else {
 
     /* sprite blits in PoC px (engine px * scale, screen-centered)      */
     #define FX_TO_PX(v) ((int)((v) * scale) + (int)(fb->w / 2))
@@ -12152,6 +12153,7 @@ static void fx_pass(Frame *fb, const Renderer *R, const CamPose *cam) {
         FX_TO_PX(scrX + 11), FX_TO_PY(scrY + 11),
         (const unsigned char *)kFlareCore, 64, 64, kFlareClutCore,
         0x10, 0x10, 0x10, flareGate);
+    }   /* V53: end of the visible-branch core quads                   */
     /* core quad 3 (lens_flare.c:367-396): grey min(rate*2,1)*48, offset
      * hensin*9/2? engine FP_MULTIPLY(hensin, 9, Q12_SHIFT-1) = h*9/2   */
     {
