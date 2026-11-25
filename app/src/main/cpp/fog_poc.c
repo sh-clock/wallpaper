@@ -1722,17 +1722,6 @@ static void sh1x_load(Sh1x *sx, const JValue *json) {
             }
         }
     }
-    /* subcellTable entries are [start, count] pairs of NUMBERS, not objects */
-    for (int z = 0; z < 5; z++) {
-        const JValue *row = jat(tbl, z);
-        for (int x = 0; x < 5; x++) {
-            const JValue *ent = jat(row, x);
-            if (ent && ent->type == JV_ARR && ent->count == 2) {
-                sx->subcell[z][x][0] = (int)jat(ent, 0)->num;
-                sx->subcell[z][x][1] = (int)jat(ent, 1)->num;
-            }
-        }
-    }
     const JValue *order = jarr(sh, "modelOrder");
     sx->modelOrderSize = jcount(order);
     if (sx->modelOrderSize > 0) {
