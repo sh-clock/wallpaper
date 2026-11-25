@@ -5828,12 +5828,12 @@ static int sh_mesh_light_vertex(const ShMeshLight *ml,
  * (x,-y,-z) into the engine view frame — orthogonal, dot-preserving.
  *
  * D_800AE500 = SVECTOR(Q12_ANGLE(255.65deg)...): Q12_ANGLE(deg) =
- * (s32)(deg/360*4096) -> (0,2909,2909) etc, |N| = 4115 (near-unit Q12). */
+ * (s32)(deg/360*4096) -> (0,2908,2908) etc, |N| = 4115 (near-unit Q12). */
 static const int16_t SH_BB_NORMALS[4][3] = {
-    { 0,  2909,  2909 },   /* D_800AE500[0]: top-tilt      */
-    { -2909, 0,  2909 },   /* D_800AE500[1]: left-tilt     */
-    { 2909, 0,  2909 },    /* D_800AE500[2]: right-tilt    */
-    { 0, -2909,  2909 },   /* D_800AE500[3]: down-tilt     */
+    { 0,  2908,  2908 },   /* D_800AE500[0]: top-tilt      */
+    { -2908, 0,  2908 },   /* D_800AE500[1]: left-tilt     */
+    { 2908, 0,  2908 },    /* D_800AE500[2]: right-tilt    */
+    { 0, -2908,  2908 },   /* D_800AE500[3]: down-tilt     */
 };
 
 /* Math_Vector3MagCalc = SquareRoot0(x^2+y^2+z^2) — the GTE integer floor
@@ -10652,9 +10652,9 @@ static void sh1x_waterfall_tick(Sh1x *sx, const CamPose *cam,
                 a->wfAlong[q] += temp_s4;              /* water.c:180  */
             } else {
                 /* water.c:328-340 — the vertical fall (map1_s03's drain
-                 * cutscene; 1336 = the engine's per-tick g_GravitySpeed
+                 * cutscene; 1337 = the engine's per-tick g_GravitySpeed
                  * raw — the prior session's documented value)          */
-                a->wfVyAcc[q] += (1336 * a->wfVy[q]) >> 7;
+                a->wfVyAcc[q] += (1337 * a->wfVy[q]) >> 7;
                 if (a->wfVyAcc[q] > 24576) a->wfVyAcc[q] = 24576;
                 int temp_s4 = (int)(((int64_t)dtRaw *
                         a->wfVyAcc[q]) >> 12);
@@ -10906,7 +10906,7 @@ static void sh1x_anims_tick(Sh1x *sx, double dt, const v3 *camGltf) {
         case 9: {  /* gravityScatter — map7_s02_2.c:1167-1188 VERBATIM:
                     * one discrete step per 30Hz frame; the fall velocity
                     * D_800E9ED0 += g_GravitySpeed (= Q12_MULT(vCount,
-                    * 10419) = 1336 raw at the 30Hz tick, vCount 526 —
+                    * 10419) = 1337 raw at the 30Hz tick, vCount 526 —
                     * game_main.c:295; v27.2 (B-5): was 10419 = 7.8x),
                     * clamped Q12(5.0)=20480; PER-INSTANCE scatter
                     * (map7_s02_2.c:1179-1180): vy += Q12_MULT_PRECISE(dt,
@@ -11174,7 +11174,7 @@ static void sh1x_anims_tick(Sh1x *sx, double dt, const v3 *camGltf) {
                     * falls after EventFlag_320): first armed frame does
                     * D_800E05AE += Q12(1.0); then timer += dt;
                     * var = ratan2(Q12_ANGLE(360), FP_FROM(g_GravitySpeed*
-                    * Math_Cos(rot.vx), 12)) with g_GravitySpeed = 1336
+                    * Math_Cos(rot.vx), 12)) with g_GravitySpeed = 1337
                     * raw (game_main.c Q12_MULT(526,10419)); damping
                     * var_a0 = MAX(0, Q12(1) - timer*2); torque =
                     * MULT_PRECISE(var_a0, torque + var); rot.vx +=
@@ -11191,7 +11191,7 @@ static void sh1x_anims_tick(Sh1x *sx, double dt, const v3 *camGltf) {
             {
                 int rotVx = (int)(a->cur[0] * (4096.0f / 360.0f));
                 int cosV = sh_math_cos(rotVx);
-                int gx = (int)(((int64_t)1336 * cosV) >> 12);
+                int gx = (int)(((int64_t)1337 * cosV) >> 12);
                 int var = fx_q12_angle(atan2f(4096.0f, (float)gx)
                                       * (180.0f / (float)M_PI));
                 int varA0 = 4096 - (int)(a->mvTimer * 2.0f * 4096.0f);
@@ -11202,7 +11202,7 @@ static void sh1x_anims_tick(Sh1x *sx, double dt, const v3 *camGltf) {
                 if (rotVx > 1024) rotVx = 1024;          /* Q12_ANGLE(90) */
                 a->cur[0] = (float)rotVx * (360.0f / 4096.0f);
             }
-            a->fallVel += 1336 + (1336 >> 4);            /* MIN(Q12(15),..) */
+            a->fallVel += 1337 + (1337 >> 4);            /* MIN(Q12(15),..) */
             if (a->fallVel > 61440) a->fallVel = 61440;
             a->cur[1] += (float)(((int64_t)dtRaw * a->fallVel) >> 12)
                          / 4096.0f;
@@ -11243,7 +11243,7 @@ n                    * STONE3_H — NOT ported: one GLB model per entry);
                 break;
             }
             case 2: {
-                a->stoneVel += 1336 >> 1;             /* D_800E168E += g>>1 */
+                a->stoneVel += 1337 >> 1;             /* D_800E168E += g>>1 */
                 int vyQ = (int)(a->cur[1] * 4096.0f);
                 if (vyQ < -4300) {   /* vy < Q12(-1.05): the stone RISES */
                     vyQ += (int)(((int64_t)dtRaw * a->stoneVel) >> 12);
@@ -11275,7 +11275,7 @@ n                    * STONE3_H — NOT ported: one GLB model per entry);
                 break;
             }
             case 4: {
-                a->stoneVel += 1336;
+                a->stoneVel += 1337;
                 int rz = (int)(a->cur[0] * (4096.0f / 360.0f));
                 rz += (int)(((int64_t)dtRaw * -1365) >> 12);
                 /* dt*Q12_ANGLE(-120) = -1365 raw */
@@ -15600,7 +15600,7 @@ static int r2_in_restricted_zone(const v3 *eye) {
      * the PoC track eye is glTF y-up meters — the room's engine->glTF
      * transform is identity on xz (v10ipd2gltf preserves the world axes),
      * so the zone test applies directly on the eye xz.                  */
-    int32_t x = R2_Q12((double)eye->x), z = R2_Q12((double)eye->z);
+    int32_t x = R2_Q12((double)eye->x), z = R2_Q12((double)-eye->z); /* w10: engine z = -glTF z (V44 D-1) */
     /* v43 (E18-7): the engine's Q12 = TO_FIXED TRUNCATES — (s32)(x*4096),
      * fixed_point.h:30-31; Q12(201.8f) = (s32)(201.80000305*4096 =
      * 826572.8125) = 826572. The old R2_Q12(201.8) llround gave 826573 —
