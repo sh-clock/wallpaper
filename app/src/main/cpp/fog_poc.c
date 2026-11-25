@@ -1815,7 +1815,7 @@ static void sh1x_load(Sh1x *sx, const JValue *json) {
             sx->hasEnv = 1;
             sx->envIdx0 = p0;
             sx->envIdx1 = p1;
-            sx->envField16 = jint(envarr, "field16", 0);
+            sx->envField16 = jint(envarr, "field16", 1);   /* w10: the drawCase arg — 1 the map0 form when the env omits it */
             sx->envField17 = jint(envarr, "field17", 0);
             /* envIsDark resolved at boot (needs the preset table defined
              * below): idx1 Spot && idx0 != idx1 = the dark-room
@@ -20123,7 +20123,8 @@ int main(int argc, char **argv) {
      * event recipe — map6_s00.c:184-186: EnvironmentSet(2,127) + the
      * case-0 re-sync + SnowInit + D0B18 — with the sine cross-fade.)   */
     if (bootWeather >= 0 && bootWeather != 2) {
-        particle_environment_set(&A.snow, bootWeather, 1);
+        particle_environment_set(&A.snow, bootWeather,
+                       sc.sh1x.hasEnv ? sc.sh1x.envField16 : 1);
         A.snow.weatherSettings = (uint16_t)(A.snow.weatherBits >> 12);
         A.snow.weatherCurrent = A.snow.weatherBits;
         A.snow.weatherTarget = A.snow.weatherBits;
@@ -20140,7 +20141,8 @@ int main(int argc, char **argv) {
          * recipe 2 stays the map0 default). Mirrors the editor exactly:
          * settings/current/target sync + rainGravity 30 + snowTypeEnable
          * + weatherTick 0 + the re-armed transition lock + SnowInitialize. */
-        particle_environment_set(&A.snow, cd.envBootWeather, 1);
+        particle_environment_set(&A.snow, cd.envBootWeather,
+                       sc.sh1x.hasEnv ? sc.sh1x.envField16 : 1);
         A.snow.weatherSettings = (uint16_t)(A.snow.weatherBits >> 12);
         A.snow.weatherCurrent = A.snow.weatherBits;
         A.snow.weatherTarget = A.snow.weatherBits;
@@ -20159,7 +20161,8 @@ int main(int argc, char **argv) {
          * sewer rain. The same recipe numbering as --weather. Recipe 2
          * (snow+wind) stays the map0 default exactly like the v13 rule
          * above; CLI/camdat boot weather keeps precedence. */
-        particle_environment_set(&A.snow, sc.sh1x.envField17, 1);
+        particle_environment_set(&A.snow, sc.sh1x.envField17,
+                       sc.sh1x.envField16);   /* arg1 = field_16 verbatim (load_screen.c:36) */
         A.snow.weatherSettings = (uint16_t)(A.snow.weatherBits >> 12);
         A.snow.weatherCurrent = A.snow.weatherBits;
         A.snow.weatherTarget = A.snow.weatherBits;
