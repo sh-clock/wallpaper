@@ -1702,15 +1702,16 @@ static void sh1x_load(Sh1x *sx, const JValue *json) {
     sx->chunkX = jint(hdr, "chunkX", 0);         /* s8 (converter v14.1+) */
     sx->chunkZ = jint(hdr, "chunkZ", 0);
     const JValue *tbl = jarr(hdr, "subcellTable");
-    for (int z = 0; z < 5; z++) {
-        const JValue *row = jat(tbl, z);
-        for (int x = 0; x < 5; x++) {
-            const JValue *ent = jat(row, x);
-            sx->subcell[z][x][0] = ent ? jint(ent, 0, -1) : -1;   /* arrays of [start,count] */
-            sx->subcell[z][x][1] = ent ? jcount(ent) > 1 ? (int)jat(ent, 1)->num : 0 : 0;
-        }
-    }
-    /* subcellTable entries are [start, count] pairs of NUMBERS, not objects */
+    /* subcellTable entries are [start, count] pairs of NUMBERS, not objects.
+     * V45 audit (B-1 + B-6): an older first pass stored `ent ? jint(ent,
+     * 0, -1) : -1` — jint's 2nd parameter is a KEY string (const char*),
+     * so the literal 0 passed a NULL key and jget() reached `strcmp(...key,
+     * NULL)` on the first child of any OBJECT-form entry (the natural
+     * hand-edited {"start":s,"count":c} spelling) — a segfault, ASan-proven,
+     * reachable through scene_load_glb_q on ANY GLB including the silent
+     * mapLink neighbor probe. This twin still had that loop (w7-audit
+     * C5-6); replaced with PoC's form. Non-array / absent entries keep the
+     * memset-0 {start=0, count=0} defaults (the "draw nothing" cell). */
     for (int z = 0; z < 5; z++) {
         const JValue *row = jat(tbl, z);
         for (int x = 0; x < 5; x++) {
