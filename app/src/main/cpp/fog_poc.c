@@ -8866,8 +8866,22 @@ static int fd_depth_ge_z(float depth, const Frame *fb, int px, int py) {
 static void gte_snap_screen(float *sx, float *sy, float scaleX, float scaleY) {
     if (scaleX < 1e-6f) scaleX = 1e-6f;
     if (scaleY < 1e-6f) scaleY = 1e-6f;
-    *sx = floorf(*sx / scaleX) * scaleX;   /* Sx >> 16: TRUNCATE toward  */
-    *sy = floorf(*sy / scaleY) * scaleY;   /* -inf == hardware floor     */
+    /* w9-audit (F16-bounds): port PoC's v43 E-11-2 PushSXY saturation
+     * directly in its corrected form. The input is the FB-ABSOLUTE
+     * coordinate (the center is already in at every call site); the
+     * engine saturates the CENTER-RELATIVE store to [-1024,1023] per
+     * axis (gte.cpp:353-380; the world path runs OFX=OFY=0 — no
+     * SetGeomOffset outside the item screen) and the center (160,112)
+     * enters at raster — so the ABSOLUTE domain is [center-1024,
+     * center+1023]: x [-864,1183], y [-912,1135]. */
+    float ex = floorf(*sx / scaleX);   /* Sx >> 16: TRUNCATE toward -inf */
+    float ey = floorf(*sy / scaleY);   /* == hardware floor             */
+    if (ex < -864.0f) ex = -864.0f;       /* PushSXY saturation,           */
+    else if (ex > 1183.0f) ex = 1183.0f;  /* gte.cpp:353-380 — v43 E-11-2, */
+    if (ey < -912.0f) ey = -912.0f;       /* w9: on the ABSOLUTE coord,    */
+    else if (ey > 1135.0f) ey = 1135.0f;  /* center already applied         */
+    *sx = ex * scaleX;
+    *sy = ey * scaleY;
 }
 
 /* full transform with explicit view matrix (fog needs view-space depth).
@@ -11729,16 +11743,24 @@ static int fx_water_zone_collect(Frame *fb, const Renderer *R,
                     float invd = 224.0f / d;
                     /* w5-audit (F16, reimplemented): the GTE screen store
                      * is FLOOR (MAC>>16 == arithmetic floor) + PushSXY
-                     * saturation on the ABSOLUTE coord [-1024,1023]
-                     * (gte.cpp:353-380 — the gte_snap_screen family,
-                     * v43 E-11-2); the PR's (int) TRUNC form (and the
-                     * pre-fix C's) is a latent deviation for negative
-                     * center-relative coords. Center-rel bounds after
-                     * the absolute clamp: x [-1184,863] (abs-160),
-                     * y [-1136,911] (abs-112). */
+                     * saturation (gte.cpp:353-380 — the gte_snap_screen
+                     * family, v43 E-11-2); the PR's (int) TRUNC form (and
+                     * the pre-fix C's) is a latent deviation for negative
+                     * center-relative coords. w9-audit (F16-bounds): the
+                     * saturation window applies to the CENTER-RELATIVE
+                     * store — the world path runs OFX=OFY=0 (no
+                     * SetGeomOffset in the engine's world render; the
+                     * tree-wide sites are the item-screen save/restore
+                     * and the special-pass -1024 pairs), so PushSXY's
+                     * [-1024,1023] per axis (gte.cpp:691-698 adds OFX
+                     * BEFORE the :353-380 clamp) applies directly; the
+                     * center enters at raster. The old [-1184,863]/
+                     * [-1136,911] windows presumed screen-absolute
+                     * storage (OFX=160/OFY=112) — off by the center
+                     * shift for far-offscreen corners. */
                     glintPx = (int)floorf(vx * invd);
-                    if (glintPx < -1184) glintPx = -1184;
-                    else if (glintPx > 863) glintPx = 863;
+                    if (glintPx < -1024) glintPx = -1024;
+                    else if (glintPx > 1023) glintPx = 1023;
                     /* V48 (W-audit B): engine y-DOWN screen — negate the
                      * glTF view vy. The mirrored light point is correct in
                      * world space (gy = posY*2 - ly, the engine mirror
@@ -11747,8 +11769,8 @@ static int fx_water_zone_collect(Frame *fb, const Renderer *R,
                      * water band instead of ON it (:635-676 projects the
                      * ENGINE view y onto the y-DOWN screen).            */
                     glintPy = (int)floorf(-vy * invd);
-                    if (glintPy < -1136) glintPy = -1136;
-                    else if (glintPy > 911) glintPy = 911;
+                    if (glintPy < -1024) glintPy = -1024;
+                    else if (glintPy > 1023) glintPy = 1023;
                     /* brightness: sin(clamp(angle-40°,<=90°)) — the
                      * angle is scr_l_ang_z; r=sin>>6 g=(sin*7)>>9 b=(sin*5)>>9 */
                     int ang0 = g_flaresys.scrLAngZ - fx_q12_angle(40.0f);
@@ -11820,11 +11842,11 @@ static int fx_water_zone_collect(Frame *fb, const Renderer *R,
                             /* w5-audit (F16, reimplemented): floor +
                              * PushSXY saturation (see the glint site) */
                             int aex = (int)floorf(cpx * civ);
-                            if (aex < -1184) aex = -1184; else if (aex > 863) aex = 863;
+                            if (aex < -1024) aex = -1024; else if (aex > 1023) aex = 1023;
                             /* V48 (W-audit B): engine y-DOWN screen — the
                              * G3 apex must negate the glTF view cpy      */
                             int aey = (int)floorf(-cpy * civ);
-                            if (aey < -1136) aey = -1136; else if (aey > 911) aey = 911;
+                            if (aey < -1024) aey = -1024; else if (aey > 1023) aey = 1023;
                             cScx = (int)(aex * fxpX) + (int)(fb->w / 2);
                             cScy = (int)(aey * fxpY) + (int)(fb->h / 2);
                             cVis = 1;
@@ -11876,7 +11898,7 @@ static int fx_water_zone_collect(Frame *fb, const Renderer *R,
                             /* w5-audit (F16, reimplemented): floor +
                              * PushSXY saturation — see the glint site */
                             int rex = (int)floorf(px * iv);  /* engine px, ctr */
-                            if (rex < -1184) rex = -1184; else if (rex > 863) rex = 863;
+                            if (rex < -1024) rex = -1024; else if (rex > 1023) rex = 1023;
                             /* V48 (W-audit B): engine y-DOWN screen — the
                              * ring corners must negate the glTF view py;
                              * the ring geometry itself is already AT the
@@ -11884,7 +11906,7 @@ static int fx_water_zone_collect(Frame *fb, const Renderer *R,
                              * is what puts the visible annulus ON the
                              * water band instead of at the frame top   */
                             int rey = (int)floorf(-py * iv);
-                            if (rey < -1136) rey = -1136; else if (rey > 911) rey = 911;
+                            if (rey < -1024) rey = -1024; else if (rey > 1023) rey = 1023;
                             sxp[k] = (int)(rex * fxpX) + (int)(fb->w / 2);
                             syp[k] = (int)(rey * fxpY) + (int)(fb->h / 2);
                         }
@@ -13371,13 +13393,13 @@ static void sh1x_water_fx_draw(Frame *fb, const Renderer *R,
                          * both the ±200/±160 cull and the quad read it) —
                          * floor + PushSXY saturation, the F16 family form */
                         int mqx = (int)floorf(px * iv);
-                        if (mqx < -1184) mqx = -1184; else if (mqx > 863) mqx = 863;
+                        if (mqx < -1024) mqx = -1024; else if (mqx > 1023) mqx = 1023;
                         /* V48 (W-audit B): engine y-DOWN screen — negate
                          * the glTF view py (the ripple mesh + sprites are
                          * the same FX family; latent: no ripple room in
                          * the current GLB corpus, fixed for parity)   */
                         int mqy = (int)floorf(-py * iv);
-                        if (mqy < -1136) mqy = -1136; else if (mqy > 911) mqy = 911;
+                        if (mqy < -1024) mqy = -1024; else if (mqy > 1023) mqy = 1023;
                         if (k == 0) { m0xe = mqx; m0ye = mqy; }
                         sxq[k] = (int)(mqx * fxpX) + (int)(fb->w / 2);
                         syq[k] = (int)(mqy * fxpY) + (int)(fb->h / 2);
@@ -13460,11 +13482,11 @@ static void sh1x_water_fx_draw(Frame *fb, const Renderer *R,
                      * :141-143 reads it) — floor + PushSXY saturation,
                      * the F16 family form                                   */
                     int spx = (int)floorf(px * iv);
-                    if (spx < -1184) spx = -1184; else if (spx > 863) spx = 863;
+                    if (spx < -1024) spx = -1024; else if (spx > 1023) spx = 1023;
                     /* V48 (W-audit B): engine y-DOWN screen — negate the
                      * glTF view py (same FX-family flip as the mesh site) */
                     int spy = (int)floorf(-py * iv);
-                    if (spy < -1136) spy = -1136; else if (spy > 911) spy = 911;
+                    if (spy < -1024) spy = -1024; else if (spy > 1023) spy = 1023;
                     sxq[k] = (int)(spx * fxpX) + (int)(fb->w / 2);
                     syq[k] = (int)(spy * fxpY) + (int)(fb->h / 2);
                     if (k == 3) {
