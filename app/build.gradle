@@ -85,6 +85,15 @@ android {
     testOptions {
         unitTests {
             includeAndroidResources = true
+            // diag-unit-hang (s26/V52): the unit-tests job hung for 6h at
+            // :app:testDebugUnitTest on main since c540ff2 — per-test START
+            // logging makes the last-started test in the log identify the
+            // hang when the job is timed out.
+            all {
+                it.testLogging {
+                    events "started", "passed", "failed"
+                }
+            }
         }
     }
 
