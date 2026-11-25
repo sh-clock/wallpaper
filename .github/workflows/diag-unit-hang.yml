@@ -31,7 +31,7 @@ jobs:
             sleep 5
             for p in $(pgrep -f 'GradleDaemon|gradle-launcher'); do kill -9 "$p" 2>/dev/null; done
           ) &
-          ./gradlew testDebugUnitTest --tests '*EditorBootSmokeTest*' --no-daemon --stacktrace 2>&1 | tee test.log
+          ./gradlew testDebugUnitTest --no-daemon --stacktrace 2>&1 | tee test.log
       - name: Upload the test log (always)
         if: always()
         run: |

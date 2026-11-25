@@ -49,6 +49,7 @@ import org.robolectric.Shadows;
 import org.robolectric.android.controller.ActivityController;
 import org.robolectric.annotation.Config;
 import org.robolectric.annotation.LooperMode;
+import org.robolectric.shadows.ShadowLegacyChoreographer;
 import xyz.zedler.patrick.doodle.Constants;
 import xyz.zedler.patrick.doodle.R;
 import xyz.zedler.patrick.doodle.view.Sh1CropOverlayView;
@@ -70,6 +71,14 @@ public class EditorCropPreviewTest {
 
   @Before
   public void setUp() {
+    // s26/V52 (the unit-hang fix, twin of EditorBootSmokeTest's note):
+    // a zero-delay frame callback re-posts itself within the same drain
+    // under ShadowLegacyChoreographer (its frame time BUMPS per call, so
+    // the editor's advancing-clock guard never terminates the chain).
+    // The 16ms delay parks each re-post in the future: idleFor(16) below
+    // then executes EXACTLY ONE doFrame pass per call — the contract this
+    // test's idle() helper always documented.
+    ShadowLegacyChoreographer.setPostFrameCallbackDelay(16);
     Context deviceCtx = ApplicationProvider.getApplicationContext()
         .createDeviceProtectedStorageContext();
     SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(deviceCtx);
@@ -92,7 +101,10 @@ public class EditorCropPreviewTest {
    * legitimately re-posts itself every frame (a real display does this
    * forever), so a full ShadowLooper.idle() would spin forever under
    * Robolectric. Draining ONE frame's worth (16 ms) executes everything
-   * that is due now while always terminating.
+   * that is due now while always terminating. (s26/V52: terminating is
+   * only true WITH the 16ms frame-callback delay set in setUp — with the
+   * zero-delay default the re-post is due in the same drain and the
+   * advancing-frame-time guard cannot stop the chain.)
    */
   private static void idle() {
     Shadows.shadowOf(Looper.getMainLooper()).idleFor(16, TimeUnit.MILLISECONDS);
