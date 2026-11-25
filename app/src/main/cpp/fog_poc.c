@@ -11475,9 +11475,11 @@ static void fx_light_anchor(const Sh1x *sx, const CamPose *cam) {
     (void)sx;
     sh_pose_lookat_set(&cam->ev);   /* V53: the frame's look-at (fresh) */
     /* V53: the water plane height (static per scene — the first enabled
-     * zone's illumination, lens_flare.c:88) for the fixed-cam fallback */
+     * zone's illumination, lens_flare.c:88; already ENGINE meters at
+     * parse (raw Q4/16, sh1x_load) — the glTF y-up plane is the
+     * NEGATED value, the same form fx_water_zone_collect uses) */
     if (sx && sx->nWaterZones > 0 && sx->waterZones[0].enabled)
-        g_waterPlaneY = (float)sx->waterZones[0].illumination * (1.0f / 16.0f);
+        g_waterPlaneY = -sx->waterZones[0].illumination;
     else
         g_waterPlaneY = -1e9f;
     float wp[3];
