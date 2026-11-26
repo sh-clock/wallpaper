@@ -6882,10 +6882,16 @@ static void snow_ground_build(Snow *S, const CamTrack *trk) {
         float ax = trk->start.x, az = trk->start.z;
         float bx = trk->end.x,   bz = trk->end.z;
         float len = sqrtf((bx-ax)*(bx-ax) + (bz-az)*(bz-az));
-        int   nSmp = len > 0.5f ? (int)(len / 0.25f) + 1 : 1;
+        /* w10: the (int) cast of a non-finite / oversize len is UB
+         * (inf -> INT_MIN -> negative nSmp -> huge size_t malloc ->
+         * NULL -> SIGSEGV; finite len > ~5.37e8 m -> the hang). Clamp
+         * into the sampler's own domain BEFORE the cast. */
+        int   nSmp = (isfinite(len) && len > 0.5f)
+                  ? (int)(fminf(len, 1024.0f) / 0.25f) + 1 : 1;
         if (nSmp < 1) nSmp = 1;
         if (nSmp > 4096) nSmp = 4096;
         smp = (int *)malloc(sizeof(int) * (size_t)nSmp);
+        if (!smp) return;   /* w10: the OOM guard */
         for (int i = 0; i < nSmp; i++) {
             /* v41 audit (B-6): nSmp==1 (an XZ start->end length < 0.5 m)
              * divided 0/0 -> t=NaN -> px=pz=NaN — the same NaN probe the
