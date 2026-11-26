@@ -5434,6 +5434,11 @@ static float g_userLightWorld[3];    /* mode 1: free world pos (glTF m) */
  * Precedence: --userlight/--userlightrot CLI > camdat light > Sh1x
  * userLight EXTRAs (the unbiased verbatim attribs) > the constants.     */
 static int   g_userLightHasRot = 0;     /* 1 = an authored aim (CLI/camdat) */
+static int   g_userLightRotGlbDefault = 0; /* W54: 1 = the rot is ONLY the GLB's
+                                      * unbiased SH1X userLightRot (the verbatim
+                                      * engine lightRotation copy) — NOT a
+                                      * creative authoring; the water-framing
+                                      * default beam may override it */
 static float g_userLightRot[3] = { -15.0f, 0.0f, 0.0f };  /* pitch,yaw,roll */
 static int   g_userLightHasOffset = 0;  /* 1 = an authored camera-local off */
 /* v49-audit (A1-2/A4-1): the engine quantizes the Harry torso offset
@@ -6161,16 +6166,60 @@ static void sh_env_update_pose(ShEnv *env, v3 camPos, Quat camQ) {
      * constant stays the no-author default). THE ANGLE DISTINCTION: the
      * light AIM is independent of the camera's own orientation.         */
     v3 d;
-    if (g_userLightHasRot) {
+    /* W54: the WATER-FRAMING default beam. When the mode-0 anchor parks
+     * the light AT the water plane (the V53 fixed-cam water-plane hit or
+     * a water-level look-at target) and no aim is authored, the engine's
+     * angle-gated water reflection (func_8008E794: sin(clamp(angZ-40deg,
+     * <=90deg)); scr_l_ang_z = the angle between the eye->light ray and
+     * the BEAM, light_overlap.c:178-234) only fires when the beam faces
+     * back across the water toward the viewer — the classic SH1 sewer
+     * shot: Harry aims his flashlight down at the water toward the fixed
+     * camera and the reflection blooms. A camera-forward beam at a
+     * look-down camera keeps angZ ~20-35deg -> sin(clamp(<0)) = 0 -> the
+     * glint stays black and the dapple tiles subtract over nothing (the
+     * owner's report: the underwater ripple texture looked missing).
+     * The default for a water-level anchor therefore aims from the light
+     * toward the VIEWER (the camera projected to the water band), the
+     * framing the engine's own gate encodes; authored rots/camdat lights
+     * and non-water anchors keep the verbatim -15deg camera-forward.  */
+    int beamTowardViewer = 0;
+    int rotIsAuthored = g_userLightHasRot && !g_userLightRotGlbDefault;
+    if (!rotIsAuthored && g_userLightMode == 0 &&
+        g_waterPlaneY > -1e8f) {
+        float wy[3];
+        sh_user_light_world_pos(camPos, camQ, wy);
+        float dy = wy[1] - g_waterPlaneY;
+        if (dy > -0.05f && dy < 1.6f) {
+            /* the beam target: the midpoint between the light and the
+             * viewer's shore position, riding just above the surface —
+             * the beam DESCENDS toward the viewer across the water (the
+             * reference geometry: the pool forms where the beam meets
+             * the surface between Harry and the camera; a straight-at-
+             * the-camera aim over-drives the flare rate at angZ~165deg) */
+            float cx2 = camPos.x, cz2 = camPos.z;
+            float tx = (wy[0] + cx2) * 0.5f, tz = (wy[2] + cz2) * 0.5f;
+            float ty = g_waterPlaneY + 0.3f;
+            float bx = tx - wy[0], by = ty - wy[1], bz = tz - wy[2];
+            float bl = (float)sqrt((double)bx*bx + (double)by*by + (double)bz*bz);
+            if (bl > 1e-3f) {
+                bx /= bl; by /= bl; bz /= bl;
+                if (by > -0.95f) {   /* never a pure vertical beam */
+                    d.x = bx * 4096.0f; d.y = by * 4096.0f; d.z = bz * 4096.0f;
+                    beamTowardViewer = 1;
+                }
+            }
+        }
+    }
+    if (rotIsAuthored) {
         int dirOut[3];
         sh_light_dir_from_rot(g_userLightRot[0], g_userLightRot[1], dirOut);
         d.x = (float)dirOut[0]; d.y = (float)dirOut[1]; d.z = (float)dirOut[2];
-    } else {
+    } else if (!beamTowardViewer) {
         d.x = (float)SH_LIGHT_DIR_CAM_Q12[0];
         d.y = (float)SH_LIGHT_DIR_CAM_Q12[1];
         d.z = (float)SH_LIGHT_DIR_CAM_Q12[2];
     }
-    if (g_userLightMode == 1) {
+    if (g_userLightMode == 1 || beamTowardViewer) {
         /* follow "world": the free-world light AIM is WORLD-FIXED — the
          * engine's NULL-bone path keeps lightRotation in world space
          * (func_8003F4DC's rot0 applied directly, no bone/camera matrix) */
@@ -20047,7 +20096,9 @@ int main(int argc, char **argv) {
          * lightRotation rides the GLB; the angle-distinction surface) */
         if (!g_userLightHasRot && sc.sh1x.hasUserLight) {
             g_userLightHasRot = 1;
+            g_userLightRotGlbDefault = 1;   /* W54: the unbiased default, overridable */
             g_userLightRot[0] = sc.sh1x.userLightRot[0];
+
             g_userLightRot[1] = sc.sh1x.userLightRot[1];
             g_userLightRot[2] = sc.sh1x.userLightRot[2];
         }
