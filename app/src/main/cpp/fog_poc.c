@@ -14231,8 +14231,9 @@ static void render_frame(Frame *fb, const Renderer *R, const CamPose *cam) {
             if (R->opts.ps1)
                 gte_snap_screen(&sx, &sy, R->enginePixScale, R->enginePixScaleY);
 
-            /* GTE: SZ = Q8 view depth (256/m); OTZ (stszotz) = SZ>>2 = 64/m */
-            int otz = (int)floorf(depth * 64.0f + 0.5f);
+            /* GTE: SZ = Q8 view depth (256/m); OTZ (stszotz) = SZ>>2 = 64/m;
+             * w10 (V44 D-2): stszotz is an arithmetic >>2 (truncate) — no +0.5 */
+            int otz = (int)floorf(depth * 64.0f);
             /* D_800C39A0 == 1 branch: prim = snowBase - (fog(OTZ) >> 2).
              * v4: snowBase = func_8003EDB8 = field_1C[isFlashlightOn].field_21.r
              * (the slot by flashlight BOOLEAN — day 48, night-off 16,
